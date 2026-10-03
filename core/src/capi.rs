@@ -21,6 +21,11 @@ pub type HengSession = u64; // 对应 heng.h 的 heng_session_t（uint64_t），
 pub const HENG_TRUE: c_int = 1;
 pub const HENG_FALSE: c_int = 0;
 
+/// 当前 C ABI 版本（v5：heng_hello / heng_process_key_ex）
+pub const HENG_ABI_VERSION: c_int = 5;
+/// 仍兼容的最低调用方 ABI（v4 起有 config API；更早调用方未验证）
+pub const HENG_MIN_ABI_VERSION: c_int = 4;
+
 // ---- 错误传递：最后一次错误的线程安全缓存 ----
 
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
@@ -116,6 +121,15 @@ impl HengStatus {
             is_full_shape: 0,
         }
     }
+}
+
+/// 与 heng.h 的 `HengHello` 一致（v5 新增）。纯值结构，无堆分配。
+#[repr(C)]
+pub struct HengHello {
+    pub data_size: c_int,
+    pub abi_version: c_int,
+    pub min_abi_version: c_int,
+    pub reserved: [u64; 2],
 }
 
 /// 拿一个 ContextSnapshot 填充调用方结构体；失败时保持全 NULL 并返回 FALSE。
@@ -256,13 +270,15 @@ pub extern "C" fn heng_describe() -> *const c_char {
     static DESCRIBE: LazyLock<CString> = LazyLock::new(|| {
         let json = serde_json::json!({
             "name": "heng-core",
-            "abi_version": 4,
+            "abi_version": HENG_ABI_VERSION,
+            "min_abi_version": HENG_MIN_ABI_VERSION,
             "version": env!("CARGO_PKG_VERSION"),
             "engine": "librime",
             "commands": [
                 "heng_create", "heng_destroy", "heng_version", "heng_describe",
+                "heng_hello",
                 "heng_start_session", "heng_end_session", "heng_set_session_owner",
-                "heng_process_key", "heng_simulate_key_sequence",
+                "heng_process_key", "heng_process_key_ex", "heng_simulate_key_sequence",
                 "heng_get_context", "heng_free_context",
                 "heng_commit_text", "heng_select_candidate_on_current_page",
                 "heng_highlight_candidate_on_current_page", "heng_change_page",
@@ -731,6 +747,100 @@ pub extern "C" fn heng_free_status(out: *mut HengStatus) {
             st.schema_name = ptr::null_mut();
         }
     }
+}
+
+// ---- v5：版本握手与热路径合并调用 ----
+
+/// 版本握手。client_abi_version 当前不校验（预留）。返回 TRUE=已填充。
+#[no_mangle]
+pub extern "C" fn heng_hello(client_abi_version: c_int, out: *mut HengHello) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        let _ = client_abi_version; // 预留：未来 core 收窄兼容范围时据此拒绝
+        if out.is_null() {
+            return HENG_FALSE;
+        }
+        unsafe {
+            (*out) = HengHello {
+                data_size: std::mem::size_of::<HengHello>() as c_int,
+                abi_version: HENG_ABI_VERSION,
+                min_abi_version: HENG_MIN_ABI_VERSION,
+                reserved: [0; 2],
+            };
+        }
+        HENG_TRUE
+    })
+}
+
+/// 热路径合并调用：process_key → commit_text → get_context 三合一，
+/// 单次跨进程往返。out_commit / out_ctx 均可为 NULL。
+#[no_mangle]
+pub extern "C" fn heng_process_key_ex(
+    session: HengSession,
+    keysym: c_int,
+    mask: c_int,
+    out_commit: *mut *mut c_char,
+    out_ctx: *mut HengContext,
+) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if session == 0 {
+            return HENG_FALSE;
+        }
+        if !out_commit.is_null() {
+            unsafe { *out_commit = ptr::null_mut() };
+        }
+        let engine = match engine() {
+            Ok(e) => e,
+            Err(e) => {
+                set_err(e);
+                return HENG_FALSE;
+            }
+        };
+        let Some(rime_id) = SESSIONS.rime_id(session) else {
+            set_err(format!("会话 {session} 不存在"));
+            return HENG_FALSE;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        // 1. 按键
+        let handled = match engine.process_key(rime_id, keysym, mask) {
+            Ok(h) => h,
+            Err(e) => {
+                set_err(e);
+                return HENG_FALSE;
+            }
+        };
+        // 2. 取走待上屏文本（消费语义）
+        if !out_commit.is_null() {
+            match engine.get_commit(rime_id) {
+                Ok(text) if !text.is_empty() => match CString::new(text) {
+                    Ok(c) => unsafe { *out_commit = c.into_raw() },
+                    Err(e) => {
+                        set_err(e);
+                        return HENG_FALSE;
+                    }
+                },
+                Ok(_) => {} // 无待上屏，*out_commit 保持 NULL
+                Err(e) => {
+                    set_err(e);
+                    return HENG_FALSE;
+                }
+            }
+        }
+        // 3. 组合串与候选快照
+        if !out_ctx.is_null() {
+            match engine.get_context(rime_id) {
+                Ok(snapshot) => {
+                    if fill_context(out_ctx, snapshot) != HENG_TRUE {
+                        return HENG_FALSE;
+                    }
+                }
+                Err(e) => {
+                    set_err(e);
+                    return HENG_FALSE;
+                }
+            }
+        }
+        handled as c_int
+    })
 }
 
 // ---- 配置读取（librime RimeConfig 直通；句柄 = RimeConfig 内部指针） ----

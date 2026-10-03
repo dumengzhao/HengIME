@@ -3,8 +3,8 @@
 //! 定位：与 C ABI 同源（都走 `global` 层），是「一份 IDL 两种绑定」中
 //! IPC 绑定的最简形态（JSON over HTTP）。仅监听 127.0.0.1，供前端与工具本地联调。
 //!
-//! 端点：
-//! - GET  /api/describe                        服务元数据
+//! 端点（除 /api/describe 外均须携带 token，见下方「鉴权」）：
+//! - GET  /api/describe                        服务元数据（免鉴权，供工具发现服务）
 //! - GET  /api/status                          引擎版本 + 已装方案
 //! - POST /api/sessions                        开会话  -> {"session": id}
 //! - DELETE /api/sessions/{id}                 关会话
@@ -18,15 +18,88 @@
 //! - POST /api/sessions/{id}/page              翻页    {backward}
 //! - POST /api/sessions/{id}/owner             绑定归属应用 {app_id}
 //! - POST /api/sessions/{id}/clear             清组合串
+//!
+//! 鉴权：服务承载全部击键与本机配置，任何本机进程不得未授权访问。
+//! token 来源：环境变量 HENG_TOKEN 优先；否则启动时生成 256 位随机值并写入
+//! `<HENG_RUNTIME>/token`（0600）。请求方以 `Authorization: Bearer <token>`
+//! 或 `X-Heng-Token: <token>` 头携带。
 
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 
-use axum::extract::Path;
+use axum::extract::{Path, Request};
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use crate::global::{engine, OP_LOCK, SESSIONS};
+
+static TOKEN: OnceLock<String> = OnceLock::new();
+
+/// 解析/生成本机 token。环境变量 HENG_TOKEN 优先，否则随机生成并落盘。
+fn resolve_token() -> String {
+    if let Ok(t) = std::env::var("HENG_TOKEN") {
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).expect("系统随机数源不可用");
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let path = crate::global::runtime_dir().join("token");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                let _ = f.write_all(hex.as_bytes());
+            }
+            Err(e) => eprintln!("警告：token 写入 {} 失败：{e}", path.display()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = std::fs::write(&path, &hex) {
+            eprintln!("警告：token 写入 {} 失败：{e}", path.display());
+        }
+    }
+    eprintln!("本机 token 已写入 {}", path.display());
+    hex
+}
+
+/// token 校验中间件：Bearer 头或 X-Heng-Token 头二选一。
+async fn require_token(req: Request, next: Next) -> Response {
+    let expected = TOKEN.get().map(String::as_str).unwrap_or_default();
+    let present = |v: Option<&axum::http::HeaderValue>| {
+        v.and_then(|v| v.to_str().ok())
+            .map_or(false, |s| !expected.is_empty() && s == expected)
+    };
+    let authorized = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map_or(false, |t| t == expected)
+        || present(req.headers().get("x-heng-token"));
+    if authorized {
+        next.run(req).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response()
+    }
+}
 
 fn err_msg(e: impl std::fmt::Display) -> Value {
     json!({ "error": e.to_string() })
@@ -36,6 +109,7 @@ async fn describe() -> Json<Value> {
     Json(json!({
         "name": "heng-server",
         "version": env!("CARGO_PKG_VERSION"),
+        "abi_version": crate::capi::HENG_ABI_VERSION,
         "engine": "librime",
         "listen": "127.0.0.1",
     }))
@@ -277,8 +351,11 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         eprintln!("引擎初始化失败: {e}");
         std::process::exit(1);
     }
-    let app = Router::new()
-        .route("/api/describe", get(describe))
+    TOKEN.get_or_init(resolve_token);
+
+    // describe 免鉴权（工具据此发现服务与 ABI 版本），其余端点全部要求 token
+    let public = Router::new().route("/api/describe", get(describe));
+    let protected = Router::new()
         .route("/api/status", get(status))
         .route("/api/sessions", post(create_session))
         .route("/api/sessions/{id}", delete(end_session))
@@ -291,7 +368,9 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
         .route("/api/sessions/{id}/highlight", post(highlight_candidate))
         .route("/api/sessions/{id}/page", post(change_page))
         .route("/api/sessions/{id}/owner", post(set_owner))
-        .route("/api/sessions/{id}/clear", post(clear));
+        .route("/api/sessions/{id}/clear", post(clear))
+        .layer(axum::middleware::from_fn(require_token));
+    let app = public.merge(protected);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;

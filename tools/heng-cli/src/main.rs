@@ -218,6 +218,15 @@ mod abi {
         pub reserved: [u64; 4],
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct HengHello {
+        pub data_size: c_int,
+        pub abi_version: c_int,
+        pub min_abi_version: c_int,
+        pub reserved: [u64; 2],
+    }
+
     extern "C" {
         pub fn heng_create(shared: *const c_char, user: *const c_char) -> c_int;
         pub fn heng_destroy();
@@ -267,6 +276,14 @@ mod abi {
         ) -> c_int;
         pub fn heng_config_next(iter: *mut HengConfigIterator) -> c_int;
         pub fn heng_config_end(iter: *mut HengConfigIterator);
+        pub fn heng_hello(client_abi_version: c_int, out: *mut HengHello) -> c_int;
+        pub fn heng_process_key_ex(
+            session: HengSession,
+            keysym: c_int,
+            mask: c_int,
+            out_commit: *mut *mut c_char,
+            out_ctx: *mut HengContext,
+        ) -> c_int;
         pub fn heng_free_string(s: *mut c_char);
         pub fn heng_free_context(out: *mut HengContext);
         pub fn heng_last_error() -> *const c_char;
@@ -296,6 +313,19 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     unsafe {
+        // 0. v5：版本握手（任何会话操作之前）
+        let mut hello = abi::HengHello {
+            data_size: 0,
+            abi_version: 0,
+            min_abi_version: 0,
+            reserved: [0; 2],
+        };
+        let rc = heng_hello(5, &mut hello);
+        check!("heng_hello 填充成功", rc == 1);
+        check!("hello.abi_version == 5", hello.abi_version == 5);
+        check!("hello.data_size > 0", hello.data_size > 0);
+        check!("min_abi_version <= abi_version", hello.min_abi_version <= hello.abi_version);
+
         // 1. 创建引擎
         let rc = heng_create(std::ptr::null(), std::ptr::null());
         check!("heng_create(NULL,NULL) == 0", rc == 0);
@@ -430,6 +460,41 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
             check!("clear 后 preedit 为空", preedit.is_empty());
             heng_free_context(&mut ctx2);
         }
+
+        // 6.5 v5：热路径合并调用（逐键 nihao + 空格，单调用取回 commit + context）
+        heng_clear(session);
+        let mut all_handled = true;
+        for k in [0x6e, 0x69, 0x68, 0x61, 0x6f] {
+            // n i h a o
+            let mut ctxk = abi::HengContext::zeroed();
+            let mut cm: *mut c_char = std::ptr::null_mut();
+            if heng_process_key_ex(session, k, 0, &mut cm, &mut ctxk) != 1 {
+                all_handled = false;
+                let ep = heng_last_error();
+                eprintln!(
+                    "        [debug] keysym {k:#x} 未处理：last_error = {}",
+                    if ep.is_null() { "(null)".into() } else { cstr(ep) }
+                );
+            }
+            if !cm.is_null() {
+                heng_free_string(cm);
+            }
+            heng_free_context(&mut ctxk);
+        }
+        let mut cm: *mut c_char = std::ptr::null_mut();
+        let mut ctxk = abi::HengContext::zeroed();
+        let h = heng_process_key_ex(session, 0x0020, 0, &mut cm, &mut ctxk);
+        check!("process_key_ex 逐键处理", all_handled && h == 1);
+        if !cm.is_null() {
+            let t = cstr(cm);
+            println!("        ex 上屏    = {t}");
+            check!("process_key_ex 单调用取回 commit", t == "你好");
+            heng_free_string(cm);
+        } else {
+            check!("process_key_ex 单调用取回 commit", false);
+        }
+        heng_free_context(&mut ctxk);
+        heng_clear(session);
 
         // 7. 关会话 + 错误路径
         heng_end_session(session);

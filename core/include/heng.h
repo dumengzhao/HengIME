@@ -147,6 +147,35 @@ HENG_API int heng_get_status(heng_session_t session, HengStatus* out);
 /* 释放 heng_get_status 填充的结构体。 */
 HENG_API void heng_free_status(HengStatus* out);
 
+/* ---- 版本握手与热路径合并调用（v5；增量追加，v4 及之前全部不变） ---- */
+
+/*
+ * 握手信息。纯值结构，无堆分配，无需专配释放。
+ * 调用方在任何会话操作前调用 heng_hello 一次，据 abi_version 决定
+ * 能否使用更高版本新增的函数/字段（data_size 校验语义不变）。
+ */
+typedef struct HengHello {
+    int      data_size;        /* sizeof(HengHello) */
+    int      abi_version;      /* core 当前 ABI 版本（v5 = 5） */
+    int      min_abi_version;  /* core 仍兼容的最低调用方 ABI */
+    uint64_t reserved[2];      /* 前向预留，必须全零初始化 */
+} HengHello;
+
+/* 版本握手。client_abi_version 传调用方编译时所依的 ABI 版本，core 侧当前不校验
+ * （预留：未来 core 放弃兼容旧 ABI 时据此拒绝服务）。返回 HENG_TRUE=已填充。 */
+HENG_API int heng_hello(int client_abi_version, HengHello* out);
+
+/*
+ * 热路径合并调用：处理一个按键并一次性取回待上屏文本与组合串候选快照，
+ * 替代 process_key → commit_text → get_context 的多次跨进程往返
+ * （Windows 命名管道下每次按键由 3 次 IPC 降为 1 次）。
+ * out_commit / out_ctx 均可传 NULL 表示不需要。
+ * 返回 HENG_TRUE=按键已处理；out_commit 采用消费语义（取后清空），
+ * 非 NULL 时用 heng_free_string 释放；out_ctx 非 NULL 时用 heng_free_context 释放。
+ */
+HENG_API int heng_process_key_ex(heng_session_t session, int keysym, int mask,
+                                 char** out_commit, HengContext* out_ctx);
+
 /* ---- 配置读取（v4；librime RimeConfig 直通） ----
  *
  * 用途：外壳加载 UI 样式（weasel.yaml 的 preset_color_schemes）与
