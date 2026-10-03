@@ -1,0 +1,8 @@
+[package]
+name = "heng-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+heng-core = { path = "../../core" }
+tokio = { version = "1", features = ["rt-multi-thread"] }

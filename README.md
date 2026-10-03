@@ -44,55 +44,47 @@ librime + 词库                    现成 ×0
 ```
 HengIME/
 ├── docs/
-│   └── ARCHITECTURE.md     架构方案 v2（含竞品对照、可借鉴清单、风险清单）
+│   ├── ARCHITECTURE.md     架构方案 v2（含竞品对照、可借鉴清单、风险清单）
+│   └── M0.5-*.md           决策门三问试验报告（薄壳化 / Slint / 前端差异）
 │
-├── core/                   计划中：Rust 统一能力模块
+├── core/                   Rust 统一能力模块（cdylib: heng_core.dll）
 │   ├── src/
-│   │   ├── engine/           librime 绑定与封装
-│   │   ├── config/           YAML 配置读写、校验、部署
-│   │   ├── dict/             用户词库、词频
-│   │   ├── sync/             跨端数据同步（含冲突合并）
-│   │   ├── clipboard/        跨端剪贴板
-│   │   ├── predict/          AI 预测（可插拔，不参与热路径）
-│   │   ├── server/           本地 HTTP 服务 + 本地 IPC
-│   │   └── state/            per-machine 状态（installation_id 等）
-│   ├── idl/heng.idl          唯一定义源，生成 C ABI 与 IPC 编解码
-│   └── include/heng.h        生成的 C ABI 头文件
+│   │   ├── engine/           librime FFI 绑定与封装（M0 已就绪）
+│   │   ├── capi.rs           版本化 C ABI（abi_version=3，23 个导出）
+│   │   └── server/           本地 HTTP 服务（127.0.0.1:9371）
+│   └── include/heng.h        C ABI 头文件（供各端外壳 include）
+│
+├── tools/
+│   └── heng-cli/           命令行校验器（version/cand/commit/bench/serve/abitest）
+│
+├── third_party/            预编译依赖与参考源码（gitignored，见 third_party/README.md）
+│   └── src/weasel/           小狼毫源码（M1 起：RimeWithWeasel 数据源已换 heng-core）
 │
 ├── settings-web/           计划中：设置界面（Web，五端共用）
 │
 ├── skins/                  计划中：皮肤
-│   ├── tokens.yaml           配色、圆角、间距、字体、候选数
-│   ├── *.svg                 矢量皮肤（各端共用）
-│   └── fcitx5/               由 tokens 生成的 fcitx5 ClassicUI 主题
 │
-├── shells/                 计划中：五端外壳
-│   ├── android/              Kotlin + JNI —— 参考实现，先做
+├── shells/                 计划中：五端外壳（Windows 走 Weasel 改造，见里程碑 M1）
+│   ├── android/              Kotlin + JNI
 │   ├── harmony/              ArkTS + NAPI
-│   ├── windows/              C++ TSF（薄），候选窗在 core 服务进程
+│   ├── windows/              Weasel 改造（TSF + 服务进程，命名管道 IPC）
 │   ├── macos/                ObjC/Swift，基于 Squirrel 改造
 │   └── linux/                Fcitx5 addon（+ 可选独立 UI 进程）
 │
-├── config-center/          计划中：配置中心
-│   ├── shared/                跨平台通用 YAML
-│   ├── platforms/             各端专属 UI 配置
-│   └── deploy.sh              分发脚本（仅桌面三端）
-│
-└── tools/
-    └── heng-cli/            计划中：命令行校验器
+└── config-center/          计划中：配置中心
 ```
 
 ## 里程碑
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| M0 | 地基：Rust 骨架 + librime C API 绑定 + 版本化 C ABI + heng-cli + 本地 HTTP | 未开始 |
-| M0.5 | **决策门**：薄壳化试验 · 跨端 GUI 工具包验证 · 前端行为差异清单 | 未开始 |
-| M1 | **Android 参考外壳**（关键：产出标准外壳实现） | 未开始 |
+| M0 | 地基：Rust 骨架 + librime C API 绑定 + 版本化 C ABI + heng-cli + 本地 HTTP | **完成（2026-09）**：abitest 28 项全过 · heng_core.dll 18 个导出经外部进程验证 · HTTP 全链路跑通 |
+| M0.5 | **决策门**：薄壳化试验 · 跨端 GUI 工具包验证 · 前端行为差异清单 | **完成并已裁决（2026-10-03）**：三问数据齐备（`docs/M0.5-*.md`），证据倒向路线 P；Windows 外壳裁决选 **A（Weasel 改造）** |
+| M1 | **Windows 外壳（Weasel 改造，路线 A 首站）**：Weasel 编译链 + core 数据源整体换血 + 真机打字验证 | **完成（2026-10-03）**：boost/MSVC 编译链闭环 · `RimeWithWeaselHandler` 全部 rime_api 调用替换为 heng_* C ABI · WeaselServer.exe 导入表验证换血成功 · 真机注册 TSF 后打字/候选窗/上屏全链路可用 · 修复上游高亮块溢出压序号问题（横竖排布局间距补偿） |
 | M2 | 设置界面与配置中心 | 未开始 |
 | M3 | 词库与数据同步 | 未开始 |
 | M4 | 鸿蒙外壳（交叉编译 librime + NAPI + InputMethodExtensionAbility） | 未开始 |
-| M5 | Windows 外壳（TSF 薄壳 + 服务进程候选窗 + 命名管道） | 未开始 |
+| M5 | Windows 外壳收尾（样式配置化、app_options、通知消息、诊断日志清理） | 未开始 |
 | M6 | macOS 外壳（基于 Squirrel 改造） | 未开始 |
 | M7 | Linux（Fcitx5 addon + ClassicUI SVG 主题） | 未开始 |
 | M8 | AI 预测（Keyman lexical model 式可插拔模块） | 未开始 |

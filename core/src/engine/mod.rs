@@ -1,0 +1,550 @@
+//! librime 的安全封装。
+//!
+//! 设计要点（对应 docs/ARCHITECTURE.md 第 10.2 节）：
+//! - librime 的 api 表进程内全局唯一（`rime_get_api` 幂等），`Engine` 直接持有引用
+//! - 字符串内存归 librime：读出后立即转 `String`，再用 `free_commit` / `free_context` 释放
+//! - 三段式异步初始化：`setup` → `initialize` → `start_maintenance` + `join_maintenance_thread`
+//! - **所有按键/取态操作以裸 `RimeSessionId` 为参数放在 `Engine` 上**：
+//!   C ABI 与 HTTP 层手里只有裸会话 ID（配合 `global::SESSIONS` 注册表），
+//!   `Session` 只是给纯 Rust 侧用的便利薄壳。
+
+mod rime_ffi;
+
+use std::ffi::{CStr, CString};
+use std::os::raw::c_void;
+use std::path::PathBuf;
+
+pub use rime_ffi::RimeSessionId;
+
+#[derive(Debug)]
+pub enum EngineError {
+    Io(std::io::Error),
+    ApiMissing(&'static str),
+    ApiCall(&'static str),
+    NoSession,
+    SessionNotFound(RimeSessionId),
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::Io(e) => write!(f, "IO 错误: {e}"),
+            EngineError::ApiMissing(name) => {
+                write!(f, "librime API 缺少 {name}（版本不兼容？）")
+            }
+            EngineError::ApiCall(name) => write!(f, "librime 调用 {name} 失败"),
+            EngineError::NoSession => write!(f, "创建会话失败"),
+            EngineError::SessionNotFound(id) => write!(f, "会话不存在: {id}"),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct EngineConfig {
+    pub shared_data_dir: Option<PathBuf>,
+    pub user_data_dir: PathBuf,
+    pub min_log_level: i32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Candidate {
+    pub text: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ContextSnapshot {
+    pub preedit: String,
+    pub cursor_pos: i32,
+    pub sel_start: i32,
+    pub sel_end: i32,
+    pub page_size: i32,
+    pub page_no: i32,
+    pub is_last_page: bool,
+    pub highlighted: i32,
+    pub select_keys: String,
+    pub candidates: Vec<Candidate>,
+    /// 选键标签（select_labels，librime v0.9.2+；缺省时调用方回退 select_keys/序号）
+    pub select_labels: Vec<String>,
+    pub commit_text_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct StatusSnapshot {
+    pub schema_id: String,
+    pub schema_name: String,
+    pub is_disabled: bool,
+    pub is_composing: bool,
+    pub is_ascii_mode: bool,
+    pub is_full_shape: bool,
+    pub is_simplified: bool,
+    pub is_traditional: bool,
+    pub is_ascii_punct: bool,
+}
+
+unsafe fn cstr_to_string(p: *const std::os::raw::c_char) -> Option<String> {
+    if p.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(p).to_string_lossy().into_owned())
+    }
+}
+
+unsafe extern "C" fn on_notify(
+    _context: *mut c_void,
+    _session: RimeSessionId,
+    message_type: *const std::os::raw::c_char,
+    message_value: *const std::os::raw::c_char,
+) {
+    let t = cstr_to_string(message_type).unwrap_or_default();
+    let v = cstr_to_string(message_value).unwrap_or_default();
+    eprintln!("[rime] {t}: {v}");
+}
+
+/// librime 引擎。进程内全局单例语义：创建多个 `Engine` 会重复初始化，M0 阶段约定每进程一个。
+///
+/// 线程安全：`api` 指向 librime 的进程级函数指针表（`rime_get_api` 幂等），跨线程共享安全；
+/// 但 librime 的会话操作本身不保证线程安全，调用方须串行化（见 `global::OP_LOCK`）。
+pub struct Engine {
+    api: *const rime_ffi::RimeApi,
+}
+
+unsafe impl Send for Engine {}
+unsafe impl Sync for Engine {}
+
+impl Engine {
+    pub fn new(config: EngineConfig) -> Result<Engine, EngineError> {
+        std::fs::create_dir_all(&config.user_data_dir).map_err(EngineError::Io)?;
+        if let Some(dir) = &config.shared_data_dir {
+            std::fs::create_dir_all(dir).map_err(EngineError::Io)?;
+        }
+
+        let api = unsafe { rime_ffi::rime_get_api() };
+        if api.is_null() {
+            return Err(EngineError::ApiMissing("rime_get_api"));
+        }
+        let api = unsafe { &*api };
+
+        // 函数可用性探测：data_size 版本化机制（借自 librime / Keyman Core 的手法）
+        fn need<'a, T>(opt: &'a Option<T>, name: &'static str) -> Result<&'a T, EngineError> {
+            opt.as_ref().ok_or(EngineError::ApiMissing(name))
+        }
+        let setup = need(&api.setup, "setup")?;
+        let set_notification_handler = need(&api.set_notification_handler, "set_notification_handler")?;
+        let initialize = need(&api.initialize, "initialize")?;
+        let start_maintenance = need(&api.start_maintenance, "start_maintenance")?;
+        let join_maintenance_thread = need(&api.join_maintenance_thread, "join_maintenance_thread")?;
+        let _create_session = need(&api.create_session, "create_session")?;
+
+        // CString 必须活过 setup 与 initialize 两次调用
+        let shared = config
+            .shared_data_dir
+            .as_ref()
+            .map(|p| CString::new(p.to_string_lossy().as_bytes()))
+            .transpose()
+            .map_err(|_| EngineError::ApiCall("shared_data_dir 含非法字符"))?;
+        let user = CString::new(config.user_data_dir.to_string_lossy().as_bytes())
+            .map_err(|_| EngineError::ApiCall("user_data_dir 含非法字符"))?;
+        let dist_name = CString::new("HengIME").unwrap();
+        let dist_code = CString::new("heng").unwrap();
+        let dist_ver = CString::new(env!("CARGO_PKG_VERSION")).unwrap();
+        let app_name = CString::new("rime.heng").unwrap();
+
+        let mut traits = rime_ffi::RimeTraits::zeroed();
+        traits.init_data_size();
+        traits.shared_data_dir = shared.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+        traits.user_data_dir = user.as_ptr();
+        traits.distribution_name = dist_name.as_ptr();
+        traits.distribution_code_name = dist_code.as_ptr();
+        traits.distribution_version = dist_ver.as_ptr();
+        traits.app_name = app_name.as_ptr();
+        traits.min_log_level = config.min_log_level;
+
+        unsafe {
+            setup(&mut traits);
+            set_notification_handler(Some(on_notify), std::ptr::null_mut());
+            initialize(&mut traits);
+            // full_check = TRUE：启动时检查配置/方案 mtime 变化并自动重新部署
+            start_maintenance(rime_ffi::TRUE);
+            join_maintenance_thread();
+        }
+
+        Ok(Engine {
+            api: api as *const rime_ffi::RimeApi,
+        })
+    }
+
+    fn api(&self) -> &rime_ffi::RimeApi {
+        unsafe { &*self.api }
+    }
+
+    pub fn create_session(&self) -> Result<Session<'_>, EngineError> {
+        let create = self
+            .api()
+            .create_session
+            .ok_or(EngineError::ApiMissing("create_session"))?;
+        let id = unsafe { create() };
+        if id == 0 {
+            return Err(EngineError::NoSession);
+        }
+        Ok(Session {
+            engine: self,
+            id,
+            closed: false,
+        })
+    }
+
+    /// 直接销毁一个 librime 会话（供会话注册表使用，不经过 [`Session`]）。
+    pub(crate) fn destroy_session(&self, id: RimeSessionId) {
+        if let Some(destroy) = self.api().destroy_session.as_ref() {
+            unsafe { destroy(id) };
+        }
+    }
+
+    pub fn version(&self) -> Option<String> {
+        let api = self.api();
+        let get_version = api.get_version.as_ref()?;
+        unsafe { cstr_to_string(get_version()) }
+    }
+
+    /// 进程退出前调用。调用后本进程内不得再使用任何 librime 接口。
+    pub fn finalize(&self) {
+        if let Some(finalize) = self.api().finalize.as_ref() {
+            unsafe { finalize() };
+        }
+    }
+
+    pub fn schema_list(&self) -> Vec<(String, String)> {
+        let api = self.api();
+        let (Some(get_list), Some(free_list)) =
+            (api.get_schema_list.as_ref(), api.free_schema_list.as_ref())
+        else {
+            return Vec::new();
+        };
+        unsafe {
+            let mut list = rime_ffi::RimeSchemaList {
+                size: 0,
+                list: std::ptr::null_mut(),
+            };
+            if get_list(&mut list) == rime_ffi::FALSE {
+                return Vec::new();
+            }
+            let mut out = Vec::with_capacity(list.size);
+            for i in 0..list.size {
+                let item = list.list.add(i);
+                let id = cstr_to_string((*item).schema_id).unwrap_or_default();
+                let name = cstr_to_string((*item).name).unwrap_or_default();
+                out.push((id, name));
+            }
+            free_list(&mut list);
+            out
+        }
+    }
+
+    // ---------- 以下为裸会话 ID 操作（C ABI / HTTP 层使用） ----------
+
+    pub fn process_key(
+        &self,
+        id: RimeSessionId,
+        keycode: std::os::raw::c_int,
+        modifier: std::os::raw::c_int,
+    ) -> Result<bool, EngineError> {
+        let process = self
+            .api()
+            .process_key
+            .ok_or(EngineError::ApiMissing("process_key"))?;
+        Ok(unsafe { process(id, keycode, modifier) == rime_ffi::TRUE })
+    }
+
+    pub fn simulate_key_sequence(
+        &self,
+        id: RimeSessionId,
+        key_sequence: &str,
+    ) -> Result<bool, EngineError> {
+        let simulate = self
+            .api()
+            .simulate_key_sequence
+            .ok_or(EngineError::ApiMissing("simulate_key_sequence"))?;
+        let seq = CString::new(key_sequence)
+            .map_err(|_| EngineError::ApiCall("按键序列含非法字符"))?;
+        Ok(unsafe { simulate(id, seq.as_ptr()) == rime_ffi::TRUE })
+    }
+
+    pub fn get_context(&self, id: RimeSessionId) -> Result<ContextSnapshot, EngineError> {
+        let api = self.api();
+        let get_context = api
+            .get_context
+            .ok_or(EngineError::ApiMissing("get_context"))?;
+        let free_context = api
+            .free_context
+            .ok_or(EngineError::ApiMissing("free_context"))?;
+        unsafe {
+            let mut ctx = rime_ffi::RimeContext::zeroed();
+            ctx.init_data_size();
+            if get_context(id, &mut ctx) == rime_ffi::FALSE {
+                free_context(&mut ctx);
+                return Err(EngineError::SessionNotFound(id));
+            }
+            let snapshot = Self::snapshot_context(&ctx);
+            free_context(&mut ctx);
+            Ok(snapshot)
+        }
+    }
+
+    /// 取回并消费已产生的上屏文本。空字符串表示本次调用无上屏内容。
+    pub fn get_commit(&self, id: RimeSessionId) -> Result<String, EngineError> {
+        let api = self.api();
+        let get_commit = api
+            .get_commit
+            .ok_or(EngineError::ApiMissing("get_commit"))?;
+        let free_commit = api
+            .free_commit
+            .ok_or(EngineError::ApiMissing("free_commit"))?;
+        unsafe {
+            let mut commit = rime_ffi::RimeCommit::zeroed();
+            commit.init_data_size();
+            if get_commit(id, &mut commit) == rime_ffi::FALSE {
+                free_commit(&mut commit);
+                return Ok(String::new());
+            }
+            let text = cstr_to_string(commit.text).unwrap_or_default();
+            free_commit(&mut commit);
+            Ok(text)
+        }
+    }
+
+    pub fn get_status(&self, id: RimeSessionId) -> Result<StatusSnapshot, EngineError> {
+        let api = self.api();
+        let get_status = api
+            .get_status
+            .ok_or(EngineError::ApiMissing("get_status"))?;
+        let free_status = api
+            .free_status
+            .ok_or(EngineError::ApiMissing("free_status"))?;
+        unsafe {
+            let mut st = rime_ffi::RimeStatus::zeroed();
+            st.init_data_size();
+            if get_status(id, &mut st) == rime_ffi::FALSE {
+                free_status(&mut st);
+                return Err(EngineError::SessionNotFound(id));
+            }
+            let snapshot = StatusSnapshot {
+                schema_id: cstr_to_string(st.schema_id).unwrap_or_default(),
+                schema_name: cstr_to_string(st.schema_name).unwrap_or_default(),
+                is_disabled: st.is_disabled != rime_ffi::FALSE,
+                is_composing: st.is_composing != rime_ffi::FALSE,
+                is_ascii_mode: st.is_ascii_mode != rime_ffi::FALSE,
+                is_full_shape: st.is_full_shape != rime_ffi::FALSE,
+                is_simplified: st.is_simplified != rime_ffi::FALSE,
+                is_traditional: st.is_traditional != rime_ffi::FALSE,
+                is_ascii_punct: st.is_ascii_punct != rime_ffi::FALSE,
+            };
+            free_status(&mut st);
+            Ok(snapshot)
+        }
+    }
+
+    pub fn clear_composition(&self, id: RimeSessionId) -> Result<(), EngineError> {
+        let clear = self
+            .api()
+            .clear_composition
+            .ok_or(EngineError::ApiMissing("clear_composition"))?;
+        unsafe { clear(id) };
+        Ok(())
+    }
+
+    /// 在当前页直接选中第 `index` 个候选。返回 Ok(false) 表示未选中（越界/无候选）。
+    pub fn select_candidate_on_current_page(
+        &self,
+        id: RimeSessionId,
+        index: usize,
+    ) -> Result<bool, EngineError> {
+        let select = self
+            .api()
+            .select_candidate_on_current_page
+            .ok_or(EngineError::ApiMissing("select_candidate_on_current_page"))?;
+        Ok(unsafe { select(id, index) == rime_ffi::TRUE })
+    }
+
+    /// 高亮当前页第 `index` 个候选（不提交；候选窗移动光标用）。
+    pub fn highlight_candidate_on_current_page(
+        &self,
+        id: RimeSessionId,
+        index: usize,
+    ) -> Result<bool, EngineError> {
+        let highlight = self
+            .api()
+            .highlight_candidate_on_current_page
+            .ok_or(EngineError::ApiMissing("highlight_candidate_on_current_page"))?;
+        Ok(unsafe { highlight(id, index) == rime_ffi::TRUE })
+    }
+
+    /// 高亮全局候选序号（跨页，librime 内部换页）。
+    pub fn highlight_candidate(
+        &self,
+        id: RimeSessionId,
+        index: usize,
+    ) -> Result<bool, EngineError> {
+        let highlight = self
+            .api()
+            .highlight_candidate
+            .ok_or(EngineError::ApiMissing("highlight_candidate"))?;
+        Ok(unsafe { highlight(id, index) == rime_ffi::TRUE })
+    }
+
+    /// 翻页（backward = true 向前）。
+    pub fn change_page(&self, id: RimeSessionId, backward: bool) -> Result<bool, EngineError> {
+        let change = self
+            .api()
+            .change_page
+            .ok_or(EngineError::ApiMissing("change_page"))?;
+        Ok(unsafe { change(id, backward.into()) == rime_ffi::TRUE })
+    }
+
+    /// 设置会话选项（如 ascii_mode / inline_preedit / vim_mode）。
+    pub fn set_option(&self, id: RimeSessionId, option: &str, value: bool) -> Result<(), EngineError> {
+        let set = self
+            .api()
+            .set_option
+            .ok_or(EngineError::ApiMissing("set_option"))?;
+        let name =
+            CString::new(option).map_err(|_| EngineError::ApiCall("选项名含非法字符"))?;
+        unsafe { set(id, name.as_ptr(), value.into()) };
+        Ok(())
+    }
+
+    /// 读取会话选项。返回 Ok(None) 表示 librime API 不可用或调用失败。
+    pub fn get_option(&self, id: RimeSessionId, option: &str) -> Result<bool, EngineError> {
+        let get = self
+            .api()
+            .get_option
+            .ok_or(EngineError::ApiMissing("get_option"))?;
+        let name =
+            CString::new(option).map_err(|_| EngineError::ApiCall("选项名含非法字符"))?;
+        Ok(unsafe { get(id, name.as_ptr()) != rime_ffi::FALSE })
+    }
+
+    /// 提交当前组合串（上屏原始输入或已转换文本）。返回是否产生了提交。
+    pub fn commit_composition(&self, id: RimeSessionId) -> Result<bool, EngineError> {
+        let commit = self
+            .api()
+            .commit_composition
+            .ok_or(EngineError::ApiMissing("commit_composition"))?;
+        Ok(unsafe { commit(id) == rime_ffi::TRUE })
+    }
+
+    /// 从零化的 `RimeContext` 提取快照（get_context 成功后调用）。
+    ///
+    /// # Safety
+    /// `ctx` 必须是刚被 `get_context` 填充过的合法引用。
+    unsafe fn snapshot_context(ctx: &rime_ffi::RimeContext) -> ContextSnapshot {
+        let composition = &ctx.composition;
+        let menu = &ctx.menu;
+
+        let mut candidates = Vec::new();
+        if !menu.candidates.is_null() {
+            for i in 0..menu.num_candidates as usize {
+                let c = menu.candidates.add(i);
+                candidates.push(Candidate {
+                    text: cstr_to_string((*c).text).unwrap_or_default(),
+                    comment: cstr_to_string((*c).comment),
+                });
+            }
+        }
+
+        // 等价 RIME_STRUCT_HAS_MEMBER(var, select_labels) && select_labels：
+        // data_size 覆盖到该成员偏移且指针非空时才可读（librime v0.9.2+）
+        let labels_end =
+            std::mem::size_of::<std::os::raw::c_int>() + ctx.data_size.max(0) as usize;
+        let has_labels = labels_end > std::mem::offset_of!(rime_ffi::RimeContext, select_labels)
+            && !ctx.select_labels.is_null();
+        let mut select_labels = Vec::new();
+        if has_labels && menu.num_candidates > 0 {
+            for i in 0..menu.num_candidates as usize {
+                let label = ctx.select_labels.add(i);
+                select_labels.push(cstr_to_string(*label).unwrap_or_default());
+            }
+        }
+
+        ContextSnapshot {
+            preedit: cstr_to_string(composition.preedit).unwrap_or_default(),
+            cursor_pos: composition.cursor_pos,
+            sel_start: composition.sel_start,
+            sel_end: composition.sel_end,
+            page_size: menu.page_size,
+            page_no: menu.page_no,
+            is_last_page: menu.is_last_page != rime_ffi::FALSE,
+            highlighted: menu.highlighted_candidate_index,
+            select_keys: cstr_to_string(menu.select_keys).unwrap_or_default(),
+            candidates,
+            select_labels,
+            commit_text_preview: cstr_to_string(ctx.commit_text_preview),
+        }
+    }
+}
+
+/// 输入会话。librime 的会话持有组合串与候选状态。
+///
+/// 纯 Rust 侧的便利薄壳：所有实际操作委托给 [`Engine`] 的裸 ID 方法。
+pub struct Session<'e> {
+    engine: &'e Engine,
+    id: RimeSessionId,
+    closed: bool,
+}
+
+impl Session<'_> {
+    /// 本会话在 librime 内部的裸会话 ID。
+    pub fn rime_id(&self) -> RimeSessionId {
+        self.id
+    }
+
+    /// 消费会话但**不销毁** librime 会话，交出裸 ID（供会话注册表接管）。
+    pub fn into_raw(mut self) -> RimeSessionId {
+        self.closed = true; // Drop 不再销毁
+        self.id
+    }
+
+    /// 模拟一段按键序列，如 `nihao`、`nihao{space}`、`abc{BackSpace}d`。
+    /// 返回 False 表示序列中有按键未被处理。
+    pub fn simulate(&self, key_sequence: &str) -> bool {
+        self.engine
+            .simulate_key_sequence(self.id, key_sequence)
+            .unwrap_or(false)
+    }
+
+    pub fn context(&self) -> Option<ContextSnapshot> {
+        self.engine.get_context(self.id).ok()
+    }
+
+    pub fn commit_text(&self) -> Option<String> {
+        match self.engine.get_commit(self.id) {
+            Ok(text) if !text.is_empty() => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn status(&self) -> Option<StatusSnapshot> {
+        self.engine.get_status(self.id).ok()
+    }
+
+    pub fn clear(&self) {
+        let _ = self.engine.clear_composition(self.id);
+    }
+
+    pub fn select_on_current_page(&self, index: usize) -> bool {
+        self.engine
+            .select_candidate_on_current_page(self.id, index)
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        if !self.closed {
+            self.engine.destroy_session(self.id);
+            self.closed = true;
+        }
+    }
+}
