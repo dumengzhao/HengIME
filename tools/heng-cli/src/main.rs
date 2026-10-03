@@ -207,6 +207,17 @@ mod abi {
         }
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct HengConfigIterator {
+        pub list: *mut std::os::raw::c_void,
+        pub map: *mut std::os::raw::c_void,
+        pub index: c_int,
+        pub key: *const c_char,
+        pub path: *const c_char,
+        pub reserved: [u64; 4],
+    }
+
     extern "C" {
         pub fn heng_create(shared: *const c_char, user: *const c_char) -> c_int;
         pub fn heng_destroy();
@@ -231,6 +242,31 @@ mod abi {
         pub fn heng_get_option(session: HengSession, option: *const c_char) -> c_int;
         pub fn heng_get_status(session: HengSession, out: *mut HengStatus) -> c_int;
         pub fn heng_free_status(out: *mut HengStatus);
+        pub fn heng_config_open(config_id: *const c_char) -> *mut std::os::raw::c_void;
+        pub fn heng_config_close(config: *mut std::os::raw::c_void);
+        pub fn heng_config_get_string(
+            config: *mut std::os::raw::c_void,
+            key: *const c_char,
+            buf: *mut c_char,
+            buf_len: c_int,
+        ) -> c_int;
+        pub fn heng_config_get_int(
+            config: *mut std::os::raw::c_void,
+            key: *const c_char,
+            out: *mut c_int,
+        ) -> c_int;
+        pub fn heng_config_get_bool(
+            config: *mut std::os::raw::c_void,
+            key: *const c_char,
+            out: *mut c_int,
+        ) -> c_int;
+        pub fn heng_config_begin_map(
+            config: *mut std::os::raw::c_void,
+            key: *const c_char,
+            iter: *mut HengConfigIterator,
+        ) -> c_int;
+        pub fn heng_config_next(iter: *mut HengConfigIterator) -> c_int;
+        pub fn heng_config_end(iter: *mut HengConfigIterator);
         pub fn heng_free_string(s: *mut c_char);
         pub fn heng_free_context(out: *mut HengContext);
         pub fn heng_last_error() -> *const c_char;
@@ -239,7 +275,7 @@ mod abi {
 
 fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
     use std::ffi::{CStr, CString};
-    use std::os::raw::c_char;
+    use std::os::raw::{c_char, c_int};
 
     use abi::*;
 
@@ -401,6 +437,78 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
         check!("已关会话操作返回 FALSE", ghost == 0);
         let err = heng_last_error();
         check!("heng_last_error 非空", !err.is_null());
+
+        // 7.5 v4：config API（weasel.yaml 样式通道，shared_data_dir 须含 weasel.yaml）
+        let weasel_id = CString::new("weasel").unwrap();
+        let key_scheme = CString::new("style/color_scheme").unwrap();
+        let cfg = heng_config_open(weasel_id.as_ptr());
+        check!("config_open(weasel) 非空", !cfg.is_null());
+        if !cfg.is_null() {
+            let mut buf = [0u8; 256];
+            let n = heng_config_get_string(cfg, key_scheme.as_ptr(),
+                                           buf.as_mut_ptr() as *mut c_char, 256);
+            let scheme = if n > 0 && (n as usize) < 256 {
+                String::from_utf8_lossy(&buf[..n as usize]).into_owned()
+            } else {
+                String::new()
+            };
+            println!("        color_scheme = {scheme}");
+            check!("style/color_scheme 命中", !scheme.is_empty());
+
+            // 缓冲不足语义：len+1 > buf_len 时返回所需长度且不写入
+            let mut tiny = [0u8; 4];
+            let need = heng_config_get_string(cfg, key_scheme.as_ptr(),
+                                              tiny.as_mut_ptr() as *mut c_char, 4);
+            check!("缓冲不足返回所需长度", need as usize == scheme.len() + 1);
+
+            let key_font = CString::new("style/font_point").unwrap();
+            let mut font_point: c_int = 0;
+            let hit = heng_config_get_int(cfg, key_font.as_ptr(), &mut font_point);
+            check!("style/font_point 命中", hit == 1 && font_point > 0);
+            println!("        font_point = {font_point}");
+
+            let key_inline = CString::new("style/inline_preedit").unwrap();
+            let mut inline_val: c_int = -1;
+            let hit = heng_config_get_bool(cfg, key_inline.as_ptr(), &mut inline_val);
+            check!("style/inline_preedit 命中", hit == 1 && (inline_val == 0 || inline_val == 1));
+
+            // 遍历 preset_color_schemes（雾凇 weasel.yaml 38+ 方案）
+            let key_schemes = CString::new("preset_color_schemes").unwrap();
+            let mut iter = abi::HengConfigIterator {
+                list: std::ptr::null_mut(),
+                map: std::ptr::null_mut(),
+                index: 0,
+                key: std::ptr::null(),
+                path: std::ptr::null(),
+                reserved: [0; 4],
+            };
+            let mut scheme_count = 0usize;
+            if heng_config_begin_map(cfg, key_schemes.as_ptr(), &mut iter) == 1 {
+                loop {
+                    if heng_config_next(&mut iter) != 1 {
+                        break;
+                    }
+                    scheme_count += 1;
+                }
+                heng_config_end(&mut iter);
+            }
+            println!("        配色方案数 = {scheme_count}");
+            check!("preset_color_schemes >= 30", scheme_count >= 30);
+            heng_config_close(cfg);
+        }
+
+        // 不存在的配置：librime ConfigLoader 返回空 config（非 NULL），读任何键都未命中
+        let nope = CString::new("no_such_config_xyz").unwrap();
+        let cfg2 = heng_config_open(nope.as_ptr());
+        if !cfg2.is_null() {
+            let mut buf = [0u8; 64];
+            let n = heng_config_get_string(cfg2, key_scheme.as_ptr(),
+                                           buf.as_mut_ptr() as *mut c_char, 64);
+            check!("不存在 config 读键未命中", n == 0);
+            heng_config_close(cfg2);
+        } else {
+            check!("不存在 config 读键未命中", true);
+        }
 
         // 8. 销毁
         heng_destroy();

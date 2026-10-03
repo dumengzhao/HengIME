@@ -9,7 +9,7 @@
 //! M0 约束：每进程一个引擎；`heng_destroy` 之后的 librime 调用属未定义行为。
 
 use std::ffi::CString;
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::{LazyLock, Mutex};
@@ -256,7 +256,7 @@ pub extern "C" fn heng_describe() -> *const c_char {
     static DESCRIBE: LazyLock<CString> = LazyLock::new(|| {
         let json = serde_json::json!({
             "name": "heng-core",
-            "abi_version": 3,
+            "abi_version": 4,
             "version": env!("CARGO_PKG_VERSION"),
             "engine": "librime",
             "commands": [
@@ -268,6 +268,9 @@ pub extern "C" fn heng_describe() -> *const c_char {
                 "heng_highlight_candidate_on_current_page", "heng_change_page",
                 "heng_commit_composition", "heng_set_option", "heng_get_option",
                 "heng_get_status", "heng_free_status",
+                "heng_config_open", "heng_config_close",
+                "heng_config_get_string", "heng_config_get_int", "heng_config_get_bool",
+                "heng_config_begin_map", "heng_config_next", "heng_config_end",
                 "heng_clear", "heng_free_string", "heng_last_error"
             ]
         });
@@ -728,6 +731,209 @@ pub extern "C" fn heng_free_status(out: *mut HengStatus) {
             st.schema_name = ptr::null_mut();
         }
     }
+}
+
+// ---- 配置读取（librime RimeConfig 直通；句柄 = RimeConfig 内部指针） ----
+
+/// 与 librime `RimeConfigIterator` 二进制兼容（前 5 字段同序同型），
+/// 尾部 reserved 供前向扩展；key/path 指向 librime 内部内存，close/end 前有效。
+#[repr(C)]
+pub struct HengConfigIterator {
+    pub list: *mut c_void,
+    pub map: *mut c_void,
+    pub index: c_int,
+    pub key: *const c_char,
+    pub path: *const c_char,
+    pub reserved: [u64; 4],
+}
+
+/// 打开配置（如 "weasel"、"default"）。返回句柄，NULL 失败（引擎未初始化或配置不存在）。
+#[no_mangle]
+pub extern "C" fn heng_config_open(config_id: *const c_char) -> *mut c_void {
+    ffi_guard!(ptr::null_mut(), {
+        if let Err(e) = engine() {
+            set_err(e);
+            return ptr::null_mut();
+        }
+        let Some(id) = (unsafe { cstr_to_string(config_id) }) else {
+            return ptr::null_mut();
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        match engine().unwrap().config_open(&id) {
+            Ok(config) => config.ptr,
+            Err(e) => {
+                set_err(e);
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// 关闭配置。之后句柄失效。
+#[no_mangle]
+pub extern "C" fn heng_config_close(config: *mut c_void) {
+    ffi_guard!((), {
+        if config.is_null() {
+            return;
+        }
+        if let Ok(engine) = engine() {
+            let _guard = crate::global::OP_LOCK.lock().unwrap();
+            let mut cfg = crate::engine::RimeConfig { ptr: config };
+            engine.config_close(&mut cfg);
+        }
+    })
+}
+
+/// 读字符串。
+/// 返回：>0 且 < buf_len = 已写入 buf 的字节数（不含 NUL）；
+///       > buf_len = 键存在但缓冲不足（未写入，返回所需长度含 NUL）；
+///       0 = 键不存在 / 参数无效。
+#[no_mangle]
+pub extern "C" fn heng_config_get_string(
+    config: *mut c_void,
+    key: *const c_char,
+    buf: *mut c_char,
+    buf_len: c_int,
+) -> c_int {
+    ffi_guard!(0, {
+        if config.is_null() || key.is_null() || buf_len <= 0 {
+            return 0;
+        }
+        let Ok(engine) = engine() else {
+            return 0;
+        };
+        let Some(k) = (unsafe { cstr_to_string(key) }) else {
+            return 0;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        let cfg = crate::engine::RimeConfig { ptr: config };
+        let mut tmp = vec![0u8; buf_len as usize];
+        match engine.config_get_string(&cfg, &k, &mut tmp) {
+            // 缓冲足够（含 NUL 后仍放得下）：tmp 已填充，拷给调用方
+            Some(len) if (len as c_int) < buf_len => {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, len + 1);
+                }
+                len as c_int
+            }
+            // 键存在但缓冲不足：不写入，返回所需长度（含 NUL）
+            Some(len) => (len + 1) as c_int,
+            None => 0,
+        }
+    })
+}
+
+/// 读整数。返回 1 命中（*out 已填），0 未命中 / 参数无效。
+#[no_mangle]
+pub extern "C" fn heng_config_get_int(
+    config: *mut c_void,
+    key: *const c_char,
+    out: *mut c_int,
+) -> c_int {
+    ffi_guard!(0, {
+        if config.is_null() || key.is_null() || out.is_null() {
+            return 0;
+        }
+        let Ok(engine) = engine() else {
+            return 0;
+        };
+        let Some(k) = (unsafe { cstr_to_string(key) }) else {
+            return 0;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        let cfg = crate::engine::RimeConfig { ptr: config };
+        match engine.config_get_int(&cfg, &k) {
+            Some(v) => unsafe {
+                *out = v;
+                1
+            },
+            None => 0,
+        }
+    })
+}
+
+/// 读布尔。返回 1 命中（*out 已填 0/1），0 未命中 / 参数无效。
+#[no_mangle]
+pub extern "C" fn heng_config_get_bool(
+    config: *mut c_void,
+    key: *const c_char,
+    out: *mut c_int,
+) -> c_int {
+    ffi_guard!(0, {
+        if config.is_null() || key.is_null() || out.is_null() {
+            return 0;
+        }
+        let Ok(engine) = engine() else {
+            return 0;
+        };
+        let Some(k) = (unsafe { cstr_to_string(key) }) else {
+            return 0;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        let cfg = crate::engine::RimeConfig { ptr: config };
+        match engine.config_get_bool(&cfg, &k) {
+            Some(v) => unsafe {
+                *out = v as c_int;
+                1
+            },
+            None => 0,
+        }
+    })
+}
+
+/// 开始遍历 `key` 下直属子键（map）。返回 1 成功（iter 已初始化），0 失败。
+#[no_mangle]
+pub extern "C" fn heng_config_begin_map(
+    config: *mut c_void,
+    key: *const c_char,
+    iter: *mut HengConfigIterator,
+) -> c_int {
+    ffi_guard!(0, {
+        if config.is_null() || key.is_null() || iter.is_null() {
+            return 0;
+        }
+        let Ok(engine) = engine() else {
+            return 0;
+        };
+        let Some(k) = (unsafe { cstr_to_string(key) }) else {
+            return 0;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        let cfg = crate::engine::RimeConfig { ptr: config };
+        let rime_iter = iter as *mut crate::engine::RimeConfigIterator;
+        unsafe { engine.config_begin_map(&cfg, &k, rime_iter) as c_int }
+    })
+}
+
+/// 遍历下一项。返回 1 有项（iter.key/iter.path 可读），0 结束。
+#[no_mangle]
+pub extern "C" fn heng_config_next(iter: *mut HengConfigIterator) -> c_int {
+    ffi_guard!(0, {
+        if iter.is_null() {
+            return 0;
+        }
+        let Ok(engine) = engine() else {
+            return 0;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        let rime_iter = iter as *mut crate::engine::RimeConfigIterator;
+        unsafe { engine.config_next(rime_iter) as c_int }
+    })
+}
+
+/// 结束遍历（释放迭代器资源）。
+#[no_mangle]
+pub extern "C" fn heng_config_end(iter: *mut HengConfigIterator) {
+    ffi_guard!((), {
+        if iter.is_null() {
+            return;
+        }
+        if let Ok(engine) = engine() {
+            let _guard = crate::global::OP_LOCK.lock().unwrap();
+            let rime_iter = iter as *mut crate::engine::RimeConfigIterator;
+            unsafe { engine.config_end(rime_iter) };
+        }
+    })
 }
 
 // ---- 内存释放 ----

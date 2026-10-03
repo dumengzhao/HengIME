@@ -147,6 +147,57 @@ HENG_API int heng_get_status(heng_session_t session, HengStatus* out);
 /* 释放 heng_get_status 填充的结构体。 */
 HENG_API void heng_free_status(HengStatus* out);
 
+/* ---- 配置读取（v4；librime RimeConfig 直通） ----
+ *
+ * 用途：外壳加载 UI 样式（weasel.yaml 的 preset_color_schemes）与
+ * app_options（default.yaml）等部署配置。句柄 0/NULL 表示无效。
+ * 所有调用应从同一线程发出（与 heng 会话操作一致）。
+ */
+
+/* 遍历器：前 5 字段与 librime RimeConfigIterator 二进制兼容；
+ * key/path 指向 librime 内部内存，heng_config_end/next 前有效。 */
+typedef struct HengConfigIterator {
+    void* list;
+    void* map;
+    int   index;
+    const char* key;
+    const char* path;
+    uint64_t reserved[4];   /* 前向预留，必须全零初始化 */
+} HengConfigIterator;
+
+/* 配置句柄（librime RimeConfig 内部指针直通）；NULL 表示无效。 */
+typedef void* heng_config_t;
+
+/* 打开配置（如 "weasel"、"default"）。返回句柄，NULL 失败。 */
+HENG_API heng_config_t heng_config_open(const char* config_id);
+
+/* 关闭配置。之后句柄失效。 */
+HENG_API void heng_config_close(heng_config_t config);
+
+/* 读字符串。
+ * 返回 >0 且 < buf_len：已写入 buf 的字节数（不含 NUL）；
+ * 返回 > buf_len：键存在但缓冲不足（未写入；返回所需长度含 NUL）；
+ * 返回 0：键不存在或参数无效。 */
+HENG_API int heng_config_get_string(heng_config_t config, const char* key,
+                                    char* buf, int buf_len);
+
+/* 读整数。返回 HENG_TRUE=命中（*out 已填），HENG_FALSE=未命中。 */
+HENG_API int heng_config_get_int(heng_config_t config, const char* key, int* out);
+
+/* 读布尔。返回 HENG_TRUE=命中（*out 已填 0/1），HENG_FALSE=未命中。 */
+HENG_API int heng_config_get_bool(heng_config_t config, const char* key, int* out);
+
+/* 开始遍历 key 下直属子键（map）。返回 HENG_TRUE=成功（iter 已初始化）。
+ * iter 须由调用方分配并全零初始化。 */
+HENG_API int heng_config_begin_map(heng_config_t config, const char* key,
+                                   HengConfigIterator* iter);
+
+/* 遍历下一项。返回 HENG_TRUE=有项（iter.key/iter.path 可读）。 */
+HENG_API int heng_config_next(HengConfigIterator* iter);
+
+/* 结束遍历，释放迭代器资源。 */
+HENG_API void heng_config_end(HengConfigIterator* iter);
+
 /* ---- 内存释放 ---- */
 
 HENG_API void heng_free_string(char* s);

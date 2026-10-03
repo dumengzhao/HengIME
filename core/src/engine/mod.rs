@@ -10,6 +10,8 @@
 
 mod rime_ffi;
 
+pub(crate) use rime_ffi::{RimeConfig, RimeConfigIterator};
+
 use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
 use std::path::PathBuf;
@@ -169,6 +171,16 @@ impl Engine {
             // full_check = TRUE：启动时检查配置/方案 mtime 变化并自动重新部署
             start_maintenance(rime_ffi::TRUE);
             join_maintenance_thread();
+        }
+
+        // 对齐官方 WeaselDeployer（Configurator.cpp: deploy_config_file("weasel.yaml")）：
+        // librime 的 "config" 组件只读 staging 目录，标准部署只处理 default.yaml 与
+        // 各方案，外壳样式配置 weasel.yaml 必须显式编译进 staging 才能被
+        // config_open("weasel") 读到。shared 目录无此文件时失败返回 False，无害。
+        if let Some(deploy_config_file) = api.deploy_config_file.as_ref() {
+            let name = CString::new("weasel.yaml").unwrap();
+            let version_key = CString::new("config_version").unwrap();
+            unsafe { deploy_config_file(name.as_ptr(), version_key.as_ptr()) };
         }
 
         Ok(Engine {
@@ -424,6 +436,116 @@ impl Engine {
         let name =
             CString::new(option).map_err(|_| EngineError::ApiCall("选项名含非法字符"))?;
         Ok(unsafe { get(id, name.as_ptr()) != rime_ffi::FALSE })
+    }
+
+    // ---------- 配置读取（librime RimeConfig 封装，供外壳加载样式/app_options） ----------
+    //
+    // 句柄语义：`RimeConfig.ptr` 直接透传给调用方（heng_config_t），
+    // open/close/get 之间的句柄必须配对使用；librime 会校验内部有效性。
+    // 所有调用与 librime 部署线程共享全局状态，须在 OP_LOCK 下执行（capi 层负责）。
+
+    /// 打开一个已部署/原始配置（如 "weasel"、"default"）。失败返回全零 RimeConfig。
+    pub fn config_open(&self, config_id: &str) -> Result<rime_ffi::RimeConfig, EngineError> {
+        let open = self
+            .api()
+            .config_open
+            .ok_or(EngineError::ApiMissing("config_open"))?;
+        let id =
+            CString::new(config_id).map_err(|_| EngineError::ApiCall("config_id 含非法字符"))?;
+        let mut config = rime_ffi::RimeConfig {
+            ptr: std::ptr::null_mut(),
+        };
+        let ok = unsafe { open(id.as_ptr(), &mut config) == rime_ffi::TRUE };
+        if ok {
+            Ok(config)
+        } else {
+            Err(EngineError::ApiCall("config_open"))
+        }
+    }
+
+    /// 关闭配置并释放 librime 侧资源。
+    pub fn config_close(&self, config: &mut rime_ffi::RimeConfig) {
+        if let Some(close) = self.api().config_close.as_ref() {
+            unsafe { close(config) };
+        }
+        config.ptr = std::ptr::null_mut();
+    }
+
+    /// 读字符串。返回 Some(len)：buf 足够时已写入并含 NUL；buf 不足时仅返回所需长度（len+1）。
+    pub fn config_get_string(
+        &self,
+        config: &rime_ffi::RimeConfig,
+        key: &str,
+        buf: &mut [u8],
+    ) -> Option<usize> {
+        let get_cstr = self.api().config_get_cstring.as_ref()?;
+        let k = CString::new(key).ok()?;
+        unsafe {
+            let p = get_cstr(config as *const _ as *mut _, k.as_ptr());
+            if p.is_null() {
+                return None;
+            }
+            let len = CStr::from_ptr(p).count_bytes();
+            if buf.len() > len {
+                std::ptr::copy_nonoverlapping(p as *const u8, buf.as_mut_ptr(), len + 1);
+            }
+            Some(len)
+        }
+    }
+
+    /// 读整数。None = 键不存在。
+    pub fn config_get_int(&self, config: &rime_ffi::RimeConfig, key: &str) -> Option<i32> {
+        let get = self.api().config_get_int.as_ref()?;
+        let k = CString::new(key).ok()?;
+        let mut value: std::os::raw::c_int = 0;
+        let ok = unsafe { get(config as *const _ as *mut _, k.as_ptr(), &mut value) };
+        (ok == rime_ffi::TRUE).then_some(value)
+    }
+
+    /// 读布尔。None = 键不存在。
+    pub fn config_get_bool(&self, config: &rime_ffi::RimeConfig, key: &str) -> Option<bool> {
+        let get = self.api().config_get_bool.as_ref()?;
+        let k = CString::new(key).ok()?;
+        let mut value: rime_ffi::Bool = 0;
+        let ok = unsafe { get(config as *const _ as *mut _, k.as_ptr(), &mut value) };
+        (ok == rime_ffi::TRUE).then_some(value != rime_ffi::FALSE)
+    }
+
+    /// 开始遍历 map 的直属子键。`iter` 指向调用方分配的 HengConfigIterator（布局同 librime）。
+    ///
+    /// # Safety
+    /// `iter` 必须指向足够容纳 `RimeConfigIterator` 的可写内存。
+    pub unsafe fn config_begin_map(
+        &self,
+        config: &rime_ffi::RimeConfig,
+        key: &str,
+        iter: *mut rime_ffi::RimeConfigIterator,
+    ) -> bool {
+        let Some(begin) = self.api().config_begin_map.as_ref() else {
+            return false;
+        };
+        let Ok(k) = CString::new(key) else {
+            return false;
+        };
+        std::ptr::write_bytes(iter, 0, 1);
+        begin(iter, config as *const _ as *mut _, k.as_ptr()) == rime_ffi::TRUE
+    }
+
+    /// # Safety
+    /// `iter` 必须是 begin_map/next 链上的合法指针。
+    pub unsafe fn config_next(&self, iter: *mut rime_ffi::RimeConfigIterator) -> bool {
+        let Some(next) = self.api().config_next.as_ref() else {
+            return false;
+        };
+        next(iter) == rime_ffi::TRUE
+    }
+
+    /// # Safety
+    /// `iter` 必须是 begin_map/next 链上的合法指针。
+    pub unsafe fn config_end(&self, iter: *mut rime_ffi::RimeConfigIterator) {
+        if let Some(end) = self.api().config_end.as_ref() {
+            end(iter);
+        }
     }
 
     /// 提交当前组合串（上屏原始输入或已转换文本）。返回是否产生了提交。
