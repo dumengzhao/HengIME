@@ -75,7 +75,7 @@ git clone --depth 1 -b 0.17.4 https://github.com/rime/weasel third_party/src/wea
 
 | 文件 | 内容 |
 |---|---|
-| `weasel-0.17.4-heng-m1.patch` | 全部源码改动（13 文件）：RimeWithWeasel 数据源换血、布局间距修复、ContextUpdater 零宽保护、TSF 插桩、rc winres 替换、build-x64.bat、include/heng.h |
+| `weasel-0.17.4-heng-m1.patch` | 全部源码改动（10 文件）：RimeWithWeasel 数据源换血 + v4 样式/app_options 配置通道、布局间距修复、ContextUpdater 零宽保护、rc winres 替换、build-x64.bat、include/heng.h（v4） |
 | `weasel.props` / `env.bat` | 编译配置（BOOST_ROOT 等，上游 gitignore 忽略） |
 | `rime-default.yaml` | 雾凇 default.yaml + 左右键切换候选（上游 gitignore 忽略） |
 | `boost-project-config.jam` | b2 MSVC 显式配置（修复 setup 路径 bug） |
@@ -84,20 +84,23 @@ git clone --depth 1 -b 0.17.4 https://github.com/rime/weasel third_party/src/wea
 
 ```bash
 cd third_party/src/weasel
-git apply --whitespace=nowarn ../../patches/weasel-0.17.4-heng-m1.patch
-cp ../../patches/weasel.props ../../patches/env.bat .
-cp ../../patches/rime-default.yaml output/data/default.yaml
-cp ../../patches/boost-project-config.jam deps/boost_1_84_0/project-config.jam
+git apply --whitespace=nowarn ../../../patches/weasel-0.17.4-heng-m1.patch
+cp ../../../patches/weasel.props ../../../patches/env.bat .
+cp ../../../patches/rime-default.yaml output/data/default.yaml
+cp ../../../patches/boost-project-config.jam deps/boost_1_84_0/project-config.jam
 ```
 
 改动明细（供 review 补丁时对照）：
 
 - `RimeWithWeasel/RimeWithWeasel.cpp` + `include/RimeWithWeasel.h`：
-  数据源整体换血（rime_api → heng-core C ABI），含样式 fallback
+  数据源整体换血（rime_api → heng-core C ABI）；v4 起样式从 weasel.yaml 加载
+  （style 段 + preset_color_schemes 配色方案，硬编码 fallback 兜底）、
+  app_options 段按应用生效、亮/暗配色切换恢复
 - `WeaselUI/HorizontalLayout.cpp` / `VerticalLayout.cpp`：
   候选间距补偿（高亮块膨胀不再压相邻序号）
 - `WeaselIPC/ContextUpdater.cpp`：零宽选中区间不生成 HIGHLIGHTED
-- `WeaselTSF/`：debuglog.h 插桩（验证用，后续移除）+ rc 文件 winres.h 替换
+- `WeaselTSF/`：rc 文件 winres.h 替换（诊断插桩已于 v4 全部移除）
+- `include/heng.h`：core C ABI 头（v4，含 config API），与 `core/include/heng.h` 同步
 - `output/data/default.yaml` key_binder：左右键切换候选
 
 **后续维护约定**：每次修改 weasel 树内文件后，重新生成补丁并提交主仓库：
@@ -105,6 +108,6 @@ cp ../../patches/boost-project-config.jam deps/boost_1_84_0/project-config.jam
 ```bash
 cd third_party/src/weasel
 git add -u && git add <新文件>
-git diff --cached --binary > ../../patches/weasel-0.17.4-heng-m1.patch
+git diff --cached --binary > ../../../patches/weasel-0.17.4-heng-m1.patch
 git reset -q
 ```

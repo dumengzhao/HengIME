@@ -84,7 +84,7 @@ HengIME/
 | M2 | 设置界面与配置中心 | 未开始 |
 | M3 | 词库与数据同步 | 未开始 |
 | M4 | 鸿蒙外壳（交叉编译 librime + NAPI + InputMethodExtensionAbility） | 未开始 |
-| M5 | Windows 外壳收尾（样式配置化、app_options、通知消息、诊断日志清理） | 未开始 |
+| M5 | Windows 外壳收尾（样式配置化、app_options、通知消息、诊断日志清理） | **进行中（2026-10-03）**：core config API v4（8 个 `heng_config_*` C ABI 直通 librime）+ Engine 启动自动 `deploy_config_file("weasel.yaml")`（对齐官方 WeaselDeployer，librime config 组件只读 staging）· abitest 32/32（雾凇 38 套配色遍历命中）· weasel 侧 `_UpdateUIStyle`/`_UpdateUIStyleColor`/`_LoadAppOptions` 全键表移植接线（Initialize/AddSession/UpdateColorTheme/_ReadClientInfo）· app_options 通道恢复（`session.client_app` → 按应用 set_option）· 诊断插桩全清（hlog/tsflog/debuglog.h）· patches 补丁重生成 · 待办：MSBuild 编译验证（手动跑 build-x64.bat）、通知消息恢复 |
 | M6 | macOS 外壳（基于 Squirrel 改造） | 未开始 |
 | M7 | Linux（Fcitx5 addon + ClassicUI SVG 主题） | 未开始 |
 | M8 | AI 预测（Keyman lexical model 式可插拔模块） | 未开始 |
