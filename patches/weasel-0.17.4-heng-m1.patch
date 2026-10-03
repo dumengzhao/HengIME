@@ -1,0 +1,2212 @@
+diff --git a/RimeWithWeasel/RimeWithWeasel.cpp b/RimeWithWeasel/RimeWithWeasel.cpp
+index 709cd7e..9095a6f 100644
+--- a/RimeWithWeasel/RimeWithWeasel.cpp
++++ b/RimeWithWeasel/RimeWithWeasel.cpp
+@@ -5,25 +5,41 @@
+ #include <WeaselConstants.h>
+ #include <WeaselUtility.h>
+ 
+-#include <filesystem>
+ #include <map>
+-#include <array>
+ #include <vector>
+-#include <regex>
+-#include <rime_api.h>
++#include <cstring>
++
++#include <heng.h>
++
++// M1 薄壳化：数据源 = heng-core（heng_* C ABI，进程内 FFI）。
++// 链接 heng.lib（heng_core.dll 的导入库），运行期 heng_core.dll 须与
++// WeaselServer.exe 同目录（output/）。
++#pragma comment(lib, "heng.lib")
+ 
+ #define TRANSPARENT_COLOR 0x00000000
+-#define ARGB2ABGR(value)                                 \
+-  ((value & 0xff000000) | ((value & 0x000000ff) << 16) | \
+-   (value & 0x0000ff00) | ((value & 0x00ff0000) >> 16))
+-#define RGBA2ABGR(value)                                   \
+-  (((value & 0xff) << 24) | ((value & 0xff000000) >> 24) | \
+-   ((value & 0x00ff0000) >> 8) | ((value & 0x0000ff00) << 8))
+-typedef enum { COLOR_ABGR = 0, COLOR_ARGB, COLOR_RGBA } ColorFormat;
+ 
+ using namespace weasel;
+ 
+-static RimeApi* rime_api;
++// ---- M1 诊断日志（%TEMP%\heng-server.log；Release 下 weasel LOG 宏为 no-op）----
++static void hlog(const char* fmt, ...) {
++  char path[MAX_PATH];
++  GetTempPathA(MAX_PATH, path);
++  strcat_s(path, "heng-server.log");
++  FILE* f = NULL;
++  if (fopen_s(&f, path, "a") != 0 || !f)
++    return;
++  SYSTEMTIME st;
++  GetLocalTime(&st);
++  fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond,
++          st.wMilliseconds);
++  va_list ap;
++  va_start(ap, fmt);
++  vfprintf(f, fmt, ap);
++  va_end(ap);
++  fputc('\n', f);
++  fclose(f);
++}
++
+ WeaselSessionId _GenerateNewWeaselSessionId(SessionStatusMap sm, DWORD pid) {
+   if (sm.empty())
+     return (WeaselSessionId)(pid + 1);
+@@ -43,8 +59,6 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
+       m_show_notifications_time(1200),
+       _UpdateUICallback(NULL) {
+   m_ui->InServer() = true;
+-  rime_api = rime_get_api();
+-  assert(rime_api);
+   m_pid = GetCurrentProcessId();
+   uint16_t msbit = 0;
+   for (auto i = 31; i >= 0; i--) {
+@@ -54,7 +68,6 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
+     }
+   }
+   m_pid = (m_pid << (31 - msbit));
+-  _Setup();
+ }
+ 
+ RimeWithWeaselHandler::~RimeWithWeaselHandler() {
+@@ -64,44 +77,81 @@ RimeWithWeaselHandler::~RimeWithWeaselHandler() {
+ }
+ 
+ bool add_session = false;
+-void _UpdateUIStyle(RimeConfig* config, UI* ui, bool initialize);
+-bool _UpdateUIStyleColor(RimeConfig* config,
+-                         UIStyle& style,
+-                         const std::string& color = std::string());
+-void _LoadAppOptions(RimeConfig* config, AppOptionsByAppName& app_options);
+-
+-void _RefreshTrayIcon(const RimeSessionId session_id,
+-                      const std::function<void()> _UpdateUICallback) {
+-  // Dangerous, don't touch
+-  static char app_name[256] = {0};
+-  auto ret = rime_api->get_property(session_id, "client_app", app_name,
+-                                    sizeof(app_name) - 1);
+-  if (!ret || u8tow(app_name) == std::wstring(L"explorer.exe"))
+-    boost::thread th([=]() {
+-      ::Sleep(100);
+-      if (_UpdateUICallback)
+-        _UpdateUICallback();
+-    });
+-  else if (_UpdateUICallback)
+-    _UpdateUICallback();
+-}
+ 
+-void RimeWithWeaselHandler::_Setup() {
+-  RIME_STRUCT(RimeTraits, weasel_traits);
+-  std::string shared_dir = wtou8(WeaselSharedDataPath().wstring());
+-  std::string user_dir = wtou8(WeaselUserDataPath().wstring());
+-  weasel_traits.shared_data_dir = shared_dir.c_str();
+-  weasel_traits.user_data_dir = user_dir.c_str();
+-  weasel_traits.prebuilt_data_dir = weasel_traits.shared_data_dir;
+-  std::string distribution_name = wtou8(get_weasel_ime_name());
+-  weasel_traits.distribution_name = distribution_name.c_str();
+-  weasel_traits.distribution_code_name = WEASEL_CODE_NAME;
+-  weasel_traits.distribution_version = WEASEL_VERSION;
+-  weasel_traits.app_name = "rime.weasel";
+-  std::string log_dir = WeaselLogPath().u8string();
+-  weasel_traits.log_dir = log_dir.c_str();
+-  rime_api->setup(&weasel_traits);
+-  rime_api->set_notification_handler(&RimeWithWeaselHandler::OnNotify, this);
++// M1: UIStyle() 默认构造全零（font_point=0、margin=0、颜色全透明），
++// 直接发给 TSF 端会导致候选窗 0 尺寸/透明不可见。
++// 这里硬编码一套可用 fallback，参考微信键盘等主流输入法的现代浅色风格：
++// 白底、无描边、大圆角、浅灰高亮块黑字、淡灰序号、轻柔阴影。
++// TODO: 接入 heng-core config API 后改为从 weasel.yaml 加载。
++static void _FillFallbackStyle(weasel::UIStyle& style) {
++  style.font_face = L"Microsoft YaHei";
++  style.label_font_face = L"Microsoft YaHei";
++  style.comment_font_face = L"Microsoft YaHei";
++  style.font_point = 15;
++  style.label_font_point = 13;
++  style.comment_font_point = 12;
++  style.candidate_abbreviate_length = 30;
++  style.inline_preedit = false;
++  style.display_tray_icon = false;
++  style.ascii_tip_follow_cursor = false;
++  style.paging_on_scroll = true;
++  style.enhanced_position = true;
++  style.click_to_capture = false;
++  style.hover_type = weasel::UIStyle::NONE;
++  style.antialias_mode = weasel::UIStyle::DEFAULT;
++  style.preedit_type = weasel::UIStyle::COMPOSITION;
++  style.label_text_format = L"%s.";
++  style.mark_text = L"";
++  style.layout_type = weasel::UIStyle::LAYOUT_HORIZONTAL;
++  style.align_type = weasel::UIStyle::ALIGN_BOTTOM;
++  style.vertical_text_left_to_right = false;
++  style.vertical_text_with_wrap = false;
++  style.vertical_auto_reverse = false;
++  style.min_width = 0;
++  style.max_width = 0;
++  style.min_height = 0;
++  style.max_height = 0;
++  style.border = 0;
++  style.margin_x = 12;
++  style.margin_y = 10;
++  style.spacing = 6;
++  style.candidate_spacing = 6;
++  style.hilite_spacing = 4;
++  style.hilite_padding_x = 12;
++  style.hilite_padding_y = 8;
++  style.round_corner = 10;
++  style.round_corner_ex = 10;
++  style.shadow_radius = 6;
++  style.shadow_offset_x = 0;
++  style.shadow_offset_y = 2;
++  // colors: 白底黑字 + 蓝色高亮块白字（搜狗/微信键盘风）。
++  // 注意：weasel 颜色 int 格式为 0xAABBGGRR（渲染端用 GetRValue/GetBValue），
++  // 视觉 RGB(r,g,b) → int = 0xff<<24 | b<<16 | g<<8 | r。
++  // 蓝 #4F7CFE (79,124,252) → 0xFFFC7C4F
++  style.text_color = 0xff000000;              // preedit black
++  style.candidate_text_color = 0xff000000;    // black
++  style.candidate_back_color = 0x00000000;    // transparent
++  style.candidate_shadow_color = 0x00000000;
++  style.candidate_border_color = 0x00000000;
++  style.label_text_color = 0xff9c9c9c;        // faint gray 序号
++  style.comment_text_color = 0xffb0b0b0;      // faint gray 注释
++  style.back_color = 0xffffffff;              // white 窗体
++  style.shadow_color = 0x2e000000;            // ~18% black 轻阴影
++  style.border_color = 0x00000000;            // no border
++  style.hilited_text_color = 0xff000000;      // black
++  style.hilited_back_color = 0xffe8eaed;      // light gray
++  style.hilited_shadow_color = 0x00000000;
++  style.hilited_candidate_text_color = 0xffffffff;   // white on blue
++  style.hilited_candidate_back_color = 0xfffc7c4f;   // blue #4F7CFE
++  style.hilited_candidate_shadow_color = 0x00000000;
++  style.hilited_candidate_border_color = 0x00000000;
++  style.hilited_label_text_color = 0xffffffff;       // white on blue
++  style.hilited_comment_text_color = 0xffffffff;     // white on blue
++  style.hilited_mark_color = 0x00000000;
++  style.prevpage_color = 0x00000000;
++  style.nextpage_color = 0x00000000;
++  style.baseline = 0;
++  style.linespacing = 0;
+ }
+ 
+ void RimeWithWeaselHandler::Initialize() {
+@@ -110,39 +160,22 @@ void RimeWithWeaselHandler::Initialize() {
+     return;
+   }
+ 
+-  LOG(INFO) << "Initializing la rime.";
+-  rime_api->initialize(NULL);
+-  if (rime_api->start_maintenance(/*full_check = */ False)) {
++  LOG(INFO) << "Initializing heng-core.";
++  std::string shared_dir = wtou8(WeaselSharedDataPath().wstring());
++  std::string user_dir = wtou8(WeaselUserDataPath().wstring());
++  hlog("Initialize: heng_create(shared=%s, user=%s)", shared_dir.c_str(),
++       user_dir.c_str());
++  if (heng_create(shared_dir.c_str(), user_dir.c_str()) != 0) {
++    const char* err = heng_last_error();
++    LOG(ERROR) << "heng_create failed: " << (err ? err : "(null)");
++    hlog("Initialize: heng_create FAILED: %s", err ? err : "(null)");
+     m_disabled = true;
+-    rime_api->join_maintenance_thread();
++    return;
+   }
++  hlog("Initialize: heng_create OK");
+ 
+-  RimeConfig config = {NULL};
+-  if (rime_api->config_open("weasel", &config)) {
+-    if (m_ui) {
+-      _UpdateUIStyle(&config, m_ui, true);
+-      _UpdateShowNotifications(&config, true);
+-      m_current_dark_mode = IsUserDarkMode();
+-      if (m_current_dark_mode) {
+-        const int BUF_SIZE = 255;
+-        char buffer[BUF_SIZE + 1] = {0};
+-        if (rime_api->config_get_string(&config, "style/color_scheme_dark",
+-                                        buffer, BUF_SIZE)) {
+-          std::string color_name(buffer);
+-          _UpdateUIStyleColor(&config, m_ui->style(), color_name);
+-        }
+-      }
+-      m_base_style = m_ui->style();
+-    }
+-    Bool global_ascii = false;
+-    if (rime_api->config_get_bool(&config, "global_ascii", &global_ascii))
+-      m_global_ascii_mode = !!global_ascii;
+-    if (!rime_api->config_get_int(&config, "show_notifications_time",
+-                                  &m_show_notifications_time))
+-      m_show_notifications_time = 1200;
+-    _LoadAppOptions(&config, m_app_options);
+-    rime_api->config_close(&config);
+-  }
++  // M1：UI 样式取硬编码 fallback（RimeConfig 通道待接 heng-core config API）
++  _FillFallbackStyle(m_base_style);
+   m_last_schema_id.clear();
+ }
+ 
+@@ -150,17 +183,16 @@ void RimeWithWeaselHandler::Finalize() {
+   m_active_session = 0;
+   m_disabled = true;
+   m_session_status_map.clear();
+-  LOG(INFO) << "Finalizing la rime.";
+-  rime_api->finalize();
++  LOG(INFO) << "Finalizing heng-core.";
++  heng_destroy();
+ }
+ 
+ DWORD RimeWithWeaselHandler::FindSession(WeaselSessionId ipc_id) {
+   if (m_disabled)
+     return 0;
+-  Bool found = rime_api->find_session(to_session_id(ipc_id));
+-  DLOG(INFO) << "Find session: session_id = " << to_session_id(ipc_id)
+-             << ", found = " << found;
+-  return found ? (ipc_id) : 0;
++  bool found = m_session_status_map.find(ipc_id) != m_session_status_map.end();
++  DLOG(INFO) << "Find session: ipc_id = " << ipc_id << ", found = " << found;
++  return found ? ipc_id : 0;
+ }
+ 
+ DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
+@@ -170,12 +202,18 @@ DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
+     if (m_disabled)
+       return 0;
+   }
+-  RimeSessionId session_id = (RimeSessionId)rime_api->create_session();
++  heng_session_t session_id = heng_start_session(NULL);
++  if (session_id == 0) {
++    LOG(ERROR) << "heng_start_session failed";
++    hlog("AddSession: heng_start_session FAILED: %s",
++         heng_last_error() ? heng_last_error() : "(null)");
++    return 0;
++  }
+   if (m_global_ascii_mode) {
+     for (const auto& pair : m_session_status_map) {
+       if (pair.first) {
+-        rime_api->set_option(session_id, "ascii_mode",
+-                             !!pair.second.status.is_ascii_mode);
++        heng_set_option(session_id, "ascii_mode",
++                        pair.second.status.is_ascii_mode ? 1 : 0);
+         break;
+       }
+     }
+@@ -183,25 +221,29 @@ DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
+ 
+   WeaselSessionId ipc_id =
+       _GenerateNewWeaselSessionId(m_session_status_map, m_pid);
+-  DLOG(INFO) << "Add session: created session_id = " << session_id
++  DLOG(INFO) << "Add session: session_id = " << session_id
+              << ", ipc_id = " << ipc_id;
+   SessionStatus& session_status = new_session_status(ipc_id);
+   session_status.style = m_base_style;
+   session_status.session_id = session_id;
+   _ReadClientInfo(ipc_id, buffer);
+ 
+-  RIME_STRUCT(RimeStatus, status);
+-  if (rime_api->get_status(session_id, &status)) {
+-    std::string schema_id = status.schema_id;
++  HengStatus status;
++  if (heng_get_status(session_id, &status)) {
++    std::string schema_id =
++        status.schema_id ? std::string(status.schema_id) : std::string();
+     m_last_schema_id = schema_id;
+-    _LoadSchemaSpecificSettings(ipc_id, schema_id);
+-    _LoadAppInlinePreeditSet(ipc_id, true);
+-    _UpdateInlinePreeditStatus(ipc_id);
+-    _RefreshTrayIcon(session_id, _UpdateUICallback);
+-    session_status.status = status;
++    session_status.status.is_ascii_mode = !!status.is_ascii_mode;
++    session_status.status.is_composing = !!status.is_composing;
++    session_status.status.is_disabled = !!status.is_disabled;
++    session_status.status.is_full_shape = !!status.is_full_shape;
++    session_status.status.schema_id = schema_id;
++    session_status.status.schema_name =
++        status.schema_name ? std::string(status.schema_name) : std::string();
+     session_status.__synced = false;
+-    rime_api->free_status(&status);
++    heng_free_status(&status);
+   }
++  _UpdateInlinePreeditStatus(ipc_id);
+   m_ui->style() = session_status.style;
+   // show session's welcome message :-) if any
+   if (eat) {
+@@ -219,43 +261,30 @@ DWORD RimeWithWeaselHandler::RemoveSession(WeaselSessionId ipc_id) {
+     m_ui->Hide();
+   if (m_disabled)
+     return 0;
+-  DLOG(INFO) << "Remove session: session_id = " << to_session_id(ipc_id);
++  DLOG(INFO) << "Remove session: ipc_id = " << ipc_id;
+   // TODO: force committing? otherwise current composition would be lost
+-  rime_api->destroy_session(to_session_id(ipc_id));
++  heng_end_session(to_session_id(ipc_id));
+   m_session_status_map.erase(ipc_id);
+   m_active_session = 0;
+   return 0;
+ }
+ 
+ void RimeWithWeaselHandler::UpdateColorTheme(BOOL darkMode) {
+-  RimeConfig config = {NULL};
+-  if (rime_api->config_open("weasel", &config)) {
+-    if (m_ui) {
+-      _UpdateUIStyle(&config, m_ui, true);
+-      m_current_dark_mode = darkMode;
+-      if (darkMode) {
+-        const int BUF_SIZE = 255;
+-        char buffer[BUF_SIZE + 1] = {0};
+-        if (rime_api->config_get_string(&config, "style/color_scheme_dark",
+-                                        buffer, BUF_SIZE)) {
+-          std::string color_name(buffer);
+-          _UpdateUIStyleColor(&config, m_ui->style(), color_name);
+-        }
+-      }
+-      m_base_style = m_ui->style();
+-    }
+-    rime_api->config_close(&config);
+-  }
+-
++  m_current_dark_mode = !!darkMode;
++  // M1：样式接 heng-core config 通道前，仅同步会话状态
+   for (auto& pair : m_session_status_map) {
+-    RIME_STRUCT(RimeStatus, status);
+-    if (rime_api->get_status(to_session_id(pair.first), &status)) {
+-      _LoadSchemaSpecificSettings(pair.first, std::string(status.schema_id));
+-      _LoadAppInlinePreeditSet(pair.first, true);
+-      _UpdateInlinePreeditStatus(pair.first);
+-      pair.second.status = status;
++    HengStatus status;
++    if (heng_get_status(to_session_id(pair.first), &status)) {
++      pair.second.status.is_ascii_mode = !!status.is_ascii_mode;
++      pair.second.status.is_composing = !!status.is_composing;
++      pair.second.status.is_disabled = !!status.is_disabled;
++      pair.second.status.is_full_shape = !!status.is_full_shape;
++      pair.second.status.schema_id =
++          status.schema_id ? std::string(status.schema_id) : std::string();
++      pair.second.status.schema_name =
++          status.schema_name ? std::string(status.schema_name) : std::string();
+       pair.second.__synced = false;
+-      rime_api->free_status(&status);
++      heng_free_status(&status);
+     }
+   }
+   m_ui->style() = get_session_status(m_active_session).style;
+@@ -268,9 +297,13 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
+              << ", mask = " << keyEvent.mask << ", ipc_id = " << ipc_id;
+   if (m_disabled)
+     return FALSE;
+-  RimeSessionId session_id = to_session_id(ipc_id);
+-  Bool handled = rime_api->process_key(session_id, keyEvent.keycode,
+-                                       expand_ibus_modifier(keyEvent.mask));
++  heng_session_t session_id = to_session_id(ipc_id);
++  int handled =
++      heng_process_key(session_id, keyEvent.keycode,
++                       expand_ibus_modifier(keyEvent.mask));
++  hlog("ProcessKeyEvent: session=%llu key=0x%x mask=0x%x -> handled=%d",
++       (unsigned long long)session_id, keyEvent.keycode, keyEvent.mask,
++       handled);
+   // vim_mode when keydown only
+   if (!handled && !(keyEvent.mask & ibus::Modifier::RELEASE_MASK)) {
+     bool isVimBackInCommandMode =
+@@ -279,10 +312,9 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
+          (keyEvent.keycode == ibus::Keycode::XK_c ||
+           keyEvent.keycode == ibus::Keycode::XK_C ||
+           keyEvent.keycode == ibus::Keycode::XK_bracketleft));
+-    if (isVimBackInCommandMode &&
+-        rime_api->get_option(session_id, "vim_mode") &&
+-        !rime_api->get_option(session_id, "ascii_mode")) {
+-      rime_api->set_option(session_id, "ascii_mode", True);
++    if (isVimBackInCommandMode && heng_get_option(session_id, "vim_mode") > 0 &&
++        heng_get_option(session_id, "ascii_mode") == 0) {
++      heng_set_option(session_id, "ascii_mode", 1);
+     }
+   }
+   _Respond(ipc_id, eat);
+@@ -295,7 +327,7 @@ void RimeWithWeaselHandler::CommitComposition(WeaselSessionId ipc_id) {
+   DLOG(INFO) << "Commit composition: ipc_id = " << ipc_id;
+   if (m_disabled)
+     return;
+-  rime_api->commit_composition(to_session_id(ipc_id));
++  heng_commit_composition(to_session_id(ipc_id));
+   _UpdateUI(ipc_id);
+   m_active_session = ipc_id;
+ }
+@@ -304,7 +336,7 @@ void RimeWithWeaselHandler::ClearComposition(WeaselSessionId ipc_id) {
+   DLOG(INFO) << "Clear composition: ipc_id = " << ipc_id;
+   if (m_disabled)
+     return;
+-  rime_api->clear_composition(to_session_id(ipc_id));
++  heng_clear(to_session_id(ipc_id));
+   _UpdateUI(ipc_id);
+   m_active_session = ipc_id;
+ }
+@@ -316,7 +348,8 @@ void RimeWithWeaselHandler::SelectCandidateOnCurrentPage(
+              << ", index = " << index;
+   if (m_disabled)
+     return;
+-  rime_api->select_candidate_on_current_page(to_session_id(ipc_id), index);
++  heng_select_candidate_on_current_page(to_session_id(ipc_id),
++                                        (int)index);
+ }
+ 
+ bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
+@@ -325,8 +358,8 @@ bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
+     EatLine eat) {
+   DLOG(INFO) << "highlight candidate on current page, ipc_id = " << ipc_id
+              << ", index = " << index;
+-  bool res = rime_api->highlight_candidate_on_current_page(
+-      to_session_id(ipc_id), index);
++  bool res = heng_highlight_candidate_on_current_page(to_session_id(ipc_id),
++                                                      (int)index) == 1;
+   _Respond(ipc_id, eat);
+   _UpdateUI(ipc_id);
+   return res;
+@@ -337,7 +370,7 @@ bool RimeWithWeaselHandler::ChangePage(bool backward,
+                                        EatLine eat) {
+   DLOG(INFO) << "change page, ipc_id = " << ipc_id
+              << (backward ? "backward" : "foreward");
+-  bool res = rime_api->change_page(to_session_id(ipc_id), backward);
++  bool res = heng_change_page(to_session_id(ipc_id), backward ? 1 : 0) == 1;
+   _Respond(ipc_id, eat);
+   _UpdateUI(ipc_id);
+   return res;
+@@ -380,31 +413,6 @@ std::string RimeWithWeaselHandler::m_message_label;
+ std::string RimeWithWeaselHandler::m_option_name;
+ std::mutex RimeWithWeaselHandler::m_notifier_mutex;
+ 
+-void RimeWithWeaselHandler::OnNotify(void* context_object,
+-                                     uintptr_t session_id,
+-                                     const char* message_type,
+-                                     const char* message_value) {
+-  // may be running in a thread when deploying rime
+-  RimeWithWeaselHandler* self =
+-      reinterpret_cast<RimeWithWeaselHandler*>(context_object);
+-  if (!self || !message_type || !message_value)
+-    return;
+-  std::lock_guard<std::mutex> lock(m_notifier_mutex);
+-  m_message_type = message_type;
+-  m_message_value = message_value;
+-  if (RIME_API_AVAILABLE(rime_api, get_state_label) &&
+-      !strcmp(message_type, "option")) {
+-    Bool state = message_value[0] != '!';
+-    const char* option_name = message_value + !state;
+-    m_option_name = option_name;
+-    const char* state_label =
+-        rime_api->get_state_label(session_id, option_name, state);
+-    if (state_label) {
+-      m_message_label = std::string(state_label);
+-    }
+-  }
+-}
+-
+ void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
+                                             LPWSTR buffer) {
+   std::string app_name;
+@@ -426,50 +434,54 @@ void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
+     }
+   }
+   SessionStatus& session_status = get_session_status(ipc_id);
+-  RimeSessionId session_id = session_status.session_id;
++  heng_session_t session_id = session_status.session_id;
+   // set app specific options
+   if (!app_name.empty()) {
+-    rime_api->set_property(session_id, "client_app", app_name.c_str());
++    heng_set_session_owner(session_id, app_name.c_str());
+ 
+     auto it = m_app_options.find(app_name);
+     if (it != m_app_options.end()) {
+       AppOptions& options(m_app_options[it->first]);
+       for (const auto& pair : options) {
+         DLOG(INFO) << "set app option: " << pair.first << " = " << pair.second;
+-        rime_api->set_option(session_id, pair.first.c_str(), Bool(pair.second));
++        heng_set_option(session_id, pair.first.c_str(), pair.second ? 1 : 0);
+       }
+     }
+   }
+   // inline preedit
+   bool inline_preedit = session_status.style.inline_preedit;
+-  rime_api->set_option(session_id, "inline_preedit", Bool(inline_preedit));
++  heng_set_option(session_id, "inline_preedit", inline_preedit ? 1 : 0);
+   // show soft cursor on weasel panel but not inline
+-  rime_api->set_option(session_id, "soft_cursor", Bool(!inline_preedit));
++  heng_set_option(session_id, "soft_cursor", inline_preedit ? 0 : 1);
+ }
+ 
+ void RimeWithWeaselHandler::_GetCandidateInfo(CandidateInfo& cinfo,
+-                                              RimeContext& ctx) {
+-  cinfo.candies.resize(ctx.menu.num_candidates);
+-  cinfo.comments.resize(ctx.menu.num_candidates);
+-  cinfo.labels.resize(ctx.menu.num_candidates);
+-  for (int i = 0; i < ctx.menu.num_candidates; ++i) {
+-    cinfo.candies[i].str = escape_string(u8tow(ctx.menu.candidates[i].text));
+-    if (ctx.menu.candidates[i].comment) {
+-      cinfo.comments[i].str =
+-          escape_string(u8tow(ctx.menu.candidates[i].comment));
+-    }
+-    if (RIME_STRUCT_HAS_MEMBER(ctx, ctx.select_labels) && ctx.select_labels) {
+-      cinfo.labels[i].str = escape_string(u8tow(ctx.select_labels[i]));
+-    } else if (ctx.menu.select_keys) {
+-      cinfo.labels[i].str =
+-          escape_string(std::wstring(1, ctx.menu.select_keys[i]));
++                                              HengContext& ctx) {
++  cinfo.candies.resize(ctx.candidate_count);
++  cinfo.comments.resize(ctx.candidate_count);
++  cinfo.labels.resize(ctx.candidate_count);
++  const std::wstring select_keys_holder =
++      ctx.select_keys ? u8tow(ctx.select_keys) : std::wstring();
++  const wchar_t* select_keys = select_keys_holder.c_str();
++  for (int i = 0; i < ctx.candidate_count; ++i) {
++    const char* text = ctx.candidates[i];
++    const char* comment = ctx.comments ? ctx.comments[i] : NULL;
++    cinfo.candies[i].str = escape_string(text ? u8tow(text) : std::wstring());
++    if (comment) {
++      cinfo.comments[i].str = escape_string(u8tow(comment));
++    }
++    const char* label = (ctx.labels && ctx.labels[i]) ? ctx.labels[i] : NULL;
++    if (label) {
++      cinfo.labels[i].str = escape_string(u8tow(label));
++    } else if (select_keys && select_keys[i]) {
++      cinfo.labels[i].str = escape_string(std::wstring(1, select_keys[i]));
+     } else {
+       cinfo.labels[i].str = std::to_wstring((i + 1) % 10);
+     }
+   }
+-  cinfo.highlighted = ctx.menu.highlighted_candidate_index;
+-  cinfo.currentPage = ctx.menu.page_no;
+-  cinfo.is_last_page = ctx.menu.is_last_page;
++  cinfo.highlighted = ctx.highlighted;
++  cinfo.currentPage = ctx.page_no;
++  cinfo.is_last_page = !!ctx.is_last_page;
+ }
+ 
+ void RimeWithWeaselHandler::StartMaintenance() {
+@@ -493,12 +505,13 @@ void RimeWithWeaselHandler::SetOption(WeaselSessionId ipc_id,
+   if (!ipc_id) {
+     if (m_global_ascii_mode && opt == "ascii_mode") {
+       for (auto& pair : m_session_status_map)
+-        rime_api->set_option(to_session_id(pair.first), "ascii_mode", val);
++        heng_set_option(to_session_id(pair.first), "ascii_mode", val ? 1 : 0);
+     } else {
+-      rime_api->set_option(to_session_id(m_active_session), opt.c_str(), val);
++      heng_set_option(to_session_id(m_active_session), opt.c_str(),
++                      val ? 1 : 0);
+     }
+   } else {
+-    rime_api->set_option(to_session_id(ipc_id), opt.c_str(), val);
++    heng_set_option(to_session_id(ipc_id), opt.c_str(), val ? 1 : 0);
+   }
+   // refresh UI (and tray icon) so the option change takes effect immediately,
+   // e.g. when toggling ascii_mode from the TSF language bar
+@@ -526,15 +539,14 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+   Status& weasel_status = m_ui->status();
+   Context weasel_context;
+ 
+-  RimeSessionId session_id = to_session_id(ipc_id);
+-
+   if (ipc_id == 0)
+     weasel_status.disabled = m_disabled;
+ 
+   _GetStatus(weasel_status, ipc_id, weasel_context);
+ 
+   SessionStatus& session_status = get_session_status(ipc_id);
+-  if (rime_api->get_option(session_id, "inline_preedit"))
++  if (ipc_id != 0 &&
++      heng_get_option(to_session_id(ipc_id), "inline_preedit") > 0)
+     session_status.style.client_caps |= INLINE_PREEDIT_CAPABLE;
+   else
+     session_status.style.client_caps &= ~INLINE_PREEDIT_CAPABLE;
+@@ -544,7 +556,13 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+     m_ui->Update(weasel_context, weasel_status);
+   }
+ 
+-  _RefreshTrayIcon(session_id, _UpdateUICallback);
++  if (_UpdateUICallback) {
++    boost::thread th([=]() {
++      ::Sleep(100);
++      if (_UpdateUICallback)
++        _UpdateUICallback();
++    });
++  }
+ 
+   {
+     std::lock_guard<std::mutex> lock(m_notifier_mutex);
+@@ -555,158 +573,19 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+   }
+ }
+ 
+-void RimeWithWeaselHandler::_LoadSchemaSpecificSettings(
+-    WeaselSessionId ipc_id,
+-    const std::string& schema_id) {
+-  if (!m_ui)
+-    return;
+-  RimeConfig config;
+-  if (!rime_api->schema_open(schema_id.c_str(), &config))
+-    return;
+-  _UpdateShowNotifications(&config);
+-  m_ui->style() = m_base_style;
+-  _UpdateUIStyle(&config, m_ui, false);
+-  SessionStatus& session_status = get_session_status(ipc_id);
+-  session_status.style = m_ui->style();
+-  UIStyle& style = session_status.style;
+-  // load schema color style config
+-  const int BUF_SIZE = 255;
+-  char buffer[BUF_SIZE + 1] = {0};
+-  const auto update_color_scheme = [&]() {
+-    std::string color_name(buffer);
+-    RimeConfigIterator preset = {0};
+-    if (rime_api->config_begin_map(
+-            &preset, &config, ("preset_color_schemes/" + color_name).c_str())) {
+-      _UpdateUIStyleColor(&config, style, color_name);
+-      rime_api->config_end(&preset);
+-    } else {
+-      RimeConfig weaselconfig;
+-      if (rime_api->config_open("weasel", &weaselconfig)) {
+-        _UpdateUIStyleColor(&weaselconfig, style, color_name);
+-        rime_api->config_close(&weaselconfig);
+-      }
+-    }
+-  };
+-  const char* key =
+-      m_current_dark_mode ? "style/color_scheme_dark" : "style/color_scheme";
+-  if (rime_api->config_get_string(&config, key, buffer, BUF_SIZE))
+-    update_color_scheme();
+-  // load schema icon start
+-  {
+-    const auto load_icon = [](RimeConfig& config, const char* key1,
+-                              const char* key2) {
+-      const auto user_dir = WeaselUserDataPath();
+-      const auto shared_dir = WeaselSharedDataPath();
+-      const int BUF_SIZE = 255;
+-      char buffer[BUF_SIZE + 1] = {0};
+-      if (rime_api->config_get_string(&config, key1, buffer, BUF_SIZE) ||
+-          (key2 != NULL &&
+-           rime_api->config_get_string(&config, key2, buffer, BUF_SIZE))) {
+-        auto resource = u8tow(buffer);
+-        if (fs::is_regular_file(user_dir / resource))
+-          return (user_dir / resource).wstring();
+-        else if (fs::is_regular_file(shared_dir / resource))
+-          return (shared_dir / resource).wstring();
+-      }
+-      return std::wstring();
+-    };
+-    style.current_zhung_icon =
+-        load_icon(config, "schema/icon", "schema/zhung_icon");
+-    style.current_ascii_icon = load_icon(config, "schema/ascii_icon", NULL);
+-    style.current_full_icon = load_icon(config, "schema/full_icon", NULL);
+-    style.current_half_icon = load_icon(config, "schema/half_icon", NULL);
+-  }
+-  // load schema icon end
+-  rime_api->config_close(&config);
+-}
+-
+-void RimeWithWeaselHandler::_LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
+-                                                     bool ignore_app_name) {
+-  SessionStatus& session_status = get_session_status(ipc_id);
+-  RimeSessionId session_id = session_status.session_id;
+-  static char _app_name[50];
+-  rime_api->get_property(session_id, "client_app", _app_name,
+-                         sizeof(_app_name) - 1);
+-  std::string app_name(_app_name);
+-  if (!ignore_app_name && m_last_app_name == app_name)
+-    return;
+-  m_last_app_name = app_name;
+-  bool inline_preedit = session_status.style.inline_preedit;
+-  bool found = false;
+-  if (!app_name.empty()) {
+-    auto it = m_app_options.find(app_name);
+-    if (it != m_app_options.end()) {
+-      AppOptions& options(m_app_options[it->first]);
+-      for (const auto& pair : options) {
+-        if (pair.first == "inline_preedit") {
+-          rime_api->set_option(session_id, pair.first.c_str(),
+-                               Bool(pair.second));
+-          session_status.style.inline_preedit = Bool(pair.second);
+-          found = true;
+-          break;
+-        }
+-      }
+-    }
+-  }
+-  if (!found) {
+-    session_status.style.inline_preedit = m_base_style.inline_preedit;
+-    // load from schema.
+-    RIME_STRUCT(RimeStatus, status);
+-    if (rime_api->get_status(session_id, &status)) {
+-      std::string schema_id = status.schema_id;
+-      RimeConfig config;
+-      if (rime_api->schema_open(schema_id.c_str(), &config)) {
+-        Bool value = False;
+-        if (rime_api->config_get_bool(&config, "style/inline_preedit",
+-                                      &value)) {
+-          session_status.style.inline_preedit = value;
+-        }
+-        rime_api->config_close(&config);
+-      }
+-      rime_api->free_status(&status);
+-    }
+-  }
+-  if (session_status.style.inline_preedit != inline_preedit)
+-    _UpdateInlinePreeditStatus(ipc_id);
+-}
+-
+ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
+   std::lock_guard<std::mutex> lock(m_notifier_mutex);
+   if (m_message_type.empty() || m_message_value.empty())
+     return m_ui->IsCountingDown();
+-  // show as auxiliary string
++  // M1：通知消息通道（rime notification）暂未接入 heng-core，
++  // m_message_* 恒为空，以下分支不会被触发；保留以备恢复。
+   std::wstring& tips(ctx.aux.str);
+   bool show_icon = false;
+-  if (m_message_type == "deploy") {
+-    if (m_message_value == "start")
+-      if (GetThreadUILanguage() == MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US))
+-        tips = L"Deploying RIME";
+-      else
+-        tips = L"正在部署 RIME";
+-    else if (m_message_value == "success")
+-      if (GetThreadUILanguage() == MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US))
+-        tips = L"Deployed";
+-      else
+-        tips = L"部署完成";
+-    else if (m_message_value == "failure") {
+-      if (GetThreadUILanguage() ==
+-          MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL))
+-        tips = L"有錯誤，請查看日誌 %TEMP%\\rime.weasel\\rime.weasel.*.INFO";
+-      else if (GetThreadUILanguage() ==
+-               MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED))
+-        tips = L"有错误，请查看日志 %TEMP%\\rime.weasel\\rime.weasel.*.INFO";
+-      else
+-        tips =
+-            L"There is an error, please check the logs "
+-            L"%TEMP%\\rime.weasel\\rime.weasel.*.INFO";
+-    }
+-  } else if (m_message_type == "schema") {
+-    tips = /*L"【" + */ status.schema_name /* + L"】"*/;
++  if (m_message_type == "schema") {
++    tips = status.schema_name;
+   } else if (m_message_type == "option") {
+     status.type = SCHEMA;
+-    if (m_message_value == "!ascii_mode") {
+-      show_icon = true;
+-    } else if (m_message_value == "ascii_mode") {
++    if (m_message_value == "!ascii_mode" || m_message_value == "ascii_mode") {
+       show_icon = true;
+     } else
+       tips = u8tow(m_message_label);
+@@ -730,13 +609,6 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
+     return m_ui->IsCountingDown();
+   }
+ }
+-inline std::string _GetLabelText(const std::vector<Text>& labels,
+-                                 int id,
+-                                 const wchar_t* format) {
+-  wchar_t buffer[128];
+-  swprintf_s<128>(buffer, format, labels.at(id).str.c_str());
+-  return wtou8(std::wstring(buffer));
+-}
+ 
+ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
+   std::wstring body;
+@@ -745,155 +617,172 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
+   actions.reserve(8);
+ 
+   SessionStatus& session_status = get_session_status(ipc_id);
+-  RimeSessionId session_id = session_status.session_id;
+-  RIME_STRUCT(RimeCommit, commit);
+-  if (rime_api->get_commit(session_id, &commit)) {
+-    actions.push_back("commit");
+-    std::wstring commit_text_w = escape_string(u8tow(commit.text));
+-    body.append(L"commit=").append(commit_text_w).append(L"\n");
+-    rime_api->free_commit(&commit);
++  heng_session_t session_id = session_status.session_id;
++
++  // commit（消费语义：heng_commit_text 取后清空）
++  {
++    char* commit_text = NULL;
++    if (heng_commit_text(session_id, &commit_text) == 1 && commit_text) {
++      actions.push_back("commit");
++      std::wstring commit_text_w = escape_string(u8tow(commit_text));
++      body.append(L"commit=").append(commit_text_w).append(L"\n");
++      heng_free_string(commit_text);
++    }
+   }
+ 
+   bool is_composing = false;
+-  RIME_STRUCT(RimeStatus, status);
+   static const std::wstring Bool_wstring[] = {L"0", L"1"};
+-  if (rime_api->get_status(session_id, &status)) {
+-    is_composing = !!status.is_composing;
+-    actions.push_back("status");
+-    body.append(L"status.ascii_mode=")
+-        .append(Bool_wstring[!!status.is_ascii_mode])
+-        .append(L"\n")
+-        .append(L"status.composing=")
+-        .append(Bool_wstring[!!status.is_composing])
+-        .append(L"\n")
+-        .append(L"status.disabled=")
+-        .append(Bool_wstring[!!status.is_disabled])
+-        .append(L"\n")
+-        .append(L"status.full_shape=")
+-        .append(Bool_wstring[!!status.is_full_shape])
+-        .append(L"\n")
+-        .append(L"status.schema_id=")
+-        .append(status.schema_id ? u8tow(status.schema_id) : std::wstring())
+-        .append(L"\n");
+-    if (m_global_ascii_mode &&
+-        (session_status.status.is_ascii_mode != status.is_ascii_mode)) {
+-      for (auto& pair : m_session_status_map) {
+-        if (pair.first != ipc_id)
+-          rime_api->set_option(to_session_id(pair.first), "ascii_mode",
+-                               !!status.is_ascii_mode);
++  {
++    HengStatus status;
++    if (heng_get_status(session_id, &status)) {
++      is_composing = !!status.is_composing;
++      actions.push_back("status");
++      body.append(L"status.ascii_mode=")
++          .append(Bool_wstring[!!status.is_ascii_mode])
++          .append(L"\n")
++          .append(L"status.composing=")
++          .append(Bool_wstring[!!status.is_composing])
++          .append(L"\n")
++          .append(L"status.disabled=")
++          .append(Bool_wstring[!!status.is_disabled])
++          .append(L"\n")
++          .append(L"status.full_shape=")
++          .append(Bool_wstring[!!status.is_full_shape])
++          .append(L"\n")
++          .append(L"status.schema_id=")
++          .append(status.schema_id ? u8tow(status.schema_id) : std::wstring())
++          .append(L"\n");
++      if (m_global_ascii_mode &&
++          (session_status.status.is_ascii_mode != !!status.is_ascii_mode)) {
++        for (auto& pair : m_session_status_map) {
++          if (pair.first != ipc_id)
++            heng_set_option(to_session_id(pair.first), "ascii_mode",
++                            status.is_ascii_mode ? 1 : 0);
++        }
+       }
++      session_status.status.is_ascii_mode = !!status.is_ascii_mode;
++      session_status.status.is_composing = !!status.is_composing;
++      session_status.status.is_disabled = !!status.is_disabled;
++      session_status.status.is_full_shape = !!status.is_full_shape;
++      session_status.status.schema_id =
++          status.schema_id ? std::string(status.schema_id) : std::string();
++      session_status.status.schema_name =
++          status.schema_name ? std::string(status.schema_name) : std::string();
++      heng_free_status(&status);
+     }
+-    session_status.status = status;
+-    rime_api->free_status(&status);
+   }
+ 
+-  RIME_STRUCT(RimeContext, ctx);
+-  if (rime_api->get_context(session_id, &ctx)) {
+-    bool has_candidates = ctx.menu.num_candidates > 0;
+-    CandidateInfo cinfo;
+-    if (has_candidates) {
+-      _GetCandidateInfo(cinfo, ctx);
+-    }
+-    if (is_composing) {
+-      const auto& preedit = ctx.composition.preedit;
+-      const auto& start = ctx.composition.sel_start;
+-      const auto& end = ctx.composition.sel_end;
+-      const auto& cursor = ctx.composition.cursor_pos;
+-      static const auto u8towstring = [](const char* u8str, int len = 0) {
+-        return std::to_wstring(utf8towcslen(u8str, len));
+-      };
+-      actions.push_back("ctx");
+-      switch (session_status.style.preedit_type) {
+-        case UIStyle::PREVIEW: {
+-          if (ctx.commit_text_preview) {
+-            const char* first_utf8 = ctx.commit_text_preview;
+-            const size_t first_len = std::strlen(first_utf8);
+-            const std::wstring first_w = escape_string(u8tow(first_utf8));
+-            const std::wstring tmp = u8towstring(first_utf8, (int)first_len);
++  {
++    HengContext ctx;
++    if (heng_get_context(session_id, &ctx) == 1) {
++      bool has_candidates = ctx.candidate_count > 0;
++      CandidateInfo cinfo;
++      if (has_candidates) {
++        _GetCandidateInfo(cinfo, ctx);
++      }
++      if (is_composing) {
++        const char* preedit = ctx.preedit ? ctx.preedit : "";
++        const int& start = ctx.sel_start;
++        const int& end = ctx.sel_end;
++        const int& cursor = ctx.cursor_pos;
++        static const auto u8towstring = [](const char* u8str, int len = 0) {
++          return std::to_wstring(utf8towcslen(u8str, len));
++        };
++        actions.push_back("ctx");
++        switch (session_status.style.preedit_type) {
++          case UIStyle::PREVIEW: {
++            if (ctx.commit_text_preview) {
++              const char* first_utf8 = ctx.commit_text_preview;
++              const size_t first_len = std::strlen(first_utf8);
++              const std::wstring first_w = escape_string(u8tow(first_utf8));
++              const std::wstring tmp = u8towstring(first_utf8, (int)first_len);
++              body.append(L"ctx.preedit=")
++                  .append(first_w)
++                  .append(L"\n")
++                  .append(L"ctx.preedit.cursor=")
++                  .append(u8towstring(first_utf8, 0))
++                  .append(L",")
++                  .append(tmp)
++                  .append(L",")
++                  .append(tmp)
++                  .append(L"\n");
++              break;
++            }
++            // no preview, fall back to composition
++          }
++          case UIStyle::COMPOSITION: {
+             body.append(L"ctx.preedit=")
+-                .append(first_w)
+-                .append(L"\n")
+-                .append(L"ctx.preedit.cursor=")
+-                .append(u8towstring(first_utf8, 0))
+-                .append(L",")
+-                .append(tmp)
+-                .append(L",")
+-                .append(tmp)
++                .append(escape_string(u8tow(preedit)))
+                 .append(L"\n");
++            // 用户要求：preedit 无选中高亮——sel 区间置零宽（start==end==cursor）
++            if (start <= end) {
++              body.append(L"ctx.preedit.cursor=")
++                  .append(u8towstring(preedit, cursor))
++                  .append(L",")
++                  .append(u8towstring(preedit, cursor))
++                  .append(L",")
++                  .append(u8towstring(preedit, cursor))
++                  .append(L"\n");
++            }
+             break;
+           }
+-          // no preview, fall back to composition
+-        }
+-        case UIStyle::COMPOSITION: {
+-          body.append(L"ctx.preedit=")
+-              .append(escape_string(u8tow(preedit)))
+-              .append(L"\n");
+-          if (start <= end) {
+-            body.append(L"ctx.preedit.cursor=")
+-                .append(u8towstring(preedit, start))
+-                .append(L",")
+-                .append(u8towstring(preedit, end))
+-                .append(L",")
+-                .append(u8towstring(preedit, cursor))
+-                .append(L"\n");
+-          }
+-          break;
+-        }
+-        case UIStyle::PREVIEW_ALL: {
+-          body.append(L"ctx.preedit=")
+-              .append(escape_string(u8tow(preedit)))
+-              .append(L"  [");
+-          auto label_valid = session_status.style.label_font_point > 0;
+-          auto comment_valid = session_status.style.comment_font_point > 0;
+-          const std::wstring mark_text_w =
+-              session_status.style.mark_text.empty()
+-                  ? std::wstring(L"*")
+-                  : session_status.style.mark_text;
+-          for (auto i = 0; i < ctx.menu.num_candidates; i++) {
+-            std::wstring label_w;
+-            if (label_valid) {
+-              wchar_t buf_lbl[128];
+-              swprintf_s<128>(buf_lbl,
+-                              session_status.style.label_text_format.c_str(),
+-                              cinfo.labels.at(i).str.c_str());
+-              label_w = std::wstring(buf_lbl);
++          case UIStyle::PREVIEW_ALL: {
++            body.append(L"ctx.preedit=")
++                .append(escape_string(u8tow(preedit)))
++                .append(L"  [");
++            auto label_valid = session_status.style.label_font_point > 0;
++            auto comment_valid = session_status.style.comment_font_point > 0;
++            const std::wstring mark_text_w =
++                session_status.style.mark_text.empty()
++                    ? std::wstring(L"*")
++                    : session_status.style.mark_text;
++            for (int i = 0; i < ctx.candidate_count; i++) {
++              std::wstring label_w;
++              if (label_valid) {
++                wchar_t buf_lbl[128];
++                swprintf_s<128>(buf_lbl,
++                                session_status.style.label_text_format.c_str(),
++                                cinfo.labels.at(i).str.c_str());
++                label_w = std::wstring(buf_lbl);
++              }
++              std::wstring comment_w =
++                  comment_valid ? cinfo.comments.at(i).str : std::wstring();
++              std::wstring prefix_w = (i != ctx.highlighted)
++                                          ? std::wstring()
++                                          : mark_text_w;
++              const char* ctext = ctx.candidates[i] ? ctx.candidates[i] : "";
++              body.append(L" ")
++                  .append(prefix_w)
++                  .append(escape_string(label_w))
++                  .append(escape_string(u8tow(ctext)))
++                  .append(L" ")
++                  .append(escape_string(comment_w));
+             }
+-            std::wstring comment_w =
+-                comment_valid ? cinfo.comments.at(i).str : std::wstring();
+-            std::wstring prefix_w = (i != ctx.menu.highlighted_candidate_index)
+-                                        ? std::wstring()
+-                                        : mark_text_w;
+-            body.append(L" ")
+-                .append(prefix_w)
+-                .append(escape_string(label_w))
+-                .append(escape_string(u8tow(ctx.menu.candidates[i].text)))
+-                .append(L" ")
+-                .append(escape_string(comment_w));
+-          }
+-          body.append(L" ]\n");
+-          if (start <= end) {
+-            body.append(L"ctx.preedit.cursor=")
+-                .append(u8towstring(preedit, start))
+-                .append(L",")
+-                .append(u8towstring(preedit, end))
+-                .append(L",")
+-                .append(u8towstring(preedit, cursor))
+-                .append(L"\n");
++            body.append(L" ]\n");
++            if (start <= end) {
++              body.append(L"ctx.preedit.cursor=")
++                  .append(u8towstring(preedit, start))
++                  .append(L",")
++                  .append(u8towstring(preedit, end))
++                  .append(L",")
++                  .append(u8towstring(preedit, cursor))
++                  .append(L"\n");
++            }
++            break;
+           }
+-          break;
+         }
+       }
+-    }
+-    if (has_candidates) {
+-      std::wstringstream ss;
+-      boost::archive::text_woarchive oa(ss);
++      if (has_candidates) {
++        std::wstringstream ss;
++        boost::archive::text_woarchive oa(ss);
+ 
+-      oa << cinfo;
++        oa << cinfo;
+ 
+-      auto s = ss.str();
+-      body.append(L"ctx.cand=").append(std::move(s)).append(L"\n");
++        auto s = ss.str();
++        body.append(L"ctx.cand=").append(std::move(s)).append(L"\n");
++      }
++      heng_free_context(&ctx);
+     }
+-    rime_api->free_context(&ctx);
+   }
+ 
+   // configuration information
+@@ -914,6 +803,9 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
+   }
+ 
+   // summarize: send header first to avoid vector head-insert cost
++  hlog("Respond: session=%llu actions=%s body_bytes=%u",
++       (unsigned long long)session_id,
++       actions.empty() ? "(none)" : actions[0], (unsigned)body.size());
+   std::wstring header;
+   if (actions.empty()) {
+     header = L"action=noop\n";
+@@ -937,578 +829,93 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
+   return true;
+ }
+ 
+-// Blend foreground and background ARGB colors taking alpha into account.
+-// Returns an ABGR COLORREF with premultiplied alpha blended result.
+-static inline COLORREF blend_colors(COLORREF fcolor, COLORREF bcolor) {
+-  // Extract ARGB channels from both colors.
+-  BYTE fA = (fcolor >> 24) & 0xFF;
+-  BYTE fB = (fcolor >> 16) & 0xFF;
+-  BYTE fG = (fcolor >> 8) & 0xFF;
+-  BYTE fR = fcolor & 0xFF;
+-  BYTE bA = (bcolor >> 24) & 0xFF;
+-  BYTE bB = (bcolor >> 16) & 0xFF;
+-  BYTE bG = (bcolor >> 8) & 0xFF;
+-  BYTE bR = bcolor & 0xFF;
+-  // Convert alpha to [0,1]
+-  float fAlpha = fA / 255.0f;
+-  float bAlpha = bA / 255.0f;
+-  // Result alpha
+-  float retAlpha = fAlpha + (1 - fAlpha) * bAlpha;
+-  if (retAlpha <= 1e-6f) {
+-    // Fully transparent result — return background unchanged as fallback.
+-    return bcolor;
+-  }
+-  auto mix = [&](float fc, float bc) -> BYTE {
+-    return static_cast<BYTE>((fc * fAlpha + bc * bAlpha * (1 - fAlpha)) /
+-                             retAlpha);
+-  };
+-  BYTE retR = mix(fR, bR);
+-  BYTE retG = mix(fG, bG);
+-  BYTE retB = mix(fB, bB);
+-  BYTE outA = static_cast<BYTE>(retAlpha * 255.0f);
+-  return (static_cast<COLORREF>(outA) << 24) | (retB << 16) | (retG << 8) |
+-         retR;
+-}
+-// parse color value, with fallback value
+-static Bool _RimeGetColor(RimeConfig* config,
+-                          const std::string& key,
+-                          int& value,
+-                          const ColorFormat& fmt,
+-                          const unsigned int& fallback) {
+-  char color[256] = {0};
+-  if (!rime_api->config_get_string(config, key.c_str(), color, 256)) {
+-    value = fallback;
+-    return False;
+-  }
+-  const auto color_str = std::string(color);
+-  // adjudge if str is 0x 0X # hex color format, return trimmed hex part
+-  // out part is 6 or 8 length hex string without white space
+-  const auto parse_color_code = [](const std::string& str, std::string& out) {
+-    if (str.empty())
+-      return false;
+-    size_t start = 0;
+-    if (str[0] == '#') {
+-      start = 1;
+-    } else if (str.size() >= 2 &&
+-               (str.compare(0, 2, "0x") == 0 || str.compare(0, 2, "0X") == 0)) {
+-      start = 2;
+-    } else {
+-      return false;
+-    }
+-    const std::string hex_part = str.substr(start);
+-    if (hex_part.empty())
+-      return false;
+-    if ((start == 1 || start == 2) && hex_part.length() != 3 &&
+-        hex_part.length() != 4 && hex_part.length() != 6 &&
+-        hex_part.length() != 8) {
+-      return false;
+-    }
+-    for (char c : hex_part) {
+-      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+-            (c >= 'A' && c <= 'F')))
+-        return false;
+-    }
+-    out = str.substr(start).substr(0, 8);
+-#define _2C(c) std::string(2, c)
+-    if (out.size() == 3)
+-      out = _2C(out[0]) + _2C(out[1]) + _2C(out[2]);
+-    else if (out.size() == 4)
+-      out = _2C(out[0]) + _2C(out[1]) + _2C(out[2]) + _2C(out[3]);
+-#undef _2C
+-    return true;
+-  };
+-  auto hex_color = std::string();
+-  if (parse_color_code(color_str, hex_color)) {
+-    value = std::stoul(hex_color, 0, 16);
+-    if (hex_color.length() == 6)
+-      value = (fmt != COLOR_RGBA) ? (value | 0xff000000)
+-                                  : (((unsigned int)value << 8) | 0x000000ff);
+-  } else {
+-    if (!rime_api->config_get_int(config, key.c_str(), &value)) {
+-      value = fallback;
+-      return False;
+-    }
+-    if (value <= 0xffffff)
+-      value = (fmt != COLOR_RGBA) ? (value | 0xff000000)
+-                                  : (((unsigned int)value << 8) | 0x000000ff);
+-    else if (value > 0xffffffff)
+-      value &= 0xffffffff;
+-  }
+-  if (fmt == COLOR_ARGB)
+-    value = ARGB2ABGR(value);
+-  else if (fmt == COLOR_RGBA)
+-    value = RGBA2ABGR(value);
+-  value &= 0xffffffff;
+-  return True;
+-}
+-
+-template <typename T, size_t N>
+-using Array = std::array<std::pair<const char*, T>, N>;
+-
+-// parset bool type configuration to T type value trueValue / falseValue
+-template <typename T>
+-void _RimeGetBool(RimeConfig* config,
+-                  const char* key,
+-                  bool cond,
+-                  T& value,
+-                  const T& trueValue = true,
+-                  const T& falseValue = false) {
+-  Bool tempb = False;
+-  if (rime_api->config_get_bool(config, key, &tempb) || cond)
+-    value = (!!tempb) ? trueValue : falseValue;
+-}
+-// parse string option to T type value, with fallback
+-template <typename T, size_t N>
+-void _RimeParseStringOptWithFallback(RimeConfig* config,
+-                                     const char* key,
+-                                     T& value,
+-                                     const Array<T, N>& arr,
+-                                     const T& fallback) {
+-  char str_buff[256] = {0};
+-  if (rime_api->config_get_string(config, key, str_buff, 255)) {
+-    for (size_t i = 0; i < N; ++i) {
+-      if (strcmp(arr[i].first, str_buff) == 0) {
+-        value = arr[i].second;
+-        return;
+-      }
+-    }
+-  }
+-  value = fallback;
+-}
+-
+-template <typename T>
+-void _RimeGetIntStr(RimeConfig* config,
+-                    const char* key,
+-                    T& value,
+-                    const char* fb_key = nullptr,
+-                    const void* fb_value = nullptr,
+-                    const std::function<void(T&)>& func = nullptr) {
+-  if constexpr (std::is_same<T, int>::value) {
+-    if (!rime_api->config_get_int(config, key, &value) && fb_key != 0)
+-      rime_api->config_get_int(config, fb_key, &value);
+-  } else if constexpr (std::is_same<T, std::wstring>::value) {
+-    const int BUF_SIZE = 2047;
+-    char buffer[BUF_SIZE + 1] = {0};
+-    if (rime_api->config_get_string(config, key, buffer, BUF_SIZE) ||
+-        rime_api->config_get_string(config, fb_key, buffer, BUF_SIZE)) {
+-      value = u8tow(buffer);
+-    } else if (fb_value) {
+-      value = *(T*)fb_value;
+-    }
+-  }
+-  if (func)
+-    func(value);
+-}
+-
+-// Helper to iterate a Rime map and invoke callback with key/path
+-static void ForEachRimeMap(
+-    RimeConfig* config,
+-    const std::string& path,
+-    const std::function<void(const char* key, const char* child_path)>& cb) {
+-  RimeConfigIterator iter;
+-  if (!rime_api->config_begin_map(&iter, config, path.c_str()))
+-    return;
+-  while (rime_api->config_next(&iter)) {
+-    cb(iter.key, iter.path);
+-  }
+-  rime_api->config_end(&iter);
+-}
+-
+-// Helper to iterate a Rime list and invoke callback with item path
+-static void ForEachRimeList(
+-    RimeConfig* config,
+-    const std::string& path,
+-    const std::function<void(const char* item_path)>& cb) {
+-  RimeConfigIterator iter;
+-  if (!rime_api->config_begin_list(&iter, config, path.c_str()))
+-    return;
+-  while (rime_api->config_next(&iter)) {
+-    cb(iter.path);
+-  }
+-  rime_api->config_end(&iter);
+-}
+-
+-void RimeWithWeaselHandler::_UpdateShowNotifications(RimeConfig* config,
+-                                                     bool initialize) {
+-  Bool show_notifications = true;
+-  if (initialize)
+-    m_show_notifications_base.clear();
+-  m_show_notifications.clear();
+-
+-  if (rime_api->config_get_bool(config, "show_notifications",
+-                                &show_notifications)) {
+-    // config read as bool, for global all on or off
+-    if (show_notifications)
+-      m_show_notifications["always"] = true;
+-    if (initialize)
+-      m_show_notifications_base = m_show_notifications;
+-  } else {
+-    // read as list using helper
+-    ForEachRimeList(config, "show_notifications", [&](const char* item_path) {
+-      char buffer[256] = {0};
+-      if (rime_api->config_get_string(config, item_path, buffer, 256))
+-        m_show_notifications[std::string(buffer)] = true;
+-    });
+-    if (initialize)
+-      m_show_notifications_base = m_show_notifications;
+-    if (m_show_notifications.empty()) {
+-      // not configured, or incorrect type
+-      if (initialize)
+-        m_show_notifications_base["always"] = true;
+-      m_show_notifications = m_show_notifications_base;
+-    }
+-  }
+-}
+-
+-// update ui's style parameters, ui has been check before referenced
+-static void _UpdateUIStyle(RimeConfig* config, UI* ui, bool initialize) {
+-  UIStyle& style(ui->style());
+-  const std::function<void(std::wstring&)> rmspace = [](std::wstring& str) {
+-    str = std::regex_replace(str, std::wregex(L"\\s*(,|:|^|$)\\s*"), L"$1");
+-  };
+-  const std::function<void(int&)> _abs = [](int& value) { value = abs(value); };
+-  // get font faces
+-  _RimeGetIntStr(config, "style/font_face", style.font_face, 0, 0, rmspace);
+-  std::wstring* const pFallbackFontFace = initialize ? &style.font_face : NULL;
+-  _RimeGetIntStr(config, "style/label_font_face", style.label_font_face, 0,
+-                 pFallbackFontFace, rmspace);
+-  _RimeGetIntStr(config, "style/comment_font_face", style.comment_font_face, 0,
+-                 pFallbackFontFace, rmspace);
+-  // able to set label font/comment font empty, force fallback to font face.
+-  if (style.label_font_face.empty())
+-    style.label_font_face = style.font_face;
+-  if (style.comment_font_face.empty())
+-    style.comment_font_face = style.font_face;
+-  // get font points
+-  _RimeGetIntStr(config, "style/font_point", style.font_point);
+-  if (style.font_point <= 0)
+-    style.font_point = 12;
+-  _RimeGetIntStr(config, "style/label_font_point", style.label_font_point,
+-                 "style/font_point", 0, _abs);
+-  _RimeGetIntStr(config, "style/comment_font_point", style.comment_font_point,
+-                 "style/font_point", 0, _abs);
+-  _RimeGetIntStr(config, "style/candidate_abbreviate_length",
+-                 style.candidate_abbreviate_length, 0, 0, _abs);
+-  _RimeGetBool(config, "style/inline_preedit", initialize,
+-               style.inline_preedit);
+-  _RimeGetBool(config, "style/vertical_auto_reverse", initialize,
+-               style.vertical_auto_reverse);
+-  static constexpr Array<UIStyle::PreeditType, 3> _preeditArr = {
+-      {{"composition", UIStyle::COMPOSITION},
+-       {"preview", UIStyle::PREVIEW},
+-       {"preview_all", UIStyle::PREVIEW_ALL}}};
+-  _RimeParseStringOptWithFallback(config, "style/preedit_type",
+-                                  style.preedit_type, _preeditArr,
+-                                  style.preedit_type);
+-  static constexpr Array<UIStyle::AntiAliasMode, 5> _aliasModeArr = {
+-      {{"force_dword", UIStyle::FORCE_DWORD},
+-       {"cleartype", UIStyle::CLEARTYPE},
+-       {"grayscale", UIStyle::GRAYSCALE},
+-       {"aliased", UIStyle::ALIASED},
+-       {"default", UIStyle::DEFAULT}}};
+-  _RimeParseStringOptWithFallback(config, "style/antialias_mode",
+-                                  style.antialias_mode, _aliasModeArr,
+-                                  style.antialias_mode);
+-  static constexpr Array<UIStyle::HoverType, 3> _hoverTypeArr = {
+-      {{"none", UIStyle::HoverType::NONE},
+-       {"semi_hilite", UIStyle::HoverType::SEMI_HILITE},
+-       {"hilite", UIStyle::HoverType::HILITE}}};
+-  _RimeParseStringOptWithFallback(config, "style/hover_type", style.hover_type,
+-                                  _hoverTypeArr, style.hover_type);
+-  static constexpr Array<UIStyle::LayoutAlignType, 3> _alignType = {
+-      {{"top", UIStyle::ALIGN_TOP},
+-       {"center", UIStyle::ALIGN_CENTER},
+-       {"bottom", UIStyle::ALIGN_BOTTOM}}};
+-  _RimeParseStringOptWithFallback(config, "style/layout/align_type",
+-                                  style.align_type, _alignType,
+-                                  style.align_type);
+-  _RimeGetBool(config, "style/display_tray_icon", initialize,
+-               style.display_tray_icon);
+-  _RimeGetBool(config, "style/ascii_tip_follow_cursor", initialize,
+-               style.ascii_tip_follow_cursor);
+-  _RimeGetBool(config, "style/horizontal", initialize, style.layout_type,
+-               UIStyle::LAYOUT_HORIZONTAL, UIStyle::LAYOUT_VERTICAL);
+-  _RimeGetBool(config, "style/paging_on_scroll", initialize,
+-               style.paging_on_scroll);
+-  _RimeGetBool(config, "style/click_to_capture", initialize,
+-               style.click_to_capture, true, false);
+-  _RimeGetBool(config, "style/fullscreen", false, style.layout_type,
+-               ((style.layout_type == UIStyle::LAYOUT_HORIZONTAL)
+-                    ? UIStyle::LAYOUT_HORIZONTAL_FULLSCREEN
+-                    : UIStyle::LAYOUT_VERTICAL_FULLSCREEN),
+-               style.layout_type);
+-  _RimeGetBool(config, "style/vertical_text", false, style.layout_type,
+-               UIStyle::LAYOUT_VERTICAL_TEXT, style.layout_type);
+-  _RimeGetBool(config, "style/vertical_text_left_to_right", false,
+-               style.vertical_text_left_to_right);
+-  _RimeGetBool(config, "style/vertical_text_with_wrap", false,
+-               style.vertical_text_with_wrap);
+-  static constexpr Array<bool, 2> _text_orientation = {
+-      {{"horizontal", false}, {"vertical", true}}};
+-  bool _text_orientation_bool = false;
+-  _RimeParseStringOptWithFallback(config, "style/text_orientation",
+-                                  _text_orientation_bool, _text_orientation,
+-                                  _text_orientation_bool);
+-  if (_text_orientation_bool)
+-    style.layout_type = UIStyle::LAYOUT_VERTICAL_TEXT;
+-  _RimeGetIntStr(config, "style/label_format", style.label_text_format);
+-  _RimeGetIntStr(config, "style/mark_text", style.mark_text);
+-  _RimeGetIntStr(config, "style/layout/baseline", style.baseline, 0, 0, _abs);
+-  _RimeGetIntStr(config, "style/layout/linespacing", style.linespacing, 0, 0,
+-                 _abs);
+-  _RimeGetIntStr(config, "style/layout/min_width", style.min_width, 0, 0, _abs);
+-  _RimeGetIntStr(config, "style/layout/max_width", style.max_width, 0, 0, _abs);
+-  _RimeGetIntStr(config, "style/layout/min_height", style.min_height, 0, 0,
+-                 _abs);
+-  _RimeGetIntStr(config, "style/layout/max_height", style.max_height, 0, 0,
+-                 _abs);
+-  // layout (alternative to style/horizontal)
+-  static constexpr Array<UIStyle::LayoutType, 5> _layoutArr = {
+-      {{"vertical", UIStyle::LAYOUT_VERTICAL},
+-       {"horizontal", UIStyle::LAYOUT_HORIZONTAL},
+-       {"vertical_text", UIStyle::LAYOUT_VERTICAL_TEXT},
+-       {"vertical+fullscreen", UIStyle::LAYOUT_VERTICAL_FULLSCREEN},
+-       {"horizontal+fullscreen", UIStyle::LAYOUT_HORIZONTAL_FULLSCREEN}}};
+-  _RimeParseStringOptWithFallback(config, "style/layout/type",
+-                                  style.layout_type, _layoutArr,
+-                                  style.layout_type);
+-  // disable max_width when full screen
+-  if (style.layout_type == UIStyle::LAYOUT_HORIZONTAL_FULLSCREEN ||
+-      style.layout_type == UIStyle::LAYOUT_VERTICAL_FULLSCREEN) {
+-    style.max_width = 0;
+-    style.inline_preedit = false;
+-  }
+-  _RimeGetIntStr(config, "style/layout/border", style.border,
+-                 "style/layout/border_width", 0, _abs);
+-  _RimeGetIntStr(config, "style/layout/margin_x", style.margin_x);
+-  _RimeGetIntStr(config, "style/layout/margin_y", style.margin_y);
+-  _RimeGetIntStr(config, "style/layout/spacing", style.spacing, 0, 0, _abs);
+-  _RimeGetIntStr(config, "style/layout/candidate_spacing",
+-                 style.candidate_spacing, 0, 0, _abs);
+-  _RimeGetIntStr(config, "style/layout/hilite_spacing", style.hilite_spacing, 0,
+-                 0, _abs);
+-  _RimeGetIntStr(config, "style/layout/hilite_padding_x",
+-                 style.hilite_padding_x, "style/layout/hilite_padding", 0,
+-                 _abs);
+-  _RimeGetIntStr(config, "style/layout/hilite_padding_y",
+-                 style.hilite_padding_y, "style/layout/hilite_padding", 0,
+-                 _abs);
+-  _RimeGetIntStr(config, "style/layout/shadow_radius", style.shadow_radius, 0,
+-                 0, _abs);
+-  // disable shadow for fullscreen layout
+-  style.shadow_radius *=
+-      (!(style.layout_type == UIStyle::LAYOUT_HORIZONTAL_FULLSCREEN ||
+-         style.layout_type == UIStyle::LAYOUT_VERTICAL_FULLSCREEN));
+-  _RimeGetIntStr(config, "style/layout/shadow_offset_x", style.shadow_offset_x);
+-  _RimeGetIntStr(config, "style/layout/shadow_offset_y", style.shadow_offset_y);
+-  // round_corner as alias of hilited_corner_radius
+-  _RimeGetIntStr(config, "style/layout/hilited_corner_radius",
+-                 style.round_corner, "style/layout/round_corner", 0, _abs);
+-  // corner_radius not set, fallback to round_corner
+-  _RimeGetIntStr(config, "style/layout/corner_radius", style.round_corner_ex,
+-                 "style/layout/round_corner", 0, _abs);
+-  // fix padding and spacing settings
+-  if (style.layout_type != UIStyle::LAYOUT_VERTICAL_TEXT) {
+-    // hilite_padding vs spacing
+-    // if hilite_padding over spacing, increase spacing
+-    style.spacing = max(style.spacing, style.hilite_padding_y * 2);
+-    // hilite_padding vs candidate_spacing
+-    if (style.layout_type == UIStyle::LAYOUT_VERTICAL_FULLSCREEN ||
+-        style.layout_type == UIStyle::LAYOUT_VERTICAL) {
+-      // vertical, if hilite_padding_y over candidate spacing,
+-      // increase candidate spacing
+-      style.candidate_spacing =
+-          max(style.candidate_spacing, style.hilite_padding_y * 2);
+-    } else {
+-      // horizontal, if hilite_padding_x over candidate
+-      // spacing, increase candidate spacing
+-      style.candidate_spacing =
+-          max(style.candidate_spacing, style.hilite_padding_x * 2);
+-    }
+-    // hilite_padding_x vs hilite_spacing
+-    if (!style.inline_preedit)
+-      style.hilite_spacing = max(style.hilite_spacing, style.hilite_padding_x);
+-  } else  // LAYOUT_VERTICAL_TEXT
+-  {
+-    // hilite_padding_x vs spacing
+-    // if hilite_padding over spacing, increase spacing
+-    style.spacing = max(style.spacing, style.hilite_padding_x * 2);
+-    // hilite_padding vs candidate_spacing
+-    // if hilite_padding_x over candidate
+-    // spacing, increase candidate spacing
+-    style.candidate_spacing =
+-        max(style.candidate_spacing, style.hilite_padding_x * 2);
+-    // vertical_text_with_wrap and hilite_padding_y over candidate_spacing
+-    if (style.vertical_text_with_wrap)
+-      style.candidate_spacing =
+-          max(style.candidate_spacing, style.hilite_padding_y * 2);
+-    // hilite_padding_y vs hilite_spacing
+-    if (!style.inline_preedit)
+-      style.hilite_spacing = max(style.hilite_spacing, style.hilite_padding_y);
+-  }
+-  // fix padding and margin settings
+-  int scale = style.margin_x < 0 ? -1 : 1;
+-  style.margin_x = scale * max(style.hilite_padding_x, abs(style.margin_x));
+-  scale = style.margin_y < 0 ? -1 : 1;
+-  style.margin_y = scale * max(style.hilite_padding_y, abs(style.margin_y));
+-  // get enhanced_position
+-  _RimeGetBool(config, "style/enhanced_position", initialize,
+-               style.enhanced_position, true, false);
+-  // get color scheme
+-  const int BUF_SIZE = 255;
+-  char buffer[BUF_SIZE + 1] = {0};
+-  if (initialize && rime_api->config_get_string(config, "style/color_scheme",
+-                                                buffer, BUF_SIZE))
+-    _UpdateUIStyleColor(config, style);
+-}
+-// load color configs to style, by "style/color_scheme" or specific scheme name
+-// "color" which is default empty
+-static bool _UpdateUIStyleColor(RimeConfig* config,
+-                                UIStyle& style,
+-                                const std::string& color) {
+-  const int BUF_SIZE = 255;
+-  char buffer[BUF_SIZE + 1] = {0};
+-  std::string color_mark = "style/color_scheme";
+-  // color scheme
+-  if (rime_api->config_get_string(config, color_mark.c_str(), buffer,
+-                                  BUF_SIZE) ||
+-      !color.empty()) {
+-    std::string prefix("preset_color_schemes/");
+-    prefix += (color.empty()) ? buffer : color;
+-    // define color format, default abgr if not set
+-    ColorFormat fmt = COLOR_ABGR;
+-    static constexpr Array<ColorFormat, 3> _colorFmt = {
+-        {{"argb", COLOR_ARGB}, {"rgba", COLOR_RGBA}, {"abgr", COLOR_ABGR}}};
+-    _RimeParseStringOptWithFallback(config, (prefix + "/color_format").c_str(),
+-                                    fmt, _colorFmt, COLOR_ABGR);
+-#define COLOR(key, value, fallback) \
+-  _RimeGetColor(config, (prefix + "/" + key), value, fmt, fallback)
+-    COLOR("back_color", style.back_color, 0xffffffff);
+-    COLOR("shadow_color", style.shadow_color, 0);
+-    COLOR("prevpage_color", style.prevpage_color, 0);
+-    COLOR("nextpage_color", style.nextpage_color, 0);
+-    COLOR("text_color", style.text_color, 0xff000000);
+-    COLOR("candidate_text_color", style.candidate_text_color, style.text_color);
+-    COLOR("candidate_back_color", style.candidate_back_color, 0);
+-    COLOR("border_color", style.border_color, style.text_color);
+-    COLOR("hilited_text_color", style.hilited_text_color, style.text_color);
+-    COLOR("hilited_back_color", style.hilited_back_color, style.back_color);
+-    COLOR("hilited_candidate_text_color", style.hilited_candidate_text_color,
+-          style.hilited_text_color);
+-    COLOR("hilited_candidate_back_color", style.hilited_candidate_back_color,
+-          style.hilited_back_color);
+-    COLOR("hilited_candidate_shadow_color",
+-          style.hilited_candidate_shadow_color, 0);
+-    COLOR("hilited_shadow_color", style.hilited_shadow_color, 0);
+-    COLOR("candidate_shadow_color", style.candidate_shadow_color, 0);
+-    COLOR("candidate_border_color", style.candidate_border_color, 0);
+-    COLOR("hilited_candidate_border_color",
+-          style.hilited_candidate_border_color, 0);
+-    COLOR("label_color", style.label_text_color,
+-          blend_colors(style.candidate_text_color, style.candidate_back_color));
+-    COLOR("hilited_label_color", style.hilited_label_text_color,
+-          blend_colors(style.hilited_candidate_text_color,
+-                       style.hilited_candidate_back_color));
+-    COLOR("comment_text_color", style.comment_text_color,
+-          style.label_text_color);
+-    COLOR("hilited_comment_text_color", style.hilited_comment_text_color,
+-          style.hilited_label_text_color);
+-    COLOR("hilited_mark_color", style.hilited_mark_color, 0);
+-#undef COLOR
+-    return true;
+-  }
+-  return false;
+-}
+-static void _LoadAppOptions(RimeConfig* config,
+-                            AppOptionsByAppName& app_options) {
+-  app_options.clear();
+-  ForEachRimeMap(
+-      config, "app_options", [&](const char* app_key, const char* app_path) {
+-        AppOptions& options(app_options[app_key]);
+-        ForEachRimeMap(
+-            config, app_path, [&](const char* opt_key, const char* opt_path) {
+-              Bool value = False;
+-              if (rime_api->config_get_bool(config, opt_path, &value)) {
+-                options[opt_key] = !!value;
+-              }
+-            });
+-      });
+-}
+-
+ void RimeWithWeaselHandler::_GetStatus(Status& stat,
+                                        WeaselSessionId ipc_id,
+                                        Context& ctx) {
++  if (ipc_id == 0)
++    return;
+   SessionStatus& session_status = get_session_status(ipc_id);
+-  RimeSessionId session_id = session_status.session_id;
+-  RIME_STRUCT(RimeStatus, status);
+-  if (rime_api->get_status(session_id, &status)) {
+-    std::string schema_id = "";
+-    if (status.schema_id)
+-      schema_id = status.schema_id;
+-    stat.schema_name = u8tow(status.schema_name);
++  heng_session_t session_id = session_status.session_id;
++  HengStatus status;
++  if (heng_get_status(session_id, &status)) {
++    std::string schema_id =
++        status.schema_id ? std::string(status.schema_id) : std::string();
++    stat.schema_name =
++        status.schema_name ? u8tow(status.schema_name) : std::wstring();
+     stat.schema_id = u8tow(status.schema_id);
+     stat.ascii_mode = !!status.is_ascii_mode;
+     stat.composing = !!status.is_composing;
+     stat.disabled = !!status.is_disabled;
+     stat.full_shape = !!status.is_full_shape;
++    session_status.status.is_ascii_mode = !!status.is_ascii_mode;
++    session_status.status.is_composing = !!status.is_composing;
++    session_status.status.is_disabled = !!status.is_disabled;
++    session_status.status.is_full_shape = !!status.is_full_shape;
++    session_status.status.schema_id = schema_id;
++    session_status.status.schema_name =
++        status.schema_name ? std::string(status.schema_name) : std::string();
+     if (schema_id != m_last_schema_id) {
+       session_status.__synced = false;
+       m_last_schema_id = schema_id;
+       if (schema_id != ".default") {  // don't load for schema select menu
++        // M1：schema 特定样式暂不加载（config 通道待接）
+         bool inline_preedit = session_status.style.inline_preedit;
+-        _LoadSchemaSpecificSettings(ipc_id, schema_id);
+         _LoadAppInlinePreeditSet(ipc_id, true);
+         if (session_status.style.inline_preedit != inline_preedit)
+-          // in case of inline_preedit set in schema
+           _UpdateInlinePreeditStatus(ipc_id);
+-        // refresh icon after schema changed
+-        _RefreshTrayIcon(session_id, _UpdateUICallback);
+         m_ui->style() = session_status.style;
+-        if (m_show_notifications.find("schema") != m_show_notifications.end() &&
+-            m_show_notifications_time > 0) {
+-          ctx.aux.str = stat.schema_name;
+-          m_ui->Update(ctx, stat);
+-          m_ui->ShowWithTimeout(m_show_notifications_time);
+-        }
+       }
+     }
+-    rime_api->free_status(&status);
++    heng_free_status(&status);
++    // 原版行为：_UpdateUI 的 context 在此一并填充（漏掉会导致 UI 恒空不显示）
++    _GetContext(ctx, session_id);
+   }
+ }
+ 
+ void RimeWithWeaselHandler::_GetContext(Context& weasel_context,
+-                                        RimeSessionId session_id) {
+-  RIME_STRUCT(RimeContext, ctx);
+-  if (rime_api->get_context(session_id, &ctx)) {
+-    if (ctx.composition.length > 0) {
+-      weasel_context.preedit.str = u8tow(ctx.composition.preedit);
+-      if (ctx.composition.sel_start < ctx.composition.sel_end) {
+-        TextAttribute attr;
+-        attr.type = HIGHLIGHTED;
+-        attr.range.start =
+-            utf8towcslen(ctx.composition.preedit, ctx.composition.sel_start);
+-        attr.range.end =
+-            utf8towcslen(ctx.composition.preedit, ctx.composition.sel_end);
+-
+-        weasel_context.preedit.attributes.push_back(attr);
+-      }
+-    }
+-    if (ctx.menu.num_candidates) {
++                                        heng_session_t session_id) {
++  HengContext ctx;
++  int rc = heng_get_context(session_id, &ctx);
++  hlog("GetContext: session=%llu rc=%d cands=%d preedit=%s",
++       (unsigned long long)session_id, rc,
++       rc == 1 ? ctx.candidate_count : -1,
++       (rc == 1 && ctx.preedit) ? ctx.preedit : "(none)");
++  if (rc == 1) {
++    if (ctx.preedit && strlen(ctx.preedit) > 0) {
++      weasel_context.preedit.str = u8tow(ctx.preedit);
++      // 用户要求：不显示选中高亮段（HIGHLIGHTED 下划线），仅保留纯文本 preedit。
++      // if (ctx.sel_start < ctx.sel_end) { ... HIGHLIGHTED attr ... }
++    }
++    if (ctx.candidate_count > 0) {
+       CandidateInfo& cinfo(weasel_context.cinfo);
+       _GetCandidateInfo(cinfo, ctx);
+     }
+-    rime_api->free_context(&ctx);
++    heng_free_context(&ctx);
++  }
++}
++
++void RimeWithWeaselHandler::_LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
++                                                     bool ignore_app_name) {
++  SessionStatus& session_status = get_session_status(ipc_id);
++  heng_session_t session_id = session_status.session_id;
++  bool inline_preedit = session_status.style.inline_preedit;
++  // M1：app_options 暂无数据源（config 通道待接），回落 base 样式
++  bool found = false;
++  if (!found) {
++    session_status.style.inline_preedit = m_base_style.inline_preedit;
+   }
++  if (session_status.style.inline_preedit != inline_preedit)
++    _UpdateInlinePreeditStatus(ipc_id);
+ }
+ 
+ void RimeWithWeaselHandler::_UpdateInlinePreeditStatus(WeaselSessionId ipc_id) {
+   if (!m_ui)
+     return;
+   SessionStatus& session_status = get_session_status(ipc_id);
+-  RimeSessionId session_id = session_status.session_id;
++  heng_session_t session_id = session_status.session_id;
+   // set inline_preedit option
+   bool inline_preedit = session_status.style.inline_preedit;
+-  rime_api->set_option(session_id, "inline_preedit", Bool(inline_preedit));
+-  // show soft cursor on weasel panel but not inline
+-  rime_api->set_option(session_id, "soft_cursor", Bool(!inline_preedit));
++  heng_set_option(session_id, "inline_preedit", inline_preedit ? 1 : 0);
++  // 用户要求：候选窗 preedit 不显示软光标（U+2038），恒为关
++  heng_set_option(session_id, "soft_cursor", 0);
+ }
+diff --git a/WeaselIPC/ContextUpdater.cpp b/WeaselIPC/ContextUpdater.cpp
+index 8d8c2f0..1f7b664 100644
+--- a/WeaselIPC/ContextUpdater.cpp
++++ b/WeaselIPC/ContextUpdater.cpp
+@@ -56,12 +56,14 @@ void ContextUpdater::_StoreText(Text& target,
+         return;
+ 
+       weasel::TextAttribute attr;
+-      attr.type = HIGHLIGHTED;
+       attr.range.start = _wtoi(vec[0].c_str());
+       attr.range.end = _wtoi(vec[1].c_str());
+       attr.range.cursor = _wtoi(vec[2].c_str());
+-
+-      target.attributes.push_back(attr);
++      // 零宽区间（start==end）不生成 HIGHLIGHTED，避免画出选中阴影
++      if (attr.range.start < attr.range.end) {
++        attr.type = HIGHLIGHTED;
++        target.attributes.push_back(attr);
++      }
+       return;
+     }
+   }
+diff --git a/WeaselServer/WeaselServer.rc b/WeaselServer/WeaselServer.rc
+index 53fcadd45ddf3bd25a067c053c65aefe67d366fe..50d04f936e0571ebac359c5e535ccd2be1e65175 100644
+GIT binary patch
+delta 38
+ucmbQRiE+Xv#tomCgl!ng88R927>XED8HyS77%~{_CO1kh-@Jx7B@_Vcp9|Fh
+
+delta 38
+ucmbQRiE+Xv#tomCgq0W)8PXUk7>XED8HyS77%~`?CO1kh-@Jx7B@_VX2Mdq@
+
+diff --git a/WeaselTSF/CandidateList.cpp b/WeaselTSF/CandidateList.cpp
+index a22a525..750f11c 100644
+--- a/WeaselTSF/CandidateList.cpp
++++ b/WeaselTSF/CandidateList.cpp
+@@ -4,6 +4,7 @@
+ #include "CandidateList.h"
+ #include <KeyEvent.h>
+ #include <math.h>
++#include "debuglog.h"
+ 
+ using namespace std;
+ using namespace weasel;
+@@ -199,6 +200,8 @@ STDMETHODIMP CCandidateList::FinalizeExactCompositionString() {
+ }
+ 
+ void CCandidateList::UpdateUI(const Context& ctx, const Status& status) {
++  tsflog("UpdateUI: composing=%d cands=%u shown=%d", (int)status.composing,
++         (unsigned)ctx.cinfo.candies.size(), (int)_ui->IsShown());
+   if (_ui->style().inline_preedit) {
+     _ui->style().client_caps |= weasel::INLINE_PREEDIT_CAPABLE;
+   } else {
+diff --git a/WeaselTSF/EditSession.cpp b/WeaselTSF/EditSession.cpp
+index 1468e5b..892f134 100644
+--- a/WeaselTSF/EditSession.cpp
++++ b/WeaselTSF/EditSession.cpp
+@@ -2,6 +2,7 @@
+ #include "WeaselTSF.h"
+ #include "CandidateList.h"
+ #include "ResponseParser.h"
++#include "debuglog.h"
+ 
+ STDMETHODIMP WeaselTSF::DoEditSession(TfEditCookie ec) {
+   // get commit string from server
+@@ -12,6 +13,10 @@ STDMETHODIMP WeaselTSF::DoEditSession(TfEditCookie ec) {
+                                 &_cand->style());
+ 
+   bool ok = m_client.GetResponseData(std::ref(parser));
++  tsflog("DoEditSession: ok=%d commit_len=%u composing=%d inline_preedit=%d "
++         "cands=%u",
++         (int)ok, (unsigned)commit.size(), (int)_status.composing,
++         (int)config.inline_preedit, (unsigned)context->cinfo.candies.size());
+ 
+   _UpdateLanguageBar(_status);
+ 
+diff --git a/WeaselTSF/KeyEventSink.cpp b/WeaselTSF/KeyEventSink.cpp
+index 6a18c13..0a38705 100644
+--- a/WeaselTSF/KeyEventSink.cpp
++++ b/WeaselTSF/KeyEventSink.cpp
+@@ -3,6 +3,7 @@
+ #include "WeaselTSF.h"
+ #include <KeyEvent.h>
+ #include "CandidateList.h"
++#include "debuglog.h"
+ 
+ static weasel::KeyEvent prevKeyEvent;
+ static BOOL prevfEaten = FALSE;
+@@ -34,8 +35,11 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
+       else if (ke.keycode == ibus::Down)
+         ke.keycode = ibus::Up;
+     }
+-    if (!keyCountToSimulate)
++    if (!keyCountToSimulate) {
+       *pfEaten = (BOOL)m_client.ProcessKeyEvent(ke);
++      tsflog("ProcessKeyEvent: key=0x%x mask=0x%x -> eaten=%d composing=%d",
++             ke.keycode, ke.mask, (int)*pfEaten, (int)_status.composing);
++    }
+ 
+     if (ke.keycode == ibus::Caps_Lock) {
+       if (prevKeyEvent.keycode == ibus::Caps_Lock && prevfEaten == TRUE &&
+diff --git a/WeaselTSF/WeaselTSF.rc b/WeaselTSF/WeaselTSF.rc
+index 648bad1d09558829b6f53d375e5469e239cdf6c2..346e57cdc16562d91c48d9d2e66d33affa014697 100644
+GIT binary patch
+delta 36
+scmdl~v#DkS2a~W3LpehxLmopBLn=ctgC0W$gWY6D+m)M-Fy&bT0LG6Bt^fc4
+
+delta 36
+scmdl~v#DkS2a~W8Ln1>OLj^+-Ln=ctgC0W$gVJP2+m)M-Fy&bT0KoSOX#fBK
+
+diff --git a/WeaselTSF/debuglog.h b/WeaselTSF/debuglog.h
+new file mode 100644
+index 0000000..a10e7c7
+--- /dev/null
++++ b/WeaselTSF/debuglog.h
+@@ -0,0 +1,22 @@
++#pragma once
++
++// M1 诊断日志（%TEMP%\heng-tsf.log）。Release 下 weasel LOG 宏为 no-op，此函数
++// 用于 TSF 端链路排查；M1 验证完成后可整体移除。
++inline void tsflog(const char* fmt, ...) {
++  char path[MAX_PATH];
++  GetTempPathA(MAX_PATH, path);
++  strcat_s(path, "heng-tsf.log");
++  FILE* f = NULL;
++  if (fopen_s(&f, path, "a") != 0 || !f)
++    return;
++  SYSTEMTIME st;
++  GetLocalTime(&st);
++  fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond,
++          st.wMilliseconds);
++  va_list ap;
++  va_start(ap, fmt);
++  vfprintf(f, fmt, ap);
++  va_end(ap);
++  fputc('\n', f);
++  fclose(f);
++}
+diff --git a/WeaselUI/HorizontalLayout.cpp b/WeaselUI/HorizontalLayout.cpp
+index 99d8e64..0ad9d36 100644
+--- a/WeaselUI/HorizontalLayout.cpp
++++ b/WeaselUI/HorizontalLayout.cpp
+@@ -86,7 +86,9 @@ void HorizontalLayout::DoLayout(CDCHandle dc, PDWR pDWR) {
+     for (auto i = 0; i < candidates_count && i < MAX_CANDIDATES_COUNT; ++i) {
+       int current_cand_width = 0;
+       if (i > 0)
+-        w += _style.candidate_spacing;
++        // 候选间距需容纳高亮块向两侧膨胀的 hilite_padding_x*2，
++        // 否则高亮背景会盖住相邻候选的序号
++        w += max(_style.candidate_spacing, _style.hilite_padding_x * 2);
+       if (id == i)
+         w += base_offset;
+       /* Label */
+diff --git a/WeaselUI/VerticalLayout.cpp b/WeaselUI/VerticalLayout.cpp
+index fee38f6..b8f0984 100644
+--- a/WeaselUI/VerticalLayout.cpp
++++ b/WeaselUI/VerticalLayout.cpp
+@@ -84,7 +84,8 @@ void weasel::VerticalLayout::DoLayout(CDCHandle dc, PDWR pDWR) {
+   int max_comment_width = 0;   /* comment, or none */
+   for (auto i = 0; i < candidates_count && i < MAX_CANDIDATES_COUNT; ++i) {
+     if (i > 0)
+-      height += _style.candidate_spacing;
++      // 行距需容纳高亮块上下膨胀的 hilite_padding_y*2
++      height += max(_style.candidate_spacing, _style.hilite_padding_y * 2);
+ 
+     int w = real_margin_x + base_offset, max_height_curren_candidate = 0;
+     int candidate_width = base_offset, comment_width = 0;
+diff --git a/build-x64.bat b/build-x64.bat
+new file mode 100644
+index 0000000..3b5604a
+--- /dev/null
++++ b/build-x64.bat
+@@ -0,0 +1,18 @@
++@echo off
++rem HengIME: build weasel x64 Release only (skip Win32/ARM: no 32-bit rime.lib)
++rem Props already rendered: weasel.props (BOOST_ROOT -> deps\boost_1_84_0, toolset v143)
++
++setlocal
++set WEASEL_ROOT=%~dp0
++cd /d %WEASEL_ROOT%
++
++call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
++if errorlevel 1 exit /b 1
++
++msbuild weasel.sln /t:Build /p:Configuration=Release /p:Platform=x64 /m /nodeReuse:false /v:m /nologo ^
++  /fl2 "/flp2:logfile=msbuild-x64.log;verbosity=normal"
++
++echo.
++echo ExitCode=%ERRORLEVEL%
++echo Log: %WEASEL_ROOT%msbuild-x64.log
++pause
+diff --git a/include/RimeWithWeasel.h b/include/RimeWithWeasel.h
+index ab20d8d..819162b 100644
+--- a/include/RimeWithWeasel.h
++++ b/include/RimeWithWeasel.h
+@@ -5,7 +5,17 @@
+ #include <string>
+ #include <mutex>
+ 
+-#include <rime_api.h>
++#include <heng.h>
++
++/*
++ * M1 薄壳化：RimeWithWeaselHandler 的数据源由 librime (rime_api) 换为 heng-core
++ * (heng_* C ABI)。层间协议（weasel::Context/Status/UIStyle + boost 序列化）不变，
++ * WeaselTSF / WeaselUI / WeaselIPC 零改动。
++ *
++ * M1 范围内的简化（后续增量恢复）：
++ * - UI 样式取默认值（原 RimeConfig 通道待接 heng-core config API）
++ * - schema 特定样式 / app_options / 通知消息暂不加载
++ */
+ 
+ struct CaseInsensitiveCompare {
+   bool operator()(const std::string& str1, const std::string& str2) const {
+@@ -22,14 +32,27 @@ typedef std::map<std::string, bool> AppOptions;
+ typedef std::map<std::string, AppOptions, CaseInsensitiveCompare>
+     AppOptionsByAppName;
+ 
++// 会话状态缓存（原 RimeStatus 的轻量替身，字段名保持 is_* 便于对照）
++struct HengSessionStatus {
++  bool is_ascii_mode;
++  bool is_composing;
++  bool is_disabled;
++  bool is_full_shape;
++  std::string schema_id;
++  std::string schema_name;
++  HengSessionStatus()
++      : is_ascii_mode(false),
++        is_composing(false),
++        is_disabled(false),
++        is_full_shape(false) {}
++};
++
+ struct SessionStatus {
+-  SessionStatus() : style(weasel::UIStyle()), __synced(false), session_id(0) {
+-    RIME_STRUCT(RimeStatus, status);
+-  }
++  SessionStatus() : style(weasel::UIStyle()), __synced(false), session_id(0) {}
+   weasel::UIStyle style;
+-  RimeStatus status;
++  HengSessionStatus status;
+   bool __synced;
+-  RimeSessionId session_id;
++  heng_session_t session_id;
+ };
+ typedef std::map<DWORD, SessionStatus> SessionStatusMap;
+ typedef DWORD WeaselSessionId;
+@@ -66,26 +89,21 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
+   void OnUpdateUI(std::function<void()> const& cb);
+ 
+  private:
+-  void _Setup();
+   bool _IsDeployerRunning();
+   void _UpdateUI(WeaselSessionId ipc_id);
+-  void _LoadSchemaSpecificSettings(WeaselSessionId ipc_id,
+-                                   const std::string& schema_id);
+-  void _LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
+-                                bool ignore_app_name = false);
+   bool _ShowMessage(weasel::Context& ctx, weasel::Status& status);
+   bool _Respond(WeaselSessionId ipc_id, EatLine eat);
+   void _ReadClientInfo(WeaselSessionId ipc_id, LPWSTR buffer);
+-  void _GetCandidateInfo(weasel::CandidateInfo& cinfo, RimeContext& ctx);
++  void _GetCandidateInfo(weasel::CandidateInfo& cinfo, HengContext& ctx);
+   void _GetStatus(weasel::Status& stat,
+                   WeaselSessionId ipc_id,
+                   weasel::Context& ctx);
+-  void _GetContext(weasel::Context& ctx, RimeSessionId session_id);
+-  void _UpdateShowNotifications(RimeConfig* config, bool initialize = false);
+-
++  void _GetContext(weasel::Context& ctx, heng_session_t session_id);
++  void _LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
++                                bool ignore_app_name = false);
+   void _UpdateInlinePreeditStatus(WeaselSessionId ipc_id);
+ 
+-  RimeSessionId to_session_id(WeaselSessionId ipc_id) {
++  heng_session_t to_session_id(WeaselSessionId ipc_id) {
+     return m_session_status_map[ipc_id].session_id;
+   }
+   SessionStatus& get_session_status(WeaselSessionId ipc_id) {
+@@ -106,10 +124,6 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
+   std::map<std::string, bool> m_show_notifications_base;
+   std::function<void()> _UpdateUICallback;
+ 
+-  static void OnNotify(void* context_object,
+-                       uintptr_t session_id,
+-                       const char* message_type,
+-                       const char* message_value);
+   static std::string m_message_type;
+   static std::string m_message_value;
+   static std::string m_message_label;
+diff --git a/include/heng.h b/include/heng.h
+new file mode 100644
+index 0000000..b1954fe
+--- /dev/null
++++ b/include/heng.h
+@@ -0,0 +1,164 @@
++/*
++ * heng.h —— HengIME 统一能力模块 C ABI（M0）
++ *
++ * 对应 core/src/capi.rs 的导出。字段顺序与 Rust 侧 #[repr(C)] 严格一致，
++ * 修改任一侧必须同步另一侧并更新 heng_describe 的 abi_version。
++ *
++ * 内存约定：
++ * - core 分配的字符串/结构体由调用方用 heng_free_string / heng_free_context 释放
++ * - heng_version / heng_describe / heng_last_error 返回的指针归 core，
++ *   调用方不得释放；heng_last_error 的指针在下次 heng_* 调用前有效
++ *
++ * 线程约定：librime 会话操作不保证线程安全，调用方须自行串行化
++ * （同一会话的调用应从单一线程或外部加锁发出）。
++ */
++#ifndef HENG_H
++#define HENG_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* ---- 导入/导出标注 ---- */
++#if defined(_WIN32)
++#  ifdef HENG_CORE_BUILD
++#    define HENG_API __declspec(dllexport)
++#  else
++#    define HENG_API __declspec(dllimport)
++#  endif
++#else
++#  define HENG_API __attribute__((visibility("default")))
++#endif
++
++/* 会话句柄：0 表示无效 */
++typedef uint64_t heng_session_t;
++
++/* 布尔返回值 */
++#define HENG_TRUE  1
++#define HENG_FALSE 0
++
++/*
++ * 组合串与候选快照。首字段 data_size 供调用方校验 ABI 版本；
++ * candidates 与 comments 为平行数组，comments 中无注释的槽位为 NULL。
++ * 数组与字符串内存归 core，用 heng_free_context 一次性释放。
++ */
++typedef struct HengContext {
++    int   data_size;              /* sizeof(HengContext) */
++    char* preedit;                /* 组合串（UTF-8），无则为 NULL */
++    int   cursor_pos;             /* 组合串内光标位置（UTF-8 字节偏移） */
++    char** candidates;            /* 候选文本数组，无候选为 NULL */
++    char** comments;              /* 候选注释数组（与 candidates 平行） */
++    int   candidate_count;
++    int   highlighted;            /* 当前页内高亮下标（0 基） */
++    int   page_no;                /* 当前页码（0 基） */
++    int   is_last_page;           /* HENG_TRUE / HENG_FALSE */
++    char* commit_text_preview;    /* 高亮候选对应的预上屏文本，无则为 NULL */
++    /* v2：选键标签数组（与 candidates 平行，缺省槽位 NULL；调用方回退 select_keys/序号） */
++    char** labels;
++    /* v3：组合串高亮区间（已转换部分；sel_start == sel_end 表示无区间） */
++    int   sel_start;
++    int   sel_end;
++    /* v3：选键序列（select_keys，如 "1234567890"；labels 缺省时的回退） */
++    char* select_keys;
++} HengContext;
++
++/*
++ * 会话状态快照（v3）。字符串内存归 core，用 heng_free_status 释放。
++ */
++typedef struct HengStatus {
++    int   data_size;              /* sizeof(HengStatus) */
++    char* schema_id;              /* 当前方案 ID（UTF-8），调用方不得修改 */
++    char* schema_name;            /* 当前方案名（UTF-8） */
++    int   is_ascii_mode;          /* HENG_TRUE / HENG_FALSE */
++    int   is_composing;
++    int   is_disabled;
++    int   is_full_shape;
++} HengStatus;
++
++/* ---- 生命周期 ---- */
++
++/* 初始化引擎并按需部署。传 NULL 使用默认运行时目录（环境变量 HENG_RUNTIME 或 ./runtime）。
++ * 返回 0 成功，-1 失败（heng_last_error 取详情）。 */
++HENG_API int heng_create(const char* shared_data_dir, const char* user_data_dir);
++
++/* 销毁全部会话并 finalize librime。之后不得再调用任何 heng_*（M0 约束）。 */
++HENG_API void heng_destroy(void);
++
++/* 版本描述串，如 "heng-core 0.1.0 / librime 1.17.0"。 */
++HENG_API const char* heng_version(void);
++
++/* 元数据自省：返回静态 JSON（命令清单、abi_version 等）。 */
++HENG_API const char* heng_describe(void);
++
++/* ---- 会话 ---- */
++
++/* 打开会话。app_id 仅用于登记（M0 不做按应用配置）。返回句柄，0 失败。 */
++HENG_API heng_session_t heng_start_session(const char* app_id);
++
++/* 关闭会话。 */
++HENG_API void heng_end_session(heng_session_t session);
++
++/* ---- 输入 ---- */
++
++/* 处理一个按键。返回 HENG_TRUE=已处理，HENG_FALSE=未处理（应透传给应用）。 */
++HENG_API int heng_process_key(heng_session_t session, int keysym, int mask);
++
++/* 模拟一段按键序列（librime 语法，如 "nihao"、"nihao{space}"）。
++ * 返回 HENG_TRUE=全部按键已处理。 */
++HENG_API int heng_simulate_key_sequence(heng_session_t session, const char* key_sequence);
++
++/* 取当前组合串与候选快照。返回 HENG_TRUE 后必须用 heng_free_context 释放。 */
++HENG_API int heng_get_context(heng_session_t session, HengContext* out);
++
++/* 取待上屏文本（消费语义：取后清空）。返回 HENG_TRUE 且 *out 非 NULL 表示有文本；
++ * *out 为 NULL 表示本次无上屏。文本用 heng_free_string 释放。 */
++HENG_API int heng_commit_text(heng_session_t session, char** out);
++
++/* 选中当前页第 index 个候选（0 基）。返回 HENG_TRUE=已选中。 */
++HENG_API int heng_select_candidate_on_current_page(heng_session_t session, int index);
++
++/* 高亮当前页第 index 个候选（不提交；候选窗移动光标用）。 */
++HENG_API int heng_highlight_candidate_on_current_page(heng_session_t session, int index);
++
++/* 翻页。backward 非 0 表示向前翻。返回 HENG_TRUE=已翻页。 */
++HENG_API int heng_change_page(heng_session_t session, int backward);
++
++/* 绑定/改绑会话归属应用（焦点切换时调用；app_options 与开关传播的基础）。
++ * 返回 0 成功，-1 失败（会话不存在）。 */
++HENG_API int heng_set_session_owner(heng_session_t session, const char* app_id);
++
++/* 清空当前组合串（保持会话与输入状态）。 */
++HENG_API void heng_clear(heng_session_t session);
++
++/* 提交当前组合串（上屏）。返回 HENG_TRUE=已产生提交。 */
++HENG_API int heng_commit_composition(heng_session_t session);
++
++/* 设置会话选项（ascii_mode / inline_preedit / vim_mode 等）。返回 HENG_TRUE=成功。 */
++HENG_API int heng_set_option(heng_session_t session, const char* option, int value);
++
++/* 读取会话选项。返回 0/1；-1 表示失败（会话不存在）。 */
++HENG_API int heng_get_option(heng_session_t session, const char* option);
++
++/* 取会话状态快照。返回 HENG_TRUE 后必须用 heng_free_status 释放。 */
++HENG_API int heng_get_status(heng_session_t session, HengStatus* out);
++
++/* 释放 heng_get_status 填充的结构体。 */
++HENG_API void heng_free_status(HengStatus* out);
++
++/* ---- 内存释放 ---- */
++
++HENG_API void heng_free_string(char* s);
++HENG_API void heng_free_context(HengContext* out);
++
++/* ---- 错误 ---- */
++
++/* 最后一次错误的描述（UTF-8）。无错误时返回 NULL。 */
++HENG_API const char* heng_last_error(void);
++
++#ifdef __cplusplus
++} /* extern "C" */
++#endif
++
++#endif /* HENG_H */

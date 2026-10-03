@@ -1,8 +1,10 @@
 # Agent 工作数据（会话记忆、工作区状态）
 .workbuddy/
 
-# librime 预编译产物（按 third_party/README.md 手动获取，不进库）
-third_party/
+# librime 预编译产物（按 third_party/README.md 手动获取，不进库；
+# 目录整体忽略但保留 README——它就是重建指南）
+third_party/*
+!third_party/README.md
 
 # 本地运行时数据（RIME 用户目录、部署产物、日志）
 runtime/

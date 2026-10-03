@@ -1,0 +1,13 @@
+# Boost.Build Configuration
+# Manually overridden: b2 auto-detection builds a wrong vcvarsall.bat path
+# (.../bin/Hostx64/vcvarsall.bat). The real one is in VC/Auxiliary/Build/.
+
+import option ;
+
+using msvc : 14.3 :
+    "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe" :
+    <setup>"C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvarsall.bat"
+    <archiver>"C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lib.exe"
+    ;
+
+option.set keep-going : false ;
