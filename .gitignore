@@ -14,8 +14,9 @@ target/
 core/target/
 **/*.rs.bk
 
-# 试验目录（Slint probe 等编译产物）
-experiments/
+# 试验目录（保留试验源码，只忽略编译产物；试验工程独立于根 workspace）
+experiments/target/
+experiments/*/target/
 
 # Node
 node_modules/
