@@ -176,6 +176,47 @@ HENG_API int heng_hello(int client_abi_version, HengHello* out);
 HENG_API int heng_process_key_ex(heng_session_t session, int keysym, int mask,
                                  char** out_commit, HengContext* out_ctx);
 
+/* ---- 行为统一层（v6；增量追加，v5 及之前全部不变） ----
+ *
+ * 路线 P 的核心：开关传播、按应用初始选项（app_options）、跨重启选项记忆
+ * 全部收进 core，外壳不再各自实现「开关记住范围」。
+ * - heng_set_option：按传播策略广播到其它会话，名单内选项（ascii_mode/full_shape/
+ *   simplification/ascii_punct）自动持久化到用户目录 heng_options.yaml
+ * - heng_start_session：自动应用持久化选项初值
+ * - heng_set_session_owner：自动应用 heng.yaml 的 app_options/<app>/ 初始选项
+ *   （app 覆盖持久化值；不重放持久化，避免覆盖会话实时状态）
+ * 策略初值来自 heng.yaml 的 propagation/policy（per_session | per_app | global）。
+ */
+
+#define HENG_POLICY_PER_SESSION 0
+#define HENG_POLICY_PER_APP     1
+#define HENG_POLICY_GLOBAL      2
+
+/* 设置传播策略。返回 0 成功，-1 非法值；运行时设置优先于 heng.yaml 初值。 */
+HENG_API int heng_set_propagation_policy(int policy);
+
+/* 读取当前传播策略。返回 HENG_POLICY_*；-1 引擎未初始化。 */
+HENG_API int heng_get_propagation_policy(void);
+
+/* ---- 自绘候选窗（v6；运行于 core 内部 UI 线程，X11/XWayland） ----
+ *
+ * 路线 P 的 L2 候选窗：悬浮提示与选中语义由 core 定义（无 classicui 悬浮
+ * 歧义）。点击候选由 core 直接选词，产生的上屏文本经 heng_take_ui_commit
+ * 由外壳取走（外壳应在按键处理与周期轮询中调用）。
+ * x11 不可用时以下调用静默失败，外壳应回退宿主候选窗。
+ */
+
+/* 同步候选窗：取会话 context，有候选则显示于屏幕 (x,y)（光标左下角）并刷新，
+ * 无候选则隐藏。返回 HENG_TRUE=已同步，HENG_FALSE=UI 不可用。 */
+HENG_API int heng_ui_sync(heng_session_t session, int x, int y);
+
+/* 隐藏候选窗（焦点离开时调用）。 */
+HENG_API int heng_ui_hide(void);
+
+/* 取走 UI 点击产生的待上屏文本（消费语义）。返回 HENG_TRUE 且 *out 非 NULL
+ * 表示有文本（heng_free_string 释放）；否则 *out 为 NULL。 */
+HENG_API int heng_take_ui_commit(heng_session_t session, char** out);
+
 /* ---- 配置读取（v4；librime RimeConfig 直通） ----
  *
  * 用途：外壳加载 UI 样式（weasel.yaml 的 preset_color_schemes）与

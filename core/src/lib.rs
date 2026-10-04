@@ -12,6 +12,7 @@ pub mod capi;
 pub mod engine;
 pub mod global;
 pub mod server;
+pub mod ui;
 
 pub use engine::{
     Candidate, ContextSnapshot, Engine, EngineConfig, EngineError, Session, StatusSnapshot,

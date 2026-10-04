@@ -111,6 +111,7 @@ unsafe extern "C" fn on_notify(
 /// 但 librime 的会话操作本身不保证线程安全，调用方须串行化（见 `global::OP_LOCK`）。
 pub struct Engine {
     api: *const rime_ffi::RimeApi,
+    user_data_dir: std::path::PathBuf,
 }
 
 unsafe impl Send for Engine {}
@@ -178,18 +179,26 @@ impl Engine {
         // 各方案，外壳样式配置 weasel.yaml 必须显式编译进 staging 才能被
         // config_open("weasel") 读到。shared 目录无此文件时失败返回 False，无害。
         if let Some(deploy_config_file) = api.deploy_config_file.as_ref() {
-            let name = CString::new("weasel.yaml").unwrap();
-            let version_key = CString::new("config_version").unwrap();
-            unsafe { deploy_config_file(name.as_ptr(), version_key.as_ptr()) };
+            for name in ["weasel.yaml", "heng.yaml"] {
+                let name = CString::new(name).unwrap();
+                let version_key = CString::new("config_version").unwrap();
+                unsafe { deploy_config_file(name.as_ptr(), version_key.as_ptr()) };
+            }
         }
 
         Ok(Engine {
             api: api as *const rime_ffi::RimeApi,
+            user_data_dir: config.user_data_dir,
         })
     }
 
     fn api(&self) -> &rime_ffi::RimeApi {
         unsafe { &*self.api }
+    }
+
+    /// 用户数据目录（选项持久化文件 heng_options.yaml 的落点）
+    pub fn user_data_dir(&self) -> &std::path::Path {
+        &self.user_data_dir
     }
 
     pub fn create_session(&self) -> Result<Session<'_>, EngineError> {

@@ -1,9 +1,10 @@
-// heng-fcitx5 —— HengIME 的 fcitx5 外壳（试用版）。
+// heng-fcitx5 —— HengIME 的 fcitx5 外壳（M-P1 自绘候选窗版）。
 //
-// 定位（docs/ARCHITECTURE.md M7/L1 路线）：fcitx5 做「按键转发 + 候选窗渲染」，
-// 全部上层逻辑来自 heng-core（同进程 C ABI 直链，Linux 上候选窗与引擎同进程无妨）。
+// 职责（docs/ROUTE-P.md §2）：按键/事件转发 + 会话生命周期挂钩 + 取 UI 提交。
+// 候选窗由 core 内部自绘（heng_ui_sync，Slint + override-redirect），外壳不再
+// 使用 classicui 候选列表；组合串（preedit）仍走 fcitx5 原生内联显示。
 //
-// 会话模型：每个 InputContext 一个 heng 会话（对齐 fcitx5-rime 的会话池语义）。
+// 会话模型：每个 InputContext 一个 heng 会话。
 // 热路径：keyEvent → heng_process_key_ex 单调用取回 commit + context（v5 ABI）。
 
 #include <fcitx/addonfactory.h>
@@ -14,11 +15,12 @@
 #include <fcitx/inputmethodentry.h>
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
-#include <fcitx/candidatelist.h>
 #include <fcitx/text.h>
 #include <fcitx/userinterfacemanager.h>
+#include <fcitx-utils/event.h>
 #include <fcitx-utils/key.h>
 
+#include <cstdio>
 #include <unordered_map>
 
 extern "C" {
@@ -60,22 +62,6 @@ Text preeditText(const HengContext &ctx) {
 
 } // namespace
 
-class HengEngine;
-
-// 点击候选 -> core 选词 -> 刷新 UI
-class HengCandidateWord : public CandidateWord {
-public:
-    HengCandidateWord(Text text, heng_session_t session, int index, HengEngine *engine)
-        : CandidateWord(std::move(text)), session_(session), index_(index),
-          engine_(engine) {}
-    void select(InputContext *ic) const override;
-
-private:
-    heng_session_t session_;
-    int index_;
-    HengEngine *engine_;
-};
-
 class HengEngine : public InputMethodEngineV2 {
 public:
     HengEngine(Instance *instance);
@@ -86,14 +72,19 @@ public:
     void keyEvent(const InputMethodEntry &entry, KeyEvent &keyEvent) override;
     void reset(const InputMethodEntry &entry, InputContextEvent &event) override;
 
-    void updateUI(InputContext *ic);
-
 private:
     heng_session_t sessionFor(InputContext *ic);
     void endSession(InputContext *ic);
+    // 取走 core 自绘候选窗点击产生的待上屏文本
+    void drainUiCommit(InputContext *ic, heng_session_t session);
+    // 更新组合串（内联）+ 同步自绘候选窗到光标位置
+    void updateUI(InputContext *ic, heng_session_t session);
 
     Instance *instance_;
     std::unordered_map<uint64_t, heng_session_t> sessions_;
+    std::unordered_map<heng_session_t, InputContext *> ics_;
+    int last_x_ = 200;
+    int last_y_ = 500;
 };
 
 HengEngine::HengEngine(Instance *instance) : instance_(instance) {
@@ -107,9 +98,23 @@ HengEngine::HengEngine(Instance *instance) : instance_(instance) {
         [this](Event &event) {
             endSession(static_cast<InputContextDestroyedEvent &>(event).inputContext());
         });
+    // 焦点离开任何输入上下文时隐藏自绘候选窗
+    instance_->watchEvent(
+        EventType::InputContextFocusOut, EventWatcherPhase::PreInputMethod,
+        [](Event &) { heng_ui_hide(); });
+    // 周期取走 UI 点击产生的提交（点击发生在引擎内部，无按键事件伴随）
+    instance_->eventLoop().addTimeEvent(
+        CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + 100000, 90000,
+        [this](EventSourceTime *, uint64_t) {
+            for (auto &[session, ic] : ics_) {
+                drainUiCommit(ic, session);
+            }
+            return true; // 周期重复
+        });
 }
 
 HengEngine::~HengEngine() {
+    heng_ui_hide();
     for (auto &[id, session] : sessions_) {
         heng_end_session(session);
     }
@@ -125,6 +130,7 @@ heng_session_t HengEngine::sessionFor(InputContext *ic) {
     heng_session_t session = heng_start_session("fcitx5");
     if (session != 0) {
         sessions_[key] = session;
+        ics_[session] = ic;
     }
     return session;
 }
@@ -134,6 +140,7 @@ void HengEngine::endSession(InputContext *ic) {
     auto it = sessions_.find(key);
     if (it != sessions_.end()) {
         heng_end_session(it->second);
+        ics_.erase(it->second);
         sessions_.erase(it);
     }
 }
@@ -148,6 +155,7 @@ void HengEngine::deactivate(const InputMethodEntry &, InputContextEvent &event) 
     if (auto it = sessions_.find(icKey(ic->uuid())); it != sessions_.end()) {
         heng_clear(it->second);
     }
+    heng_ui_hide();
     ic->inputPanel().reset();
     ic->updateUserInterface(UserInterfaceComponent::InputPanel);
 }
@@ -157,7 +165,9 @@ void HengEngine::reset(const InputMethodEntry &, InputContextEvent &event) {
     if (auto it = sessions_.find(icKey(ic->uuid())); it != sessions_.end()) {
         heng_clear(it->second);
     }
-    updateUI(ic);
+    heng_ui_hide();
+    ic->inputPanel().reset();
+    ic->updateUserInterface(UserInterfaceComponent::InputPanel);
 }
 
 void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
@@ -176,6 +186,9 @@ void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
         return; // 未处理 -> fcitx5 透传给应用
     }
 
+    // 取走候选窗点击产生的提交（点击无按键事件伴随）
+    drainUiCommit(ic, session);
+
     HengContext ctx = {0};
     ctx.data_size = sizeof(HengContext);
     char *commit = nullptr;
@@ -192,52 +205,40 @@ void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
         ic->commitString(commit);
         heng_free_string(commit);
     }
-    updateUI(ic);
     heng_free_context(&ctx);
-    (void)handled; // v5 返回值与透传决策：试用版接受全部按键，由 commit/preedit 呈现
+    updateUI(ic, session);
 }
 
-void HengEngine::updateUI(InputContext *ic) {
+void HengEngine::drainUiCommit(InputContext *ic, heng_session_t session) {
+    char *text = nullptr;
+    if (heng_take_ui_commit(session, &text) == HENG_TRUE && text) {
+        ic->commitString(text);
+        heng_free_string(text);
+        ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+    }
+}
+
+void HengEngine::updateUI(InputContext *ic, heng_session_t session) {
+    // 只喂 client preedit（应用内联显示）；不再设置 panel preedit / 候选列表，
+    // classicui 就没有任何要画的内容（候选窗由 core 自绘接管）
     auto &panel = ic->inputPanel();
     panel.reset();
 
-    heng_session_t session = sessionFor(ic);
-    if (session == 0) {
-        return;
-    }
     HengContext ctx = {0};
     ctx.data_size = sizeof(HengContext);
-    if (heng_get_context(session, &ctx) != HENG_TRUE) {
-        heng_free_context(&ctx);
-        ic->updateUserInterface(UserInterfaceComponent::InputPanel);
-        return;
-    }
-
-    if (ctx.preedit) {
+    if (heng_get_context(session, &ctx) == HENG_TRUE && ctx.preedit) {
         panel.setClientPreedit(preeditText(ctx));
-        panel.setPreedit(preeditText(ctx));
-    }
-
-    if (ctx.candidate_count > 0 && ctx.candidates) {
-        auto *list = new CommonCandidateList;
-        if (ctx.select_keys) {
-            list->setSelectionKey(Key::keyListFromString(ctx.select_keys));
-        }
-        list->setPageSize(ctx.candidate_count);
-        for (int i = 0; i < ctx.candidate_count; i++) {
-            Text text(ctx.candidates[i] ? ctx.candidates[i] : "");
-            list->append<HengCandidateWord>(std::move(text), session, i, this);
-        }
-        list->setGlobalCursorIndex(ctx.highlighted);
-        panel.setCandidateList(std::unique_ptr<CandidateList>(list));
     }
     heng_free_context(&ctx);
     ic->updateUserInterface(UserInterfaceComponent::InputPanel);
-}
 
-void HengCandidateWord::select(InputContext *ic) const {
-    heng_select_candidate_on_current_page(session_, index_);
-    engine_->updateUI(ic);
+    // 自绘候选窗跟随光标（fcitx5 上报光标区域；无有效区域用上次位置）
+    auto rect = ic->cursorRect();
+    if (rect.left() != 0 || rect.top() != 0 || rect.right() != 0 || rect.bottom() != 0) {
+        last_x_ = rect.left();
+        last_y_ = rect.bottom() + 8;
+    }
+    heng_ui_sync(session, last_x_, last_y_);
 }
 
 } // namespace fcitx

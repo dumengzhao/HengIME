@@ -277,6 +277,8 @@ mod abi {
         pub fn heng_config_next(iter: *mut HengConfigIterator) -> c_int;
         pub fn heng_config_end(iter: *mut HengConfigIterator);
         pub fn heng_hello(client_abi_version: c_int, out: *mut HengHello) -> c_int;
+        pub fn heng_set_propagation_policy(policy: c_int) -> c_int;
+        pub fn heng_get_propagation_policy() -> c_int;
         pub fn heng_process_key_ex(
             session: HengSession,
             keysym: c_int,
@@ -288,6 +290,27 @@ mod abi {
         pub fn heng_free_context(out: *mut HengContext);
         pub fn heng_last_error() -> *const c_char;
     }
+}
+
+/// 自绘候选窗调试：模拟 nihao 后调用 ui_sync，窗口保持数秒供抓屏分析
+fn cmd_uitest() -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
+    let engine = heng_core::global::engine()?;
+    let session = engine.create_session()?;
+    let rime_id = session.into_raw();
+    let _ = engine.simulate_key_sequence(rime_id, "nihao");
+    let snapshot = engine.get_context(rime_id)?;
+    println!(
+        "候选数={} preedit={:?}",
+        snapshot.candidates.len(),
+        snapshot.preedit
+    );
+    heng_core::ui::ensure_started();
+    heng_core::ui::ui_sync(rime_id, 200, 500);
+    println!("ui_sync 已调用，窗口保持 20 秒...");
+    std::thread::sleep(Duration::from_secs(20));
+    println!("退出");
+    Ok(())
 }
 
 fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
@@ -322,13 +345,25 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
         };
         let rc = heng_hello(5, &mut hello);
         check!("heng_hello 填充成功", rc == 1);
-        check!("hello.abi_version == 5", hello.abi_version == 5);
+        check!("hello.abi_version == 6", hello.abi_version == 6);
         check!("hello.data_size > 0", hello.data_size > 0);
         check!("min_abi_version <= abi_version", hello.min_abi_version <= hello.abi_version);
 
         // 1. 创建引擎
         let rc = heng_create(std::ptr::null(), std::ptr::null());
         check!("heng_create(NULL,NULL) == 0", rc == 0);
+
+        // 1.5 v6：bootstrap 自愈——把持久化开关重置到确定状态，
+        // 保证后续用例不依赖上一次运行留下的 heng_options.yaml
+        {
+            let boot = heng_start_session(std::ptr::null());
+            check!("bootstrap 会话创建", boot != 0);
+            let ascii = CString::new("ascii_mode").unwrap();
+            let shape = CString::new("full_shape").unwrap();
+            heng_set_option(boot, ascii.as_ptr(), 0);
+            heng_set_option(boot, shape.as_ptr(), 0);
+            heng_end_session(boot);
+        }
 
         // 2. 版本与自省
         let ver = cstr(heng_version());
@@ -496,6 +531,38 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
         heng_free_context(&mut ctxk);
         heng_clear(session);
 
+        // 6.6 v6：行为统一层——传播策略、跨重启持久化、app_options
+        {
+            let ascii = CString::new("ascii_mode").unwrap();
+            let shape = CString::new("full_shape").unwrap();
+
+            // 传播策略：global 下 set_option 广播到其它会话
+            check!("set_propagation_policy(global)", heng_set_propagation_policy(2) == 0);
+            check!("get_propagation_policy 回读", heng_get_propagation_policy() == 2);
+            let s2 = heng_start_session(std::ptr::null());
+            check!("传播用例会话 s2 创建", s2 != 0);
+            heng_set_option(session, ascii.as_ptr(), 1);
+            check!("global 传播：s2 跟随 ascii=1", heng_get_option(s2, ascii.as_ptr()) == 1);
+
+            // 跨重启持久化：新建会话继承最近一次 set_option 的值
+            let s3 = heng_start_session(std::ptr::null());
+            check!("持久化用例会话 s3 创建", s3 != 0);
+            check!("持久化：s3 继承 ascii=1", heng_get_option(s3, ascii.as_ptr()) == 1);
+
+            // app_options：绑定归属应用时应用初始选项，且不跨会话传播
+            let app = CString::new("abitest.exe").unwrap();
+            heng_set_session_owner(s3, app.as_ptr());
+            check!("app_options：s3 full_shape=1", heng_get_option(s3, shape.as_ptr()) == 1);
+            check!("app_options 不传播：s2 full_shape=0", heng_get_option(s2, shape.as_ptr()) == 0);
+
+            // 收尾：策略复位 + 状态还原，不留脏持久化
+            check!("set_propagation_policy(per_session)", heng_set_propagation_policy(0) == 0);
+            heng_set_option(session, ascii.as_ptr(), 0);
+            heng_set_option(session, shape.as_ptr(), 0);
+            heng_end_session(s2);
+            heng_end_session(s3);
+        }
+
         // 7. 关会话 + 错误路径
         heng_end_session(session);
         let ghost = heng_simulate_key_sequence(session, seq.as_ptr());
@@ -595,8 +662,8 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // serve / abitest 走 global 层（自带引擎单例），不能用 make_engine 重复初始化 librime
-    if args[0] == "serve" || args[0] == "abitest" {
+    // serve / abitest / uitest 走 global 层（自带引擎单例），不能用 make_engine 重复初始化 librime
+    if args[0] == "serve" || args[0] == "abitest" || args[0] == "uitest" {
         let result: Result<(), Box<dyn std::error::Error>> = match args[0].as_str() {
             "serve" => {
                 let port: u16 = args
@@ -605,6 +672,7 @@ fn main() -> ExitCode {
                     .unwrap_or(DEFAULT_PORT);
                 cmd_serve(port)
             }
+            "uitest" => cmd_uitest(),
             _ => cmd_abitest(),
         };
         return match result {

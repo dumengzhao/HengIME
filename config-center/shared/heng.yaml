@@ -1,0 +1,17 @@
+# heng.yaml —— HengIME 核心配置（路线 P 行为统一层，config-center 分发）
+#
+# 经 heng_config_open("heng") 读取；Engine 启动时自动部署进 staging。
+# 各端外壳不再各自实现「开关记住范围/按应用初始选项」，全部以本文件为准。
+
+config_version: "0.1"
+
+# 开关传播策略：per_session（会话独立）| per_app（同应用广播）| global（全局广播）
+# 对齐 fcitx5-rime SharedStatePolicy 三档 + Weasel global_ascii 的统一化
+propagation:
+  policy: per_session
+
+# 按应用初始选项（键 = 外壳上报的 app_id；可用选项见 core APPLICABLE_OPTIONS：
+# ascii_mode / full_shape / simplification / ascii_punct）
+app_options:
+  abitest.exe:
+    full_shape: true

@@ -12,6 +12,7 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::sync::atomic::Ordering;
 use std::sync::{LazyLock, Mutex};
 
 use crate::global::{default_config, engine, engine_with, SESSIONS};
@@ -21,8 +22,8 @@ pub type HengSession = u64; // 对应 heng.h 的 heng_session_t（uint64_t），
 pub const HENG_TRUE: c_int = 1;
 pub const HENG_FALSE: c_int = 0;
 
-/// 当前 C ABI 版本（v5：heng_hello / heng_process_key_ex）
-pub const HENG_ABI_VERSION: c_int = 5;
+/// 当前 C ABI 版本（v6：传播策略 + app_options 统一 + 选项持久化）
+pub const HENG_ABI_VERSION: c_int = 6;
 /// 仍兼容的最低调用方 ABI（v4 起有 config API；更早调用方未验证）
 pub const HENG_MIN_ABI_VERSION: c_int = 4;
 
@@ -287,6 +288,8 @@ pub extern "C" fn heng_describe() -> *const c_char {
                 "heng_config_open", "heng_config_close",
                 "heng_config_get_string", "heng_config_get_int", "heng_config_get_bool",
                 "heng_config_begin_map", "heng_config_next", "heng_config_end",
+                "heng_set_propagation_policy", "heng_get_propagation_policy",
+                "heng_ui_sync", "heng_ui_hide", "heng_take_ui_commit",
                 "heng_clear", "heng_free_string", "heng_last_error"
             ]
         });
@@ -314,7 +317,12 @@ pub extern "C" fn heng_start_session(app_id: *const c_char) -> HengSession {
             Ok(session) => {
                 // into_raw 消费 Session 但不触发 Drop 销毁，librime 会话交注册表接管
                 let rime_id = session.into_raw();
-                SESSIONS.insert(rime_id, app.filter(|s| !s.is_empty()))
+                let handle = SESSIONS.insert(rime_id, app.filter(|s| !s.is_empty()));
+                // v6：新会话应用初始状态（持久化选项 → app_options）
+                let owner = SESSIONS.owner(handle);
+                let _guard = crate::global::OP_LOCK.lock().unwrap();
+                crate::global::apply_session_initial_state(engine, rime_id, owner.as_deref());
+                handle
             }
             Err(e) => {
                 set_err(e);
@@ -571,7 +579,22 @@ pub extern "C" fn heng_set_session_owner(session: HengSession, app_id: *const c_
             return -1;
         }
         match unsafe { cstr_to_string(app_id) } {
-            Some(app) if !app.is_empty() => SESSIONS.set_owner(session, app) as c_int - 1,
+            Some(app) if !app.is_empty() => {
+                let bound = SESSIONS.set_owner(session, app.clone()) as c_int - 1;
+                if bound == 0 {
+                    // v6：改绑归属应用时应用该应用的初始选项（不重放持久化值，
+                    // 避免覆盖用户当前会话里的实时开关状态）
+                    if let (Ok(engine), Some(rime_id)) = (engine(), SESSIONS.rime_id(session)) {
+                        let _guard = crate::global::OP_LOCK.lock().unwrap();
+                        crate::global::apply_session_initial_state(
+                            engine,
+                            rime_id,
+                            Some(app.as_str()),
+                        );
+                    }
+                }
+                bound
+            }
             _ => -1,
         }
     })
@@ -648,7 +671,12 @@ pub extern "C" fn heng_set_option(
         };
         let _guard = crate::global::OP_LOCK.lock().unwrap();
         match engine.set_option(rime_id, &name, value != 0) {
-            Ok(()) => HENG_TRUE,
+            Ok(()) => {
+                // v6：按策略广播到其它会话 + 名单内选项持久化（跨重启记忆）
+                crate::global::propagate_option(engine, rime_id, &name, value != 0);
+                crate::global::record_option_change(engine, &name, value != 0);
+                HENG_TRUE
+            }
             Err(e) => {
                 set_err(e);
                 HENG_FALSE
@@ -840,6 +868,88 @@ pub extern "C" fn heng_process_key_ex(
             }
         }
         handled as c_int
+    })
+}
+
+// ---- v6：行为统一层（传播策略；app_options 与持久化经既有入口生效） ----
+
+/// 设置开关传播策略。policy: 0=per_session 1=per_app 2=global。
+/// 返回 0 成功，-1 非法值。运行时设置优先于 heng.yaml 的初值。
+#[no_mangle]
+pub extern "C" fn heng_set_propagation_policy(policy: c_int) -> c_int {
+    use crate::global::{POLICY_GLOBAL, POLICY_PER_APP, POLICY_PER_SESSION};
+    ffi_guard!(-1, {
+        match policy {
+            POLICY_PER_SESSION | POLICY_PER_APP | POLICY_GLOBAL => {
+                crate::global::PROPAGATION_POLICY.store(policy, Ordering::Relaxed);
+                0
+            }
+            _ => -1,
+        }
+    })
+}
+
+/// 读取当前传播策略。返回 0/1/2；-1 引擎未初始化。
+#[no_mangle]
+pub extern "C" fn heng_get_propagation_policy() -> c_int {
+    ffi_guard!(-1, {
+        match engine() {
+            Ok(_) => crate::global::PROPAGATION_POLICY.load(Ordering::Relaxed),
+            Err(e) => {
+                set_err(e);
+                -1
+            }
+        }
+    })
+}
+
+// ---- v6：自绘候选窗（M-P1；运行于 core 内部 UI 线程） ----
+
+/// 同步候选窗：拉取会话 context，有候选则在屏幕 (x,y)（光标左下角）显示并刷新，
+/// 无候选则隐藏。x11 不可用时静默失败（外壳可回退宿主候选窗）。
+/// 返回 HENG_TRUE=已同步（显示或隐藏），HENG_FALSE=UI 不可用。
+#[no_mangle]
+pub extern "C" fn heng_ui_sync(session: HengSession, x: c_int, y: c_int) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if session == 0 {
+            return HENG_FALSE;
+        }
+        let Some(rime_id) = SESSIONS.rime_id(session) else {
+            return HENG_FALSE;
+        };
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        crate::ui::ui_sync(rime_id, x, y);
+        HENG_TRUE
+    })
+}
+
+/// 隐藏候选窗（焦点离开/清空组合串时调用）。始终返回 HENG_TRUE。
+#[no_mangle]
+pub extern "C" fn heng_ui_hide() -> c_int {
+    ffi_guard!(HENG_TRUE, {
+        crate::ui::ui_hide();
+        HENG_TRUE
+    })
+}
+
+/// 取走 UI 点击产生的待上屏文本（消费语义）。返回 HENG_TRUE 且 *out 非 NULL
+/// 表示有文本（heng_free_string 释放）；否则 *out 为 NULL。
+#[no_mangle]
+pub extern "C" fn heng_take_ui_commit(session: HengSession, out: *mut *mut c_char) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if session == 0 || out.is_null() {
+            return HENG_FALSE;
+        }
+        unsafe { *out = ptr::null_mut() };
+        if let Some(text) = crate::ui::PENDING_UI_COMMITS.lock().unwrap().remove(&session) {
+            if let Ok(c) = CString::new(text) {
+                unsafe { *out = c.into_raw() };
+                return HENG_TRUE;
+            }
+        }
+        HENG_FALSE
     })
 }
 
