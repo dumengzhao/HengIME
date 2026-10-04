@@ -75,7 +75,7 @@ git clone --depth 1 -b 0.17.4 https://github.com/rime/weasel third_party/src/wea
 
 | 文件 | 内容 |
 |---|---|
-| `weasel-0.17.4-heng-m1.patch` | 全部源码改动（10 文件）：RimeWithWeasel 数据源换血 + v4 样式/app_options 配置通道、布局间距修复、ContextUpdater 零宽保护、rc winres 替换、build-x64.bat、include/heng.h（v4） |
+| `weasel-0.17.4-heng-m1.patch` | 全部源码改动（13 文件）：RimeWithWeasel 数据源换血 + v4 样式/app_options 配置通道 + v6 内置候选窗接线（ui/builtin 开关、_UpdateUI 分支、_Respond 合并 heng_take_ui_commit）+ TSF 侧 CCandidateList 永不显示（避免与 core 候选窗叠双层）、布局间距修复、独立圆角药丸、ContextUpdater 零宽保护、rc winres 替换、build-x64.bat、include/heng.h（v6） |
 | `weasel.props` / `env.bat` | 编译配置（BOOST_ROOT 等，上游 gitignore 忽略） |
 | `rime-default.yaml` | 雾凇 default.yaml + 左右键切换候选（上游 gitignore 忽略） |
 | `rime-weasel.yaml` | 雾凇 weasel.yaml + 衡默认主题 heng_blue（白底蓝块白字配色方案）（上游 gitignore 忽略） |
@@ -99,12 +99,14 @@ cp ../../../patches/boost-project-config.jam deps/boost_1_84_0/project-config.ja
 - `RimeWithWeasel/RimeWithWeasel.cpp` + `include/RimeWithWeasel.h`：
   数据源整体换血（rime_api → heng-core C ABI）；v4 起样式从 weasel.yaml 加载
   （style 段 + preset_color_schemes 配色方案，硬编码 fallback 兜底）、
-  app_options 段按应用生效、亮/暗配色切换恢复
+  app_options 段按应用生效、亮/暗配色切换恢复；v6 起 weasel.yaml `ui/builtin`
+  开启 core 内置自绘候选窗（weasel 自带面板隐藏，点击选词 commit 经
+  _Respond 的 heng_take_ui_commit 取回上屏）
 - `WeaselUI/HorizontalLayout.cpp` / `VerticalLayout.cpp`：
   候选间距补偿（高亮块膨胀不再压相邻序号）
 - `WeaselIPC/ContextUpdater.cpp`：零宽选中区间不生成 HIGHLIGHTED
 - `WeaselTSF/`：rc 文件 winres.h 替换（诊断插桩已于 v4 全部移除）
-- `include/heng.h`：core C ABI 头（v4，含 config API），与 `core/include/heng.h` 同步
+- `include/heng.h`：core C ABI 头（v6，含 config API 与内置候选窗 API），与 `core/include/heng.h` 同步
 - `output/data/default.yaml` key_binder：左右键切换候选
 
 **后续维护约定**：每次修改 weasel 树内文件后，重新生成补丁并提交主仓库：

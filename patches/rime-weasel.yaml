@@ -45,6 +45,10 @@ show_notifications_time: 1200              # 通知显示的时间，单位 ms
 global_ascii: false                        # 切换为 ascii 模式时，是否影响所有窗口：true；false
 # [End of <global settings>]
 
+# [ui] 衡自定义：core 内置自绘候选窗（路线 P 的 L2，与 Linux 端同一份渲染代码）
+ui:
+  builtin: true
+
 # [style]
 # 字体；候选项、候选窗口的行为、布局及样式
 style:

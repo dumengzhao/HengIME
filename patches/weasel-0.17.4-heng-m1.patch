@@ -1,5 +1,5 @@
 diff --git a/RimeWithWeasel/RimeWithWeasel.cpp b/RimeWithWeasel/RimeWithWeasel.cpp
-index 709cd7e..14222bb 100644
+index 709cd7e..e302501 100644
 --- a/RimeWithWeasel/RimeWithWeasel.cpp
 +++ b/RimeWithWeasel/RimeWithWeasel.cpp
 @@ -5,14 +5,23 @@
@@ -38,7 +38,13 @@ index 709cd7e..14222bb 100644
  WeaselSessionId _GenerateNewWeaselSessionId(SessionStatusMap sm, DWORD pid) {
    if (sm.empty())
      return (WeaselSessionId)(pid + 1);
-@@ -43,8 +51,6 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
+@@ -40,11 +48,12 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
+       m_disabled(true),
+       m_current_dark_mode(false),
+       m_global_ascii_mode(false),
++      m_builtin_ui(false),
++      m_last_caret_x(0),
++      m_last_caret_y(0),
        m_show_notifications_time(1200),
        _UpdateUICallback(NULL) {
    m_ui->InServer() = true;
@@ -47,7 +53,7 @@ index 709cd7e..14222bb 100644
    m_pid = GetCurrentProcessId();
    uint16_t msbit = 0;
    for (auto i = 31; i >= 0; i--) {
-@@ -54,7 +60,6 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
+@@ -54,7 +63,6 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
      }
    }
    m_pid = (m_pid << (31 - msbit));
@@ -55,7 +61,7 @@ index 709cd7e..14222bb 100644
  }
  
  RimeWithWeaselHandler::~RimeWithWeaselHandler() {
-@@ -64,260 +69,752 @@ RimeWithWeaselHandler::~RimeWithWeaselHandler() {
+@@ -64,260 +72,756 @@ RimeWithWeaselHandler::~RimeWithWeaselHandler() {
  }
  
  bool add_session = false;
@@ -841,6 +847,10 @@ index 709cd7e..14222bb 100644
 +      m_global_ascii_mode = !!global_ascii;
 +    // app_options 段 → m_app_options（_ReadClientInfo/_LoadAppInlinePreeditSet 消费）
 +    _LoadAppOptions(config, m_app_options);
++    // v6：core 内置自绘候选窗开关（weasel.yaml ui/builtin，默认关 = 宿主 weasel 面板）
++    int builtin_ui = 0;
++    if (heng_config_get_bool(config, "ui/builtin", &builtin_ui))
++      m_builtin_ui = !!builtin_ui;
 +    heng_config_close(config);
 +  }
 +  m_last_schema_id.clear();
@@ -1036,7 +1046,7 @@ index 709cd7e..14222bb 100644
  
  bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
      size_t index,
-@@ -325,8 +822,8 @@ bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
+@@ -325,8 +829,8 @@ bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
      EatLine eat) {
    DLOG(INFO) << "highlight candidate on current page, ipc_id = " << ipc_id
               << ", index = " << index;
@@ -1047,7 +1057,7 @@ index 709cd7e..14222bb 100644
    _Respond(ipc_id, eat);
    _UpdateUI(ipc_id);
    return res;
-@@ -337,7 +834,7 @@ bool RimeWithWeaselHandler::ChangePage(bool backward,
+@@ -337,7 +841,7 @@ bool RimeWithWeaselHandler::ChangePage(bool backward,
                                         EatLine eat) {
    DLOG(INFO) << "change page, ipc_id = " << ipc_id
               << (backward ? "backward" : "foreward");
@@ -1056,7 +1066,27 @@ index 709cd7e..14222bb 100644
    _Respond(ipc_id, eat);
    _UpdateUI(ipc_id);
    return res;
-@@ -380,31 +877,6 @@ std::string RimeWithWeaselHandler::m_message_label;
+@@ -356,6 +860,8 @@ void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
+   DLOG(INFO) << "Focus out: ipc_id = " << ipc_id;
+   if (m_ui)
+     m_ui->Hide();
++  if (m_builtin_ui)
++    heng_ui_hide();  // v6：焦点离开同步隐藏 core 内置候选窗
+   m_active_session = 0;
+ }
+ 
+@@ -364,6 +870,10 @@ void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
+   DLOG(INFO) << "Update input position: (" << rc.left << ", " << rc.top
+              << "), ipc_id = " << ipc_id
+              << ", m_active_session = " << m_active_session;
++  // v6：内置自绘候选窗需要屏幕坐标（取光标左下角；+6 偏移与 weasel
++  // panel 的 m_inputPos.OffsetRect(0, 6) 对齐）
++  m_last_caret_x = rc.left;
++  m_last_caret_y = rc.bottom;
+   if (m_ui)
+     m_ui->UpdateInputPosition(rc);
+   if (m_disabled)
+@@ -380,31 +890,6 @@ std::string RimeWithWeaselHandler::m_message_label;
  std::string RimeWithWeaselHandler::m_option_name;
  std::mutex RimeWithWeaselHandler::m_notifier_mutex;
  
@@ -1088,7 +1118,7 @@ index 709cd7e..14222bb 100644
  void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
                                              LPWSTR buffer) {
    std::string app_name;
-@@ -426,50 +898,55 @@ void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
+@@ -426,50 +911,55 @@ void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
      }
    }
    SessionStatus& session_status = get_session_status(ipc_id);
@@ -1167,7 +1197,7 @@ index 709cd7e..14222bb 100644
  }
  
  void RimeWithWeaselHandler::StartMaintenance() {
-@@ -493,12 +970,13 @@ void RimeWithWeaselHandler::SetOption(WeaselSessionId ipc_id,
+@@ -493,12 +983,13 @@ void RimeWithWeaselHandler::SetOption(WeaselSessionId ipc_id,
    if (!ipc_id) {
      if (m_global_ascii_mode && opt == "ascii_mode") {
        for (auto& pair : m_session_status_map)
@@ -1184,7 +1214,7 @@ index 709cd7e..14222bb 100644
    }
    // refresh UI (and tray icon) so the option change takes effect immediately,
    // e.g. when toggling ascii_mode from the TSF language bar
-@@ -526,15 +1004,14 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+@@ -526,26 +1017,41 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
    Status& weasel_status = m_ui->status();
    Context weasel_context;
  
@@ -1202,11 +1232,25 @@ index 709cd7e..14222bb 100644
      session_status.style.client_caps |= INLINE_PREEDIT_CAPABLE;
    else
      session_status.style.client_caps &= ~INLINE_PREEDIT_CAPABLE;
-@@ -544,7 +1021,13 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+ 
+-  if (!_ShowMessage(weasel_context, weasel_status)) {
++  if (m_builtin_ui && ipc_id != 0) {
++    // v6：core 内置自绘候选窗路线（P 的 L2）。weasel 自带面板只隐藏不绘制，
++    // 候选窗由 core UI 线程呈现（heng_ui_sync 内部取 context、点击内部选词，
++    // commit 经 _Respond 的 heng_take_ui_commit 取回上屏）。
++    m_ui->Hide();
++    if (!weasel_status.disabled && !weasel_context.cinfo.empty())
++      heng_ui_sync(to_session_id(ipc_id), (int)m_last_caret_x,
++                   (int)m_last_caret_y + 6);
++    else
++      heng_ui_hide();
++  } else if (!_ShowMessage(weasel_context, weasel_status)) {
+     m_ui->Hide();
      m_ui->Update(weasel_context, weasel_status);
    }
  
 -  _RefreshTrayIcon(session_id, _UpdateUICallback);
+-
 +  if (_UpdateUICallback) {
 +    boost::thread th([=]() {
 +      ::Sleep(100);
@@ -1214,10 +1258,11 @@ index 709cd7e..14222bb 100644
 +        _UpdateUICallback();
 +    });
 +  }
- 
++
    {
      std::lock_guard<std::mutex> lock(m_notifier_mutex);
-@@ -555,158 +1038,19 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+     m_message_type.clear();
+@@ -555,158 +1061,19 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
    }
  }
  
@@ -1381,7 +1426,7 @@ index 709cd7e..14222bb 100644
        show_icon = true;
      } else
        tips = u8tow(m_message_label);
-@@ -730,13 +1074,6 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
+@@ -730,13 +1097,6 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
      return m_ui->IsCountingDown();
    }
  }
@@ -1395,7 +1440,7 @@ index 709cd7e..14222bb 100644
  
  bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
    std::wstring body;
-@@ -745,770 +1082,316 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
+@@ -745,770 +1105,328 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
    actions.reserve(8);
  
    SessionStatus& session_status = get_session_status(ipc_id);
@@ -1409,13 +1454,25 @@ index 709cd7e..14222bb 100644
 +  heng_session_t session_id = session_status.session_id;
 +
 +  // commit（消费语义：heng_commit_text 取后清空）
++  // v6：合并 UI 点击选词的 commit（heng_take_ui_commit）——点击候选时 core
++  // 内部已消费引擎 commit（get_commit 消费语义），两来源不会重复；罕见同轮
++  // 双来源时直接拼接。
 +  {
-+    char* commit_text = NULL;
-+    if (heng_commit_text(session_id, &commit_text) == 1 && commit_text) {
++    std::string commit_text;
++    char* p = NULL;
++    if (heng_commit_text(session_id, &p) == 1 && p) {
++      commit_text = p;
++      heng_free_string(p);
++    }
++    p = NULL;
++    if (heng_take_ui_commit(session_id, &p) == 1 && p) {
++      commit_text += p;
++      heng_free_string(p);
++    }
++    if (!commit_text.empty()) {
 +      actions.push_back("commit");
-+      std::wstring commit_text_w = escape_string(u8tow(commit_text));
++      std::wstring commit_text_w = escape_string(u8tow(commit_text.c_str()));
 +      body.append(L"commit=").append(commit_text_w).append(L"\n");
-+      heng_free_string(commit_text);
 +    }
    }
  
@@ -2444,6 +2501,27 @@ ucmbQRiE+Xv#tomCgl!ng88R927>XED8HyS77%~{_CO1kh-@Jx7B@_Vcp9|Fh
 delta 38
 ucmbQRiE+Xv#tomCgq0W)8PXUk7>XED8HyS77%~`?CO1kh-@Jx7B@_VX2Mdq@
 
+diff --git a/WeaselTSF/CandidateList.cpp b/WeaselTSF/CandidateList.cpp
+index a22a525..02be483 100644
+--- a/WeaselTSF/CandidateList.cpp
++++ b/WeaselTSF/CandidateList.cpp
+@@ -74,10 +74,12 @@ STDMETHODIMP CCandidateList::GetGUID(GUID* pguid) {
+ }
+ 
+ STDMETHODIMP CCandidateList::Show(BOOL showCandidateWindow) {
+-  if (showCandidateWindow)
+-    _ui->Show();
+-  else
+-    _ui->Hide();
++  // 路线 P（M-P1）：候选窗由 core 内置 UI 呈现（WeaselServer 进程里的
++  // heng_ui_win，经 heng_ui_sync 驱动）。TSF 侧面板（本类持有的 weasel::UI，
++  // 跑在宿主应用进程、DPI 原生缩放）永不显示——否则会与 core 候选窗叠成
++  // 前后两个窗口（大的是本面板，小的是 core 候选窗在后面露边）。
++  // 保留 Update/style 管道（enhanced_position 等仍经此解析）。
++  _ui->Hide();
+   return S_OK;
+ }
+ 
 diff --git a/WeaselTSF/KeyEventSink.cpp b/WeaselTSF/KeyEventSink.cpp
 index 6a18c13..7623db9 100644
 --- a/WeaselTSF/KeyEventSink.cpp
@@ -2607,7 +2685,7 @@ index 0000000..3b5604a
 +echo Log: %WEASEL_ROOT%msbuild-x64.log
 +pause
 diff --git a/include/RimeWithWeasel.h b/include/RimeWithWeasel.h
-index ab20d8d..c7ca01d 100644
+index ab20d8d..57e8ee3 100644
 --- a/include/RimeWithWeasel.h
 +++ b/include/RimeWithWeasel.h
 @@ -5,7 +5,19 @@
@@ -2708,12 +2786,24 @@ index ab20d8d..c7ca01d 100644
    static std::string m_message_type;
    static std::string m_message_value;
    static std::string m_message_label;
+@@ -118,6 +135,11 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
+   SessionStatusMap m_session_status_map;
+   bool m_current_dark_mode;
+   bool m_global_ascii_mode;
++  // v6：core 内置自绘候选窗（weasel.yaml ui/builtin 开启）
++  bool m_builtin_ui;
++  // 最近一次 TSF 上报的输入光标位置（rc.left / rc.bottom，屏幕坐标）
++  LONG m_last_caret_x;
++  LONG m_last_caret_y;
+   int m_show_notifications_time;
+   DWORD m_pid;
+ };
 diff --git a/include/heng.h b/include/heng.h
 new file mode 100644
-index 0000000..77bf178
+index 0000000..fcccee8
 --- /dev/null
 +++ b/include/heng.h
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,285 @@
 +/*
 + * heng.h —— HengIME 统一能力模块 C ABI（M0）
 + *
@@ -2863,6 +2953,76 @@ index 0000000..77bf178
 +/* 释放 heng_get_status 填充的结构体。 */
 +HENG_API void heng_free_status(HengStatus* out);
 +
++/* ---- 版本握手与热路径合并调用（v5；增量追加，v4 及之前全部不变） ---- */
++
++/*
++ * 握手信息。纯值结构，无堆分配，无需专配释放。
++ * 调用方在任何会话操作前调用 heng_hello 一次，据 abi_version 决定
++ * 能否使用更高版本新增的函数/字段（data_size 校验语义不变）。
++ */
++typedef struct HengHello {
++    int      data_size;        /* sizeof(HengHello) */
++    int      abi_version;      /* core 当前 ABI 版本（v5 = 5） */
++    int      min_abi_version;  /* core 仍兼容的最低调用方 ABI */
++    uint64_t reserved[2];      /* 前向预留，必须全零初始化 */
++} HengHello;
++
++/* 版本握手。client_abi_version 传调用方编译时所依的 ABI 版本，core 侧当前不校验
++ * （预留：未来 core 放弃兼容旧 ABI 时据此拒绝服务）。返回 HENG_TRUE=已填充。 */
++HENG_API int heng_hello(int client_abi_version, HengHello* out);
++
++/*
++ * 热路径合并调用：处理一个按键并一次性取回待上屏文本与组合串候选快照，
++ * 替代 process_key → commit_text → get_context 的多次跨进程往返
++ * （Windows 命名管道下每次按键由 3 次 IPC 降为 1 次）。
++ * out_commit / out_ctx 均可传 NULL 表示不需要。
++ * 返回 HENG_TRUE=按键已处理；out_commit 采用消费语义（取后清空），
++ * 非 NULL 时用 heng_free_string 释放；out_ctx 非 NULL 时用 heng_free_context 释放。
++ */
++HENG_API int heng_process_key_ex(heng_session_t session, int keysym, int mask,
++                                 char** out_commit, HengContext* out_ctx);
++
++/* ---- 行为统一层（v6；增量追加，v5 及之前全部不变） ----
++ *
++ * 路线 P 的核心：开关传播、按应用初始选项（app_options）、跨重启选项记忆
++ * 全部收进 core，外壳不再各自实现「开关记住范围」。
++ * - heng_set_option：按传播策略广播到其它会话，名单内选项（ascii_mode/full_shape/
++ *   simplification/ascii_punct）自动持久化到用户目录 heng_options.yaml
++ * - heng_start_session：自动应用持久化选项初值
++ * - heng_set_session_owner：自动应用 heng.yaml 的 app_options/<app>/ 初始选项
++ *   （app 覆盖持久化值；不重放持久化，避免覆盖会话实时状态）
++ * 策略初值来自 heng.yaml 的 propagation/policy（per_session | per_app | global）。
++ */
++
++#define HENG_POLICY_PER_SESSION 0
++#define HENG_POLICY_PER_APP     1
++#define HENG_POLICY_GLOBAL      2
++
++/* 设置传播策略。返回 0 成功，-1 非法值；运行时设置优先于 heng.yaml 初值。 */
++HENG_API int heng_set_propagation_policy(int policy);
++
++/* 读取当前传播策略。返回 HENG_POLICY_*；-1 引擎未初始化。 */
++HENG_API int heng_get_propagation_policy(void);
++
++/* ---- 自绘候选窗（v6；运行于 core 内部 UI 线程，X11/XWayland） ----
++ *
++ * 路线 P 的 L2 候选窗：悬浮提示与选中语义由 core 定义（无 classicui 悬浮
++ * 歧义）。点击候选由 core 直接选词，产生的上屏文本经 heng_take_ui_commit
++ * 由外壳取走（外壳应在按键处理与周期轮询中调用）。
++ * x11 不可用时以下调用静默失败，外壳应回退宿主候选窗。
++ */
++
++/* 同步候选窗：取会话 context，有候选则显示于屏幕 (x,y)（光标左下角）并刷新，
++ * 无候选则隐藏。返回 HENG_TRUE=已同步，HENG_FALSE=UI 不可用。 */
++HENG_API int heng_ui_sync(heng_session_t session, int x, int y);
++
++/* 隐藏候选窗（焦点离开时调用）。 */
++HENG_API int heng_ui_hide(void);
++
++/* 取走 UI 点击产生的待上屏文本（消费语义）。返回 HENG_TRUE 且 *out 非 NULL
++ * 表示有文本（heng_free_string 释放）；否则 *out 为 NULL。 */
++HENG_API int heng_take_ui_commit(heng_session_t session, char** out);
++
 +/* ---- 配置读取（v4；librime RimeConfig 直通） ----
 + *
 + * 用途：外壳加载 UI 样式（weasel.yaml 的 preset_color_schemes）与
@@ -2929,3 +3089,311 @@ index 0000000..77bf178
 +#endif
 +
 +#endif /* HENG_H */
+diff --git a/output/data/weasel.yaml b/output/data/weasel.yaml
+index 2e2fa5d..48b1563 100644
+--- a/output/data/weasel.yaml
++++ b/output/data/weasel.yaml
+@@ -1,83 +1,229 @@
+ # Weasel settings
+ # encoding: utf-8
+ 
+-config_version: "0.23"
+-
++# 感谢 @[Mirtle](https://github.com/mirtlecn) 整理
++# Rime 定制指南 <https://github.com/rime/home/wiki/CustomizationGuide#定製指南>
++# Weasel 定制文档 <https://github.com/rime/weasel/wiki/Weasel-定制化>
++# Weasel 字体设定 <https://github.com/rime/weasel/wiki/字體設定>
++
++# Weasel 特殊行为的命令行选项
++# WeaselServer.exe /ascii - CLI 中切换 ASCII 模式
++# WeaselServer.exe /nascii - CLI 中切换非 ASCII 模式
++# WeaselSetup.exe /toggleime - 设置系统快捷键用于开启/关闭键盘（0.16.1 以上版本）
++# WeaselSetup.exe /toggleascii - 设置系统快捷键用于切换 ASCII 模式（0.16.1 以上版本）
++
++# 部分选项需要将 Weasel 更新 16.0 及以上版本才能生效
++config_version: "2024-09-25"
++
++# [app_options]
++# 针对特定应用的设置
+ app_options:
+-  cmd.exe:
+-    ascii_mode: true
+-  conhost.exe:
+-    ascii_mode: true
+-
+-show_notifications: true
+-# how long a period notifications shows
+-show_notifications_time: 1200
+-# use global ascii status
+-global_ascii: false
+-
++  firefox.exe:
++    inline_preedit: true   # 行内显示预编辑区：规避 <https://github.com/rime/weasel/issues/946>
++  # cmd.exe:               # 带 .exe 的进程名：Weasel 15.0 及之前版本须小写
++  #   ascii_mode: true     # 英文模式
++  # conhost.exe:
++  #   ascii_mode: true
++  # windowsterminal.exe:
++  #   ascii_mode: true
++  # wt.exe:
++  #   ascii_mode: true
++  # pwsh.exe:
++  #   ascii_mode: true
++  # powershell.exe:
++  #   ascii_mode: true
++  # mintty.exe:
++  #   ascii_mode: true
++  # nvim-qt.exe:
++  #   ascii_mode: true
++  #   vim_mode: true       # vim 模式, Esc <C-c> <C-[> 切换到 ascii 状态
++# [End of <app_options>]
++
++# [global settings]
++show_notifications: true                   # 是否显示状态变化的通知：true；false；option_list（方案内的开头 option）
++show_notifications_time: 1200              # 通知显示的时间，单位 ms
++global_ascii: false                        # 切换为 ascii 模式时，是否影响所有窗口：true；false
++# [End of <global settings>]
++
++# [ui] 衡自定义：core 内置自绘候选窗（路线 P 的 L2，与 Linux 端同一份渲染代码）
++ui:
++  builtin: true
++
++# [style]
++# 字体；候选项、候选窗口的行为、布局及样式
+ style:
+-  antialias_mode: default
+-  ascii_tip_follow_cursor: false
+-  color_scheme: aqua
+-  font_face: Microsoft YaHei
+-  label_font_face: Microsoft YaHei
+-  comment_font_face: Microsoft YaHei
+-  font_point: 14
+-  label_font_point: 14
+-  comment_font_point: 14
+-  candidate_abbreviate_length: 0
+-  click_to_capture: false
+-  horizontal: false
+-  fullscreen: false
+-  inline_preedit: false
+-  preedit_type: composition
+-  display_tray_icon: false
+-  label_format: "%s."
+-  mark_text: ""
+-  hover_type: none # semi_light, hilite
+-  paging_on_scroll: false
+-  vertical_auto_reverse: false
+-  vertical_text: false
+-  vertical_text_left_to_right: false
+-  vertical_text_with_wrap: false
++  color_scheme: heng_blue                  # 默认配色方案：白底黑字 + 蓝色高亮块白字（衡默认主题）
++  # color_scheme_dark: nord                # 深色模式下，Weasel 的配色方案，Windows 10 1809+ 可用
++
++  # 全局字体
++  # 格式：字体1:起始码位:结束码位:字重:字形,字体2……，字体会依次 fallback
++  # 详细设定请参考 <https://github.com/rime/weasel/wiki/字體設定>
++  font_face: "Segoe UI Emoji:23:23, Segoe UI Emoji:2a:2a, Segoe UI Emoji:30:39, Segoe UI Emoji:fe0f:fe0f, Segoe UI Emoji:20e3:20e3, Segoe UI, Microsoft YaHei, DengXian, Segoe UI Emoji, Noto Color Emoji, Segoe UI Symbol"
++  label_font_face: "Segoe UI, Microsoft YaHei"  # 标签字体；与候选文字同字体栈，保证序号与文字垂直对齐
++  comment_font_face: "Microsoft YaHei"     # 注释字体
++  font_point: 14                           # 全局字体字号
++  label_font_point: 14                     # 标签字体字号，不设定 fallback 到 font_point
++  comment_font_point: 13                   # 注释字体字号，不设定 fallback 到 font_point
++
++  inline_preedit: true                     # 行内显示预编辑区：true；false
++  preedit_type: composition                # 预编辑区内容：composition（编码）； preview（选中的候选）；preview_all（全部候选）
++
++  fullscreen: false                        # 候选窗口全屏显示：true；false
++  horizontal: true                         # 候选项横排：true；false
++  vertical_text: false                     # 竖排文本：true；false
++  # text_orientation: horizontal           # 文本排列方向，效果和 `vertical_text` 相同：horizontal；vertical
++  vertical_text_left_to_right: false       # 竖排方向是否从左到右：true；false
++  vertical_text_with_wrap: false           # 文本竖排模式下，自动换行：true；false
++  vertical_auto_reverse: false             # 文本竖排模式下，候选窗口位于光标上方时倒序排列：true；false
++
++  label_format: "%s"                       # 标签字符：例如 %s. 效果为 1. 2. 3. ....
++  mark_text: ""                            # 标记字符，显示在选中的候选标签前，需要在配色方案中指定颜色；如该项为空字符串 "" 而配色方案中 hilited_mark_color 非透明色，则显示 Windows 11 输入法风格标记
++  ascii_tip_follow_cursor: false           # 切换 ASCII 模式时，提示跟随鼠标，而非输入光标
++  enhanced_position: true                  # 无法定位候选框时，在窗口左上角显示候选框：true；false
++  display_tray_icon: false                 # 托盘显示独立于语言栏的额外图标：true；false
++  antialias_mode: default                  # 次像素反锯齿设定：default；force_dword；cleartype；grayscale；aliased
++  candidate_abbreviate_length: 30          # 候选项略写，超过此数字则用省略号代替。设置为 0 则不启用此功能
++  mouse_hover_ms: 0                        # ! 已弃用。鼠标悬停选词响应时间（ms），设置为 0 时禁用该功能
++  hover_type: none                         # 鼠标在候选窗口悬停时：none（无动作）；hilite（选中鼠标下的候选）；semi_hilite（高亮鼠标下的候选）
++
++  paging_on_scroll: true                   # 在候选窗口上滑动滚轮的行为：true（翻页）；false （选中下一个候选）
++  click_to_capture: false                  # 鼠标点击候选项，创建截图：true；false
++
+   layout:
+-    align_type: center
+-    max_width: 0	#set 0 to disable max width
+-    min_width: 160
+-    min_height: 0
+-    max_height: 0	#set 0 to disable max height
+-    border_width: 3
+-    margin_x: 12
+-    margin_y: 12
+-    spacing: 10
+-    candidate_spacing: 5
+-    hilite_spacing: 4
+-    hilite_padding: 2
+-    round_corner: 4   #别名 hilited_corner_radius
+-    corner_radius: 4
+-    shadow_radius: 0
+-    shadow_offset_x: 4
+-    shadow_offset_y: 4
+-    linespacing: 0 # percentage of font point, 0 to disable
+-    baseline: 0 # percentage of font point, 0 to disable
++    baseline: 0                            # 字号百分比，与 linespacing 一同设置可解决字体跳动问题，设置为 0 为禁用
++    linespacing: 0                         # 字号百分比，参考 <https://github.com/rime/weasel/pull/1177>
++    align_type: center                     # 标签、候选文字、注解文字之间的相对对齐方式：top ; center ; bottom
++    max_height: 600                        # 候选框最大高度，文本竖排模式下如高度超此尺寸则换列显示候选，设置为 0 不启用此功能
++    max_width: 0                           # 候选框最大宽度，horizontal 布局如宽超此尺寸则换行显示候选，设置为 0 不启用此功能
++    min_height: 0                          # 候选框最小高度
++    min_width: 10                          # 候选框最小宽度
++    border_width: 2                        # 边框宽度；又名 border
++    margin_x: 14                           # 主体元素和候选框的左右边距；需 > hilite_padding_x，高亮块左右留白 6px
++    margin_y: 10                           # 主体元素的上下边距；高亮块上下留白 = 10 - hilite_padding_y(4) = 6px，与左右一致
++    spacing: 13                            # inline_preedit 为否时，编码区域和候选区域的间距
++    candidate_spacing: 22                  # 候选项之间的间距
++    hilite_spacing: 6                      # 候选项和相应标签的间距
++    hilite_padding: 8                      # 高亮区域和内部文字的间距，影响高亮区域大小
++    hilite_padding_x: 8                    # 高亮区域和内部文字的左右间距
++    hilite_padding_y: 4                    # 高亮区域和内部文字的上下间距（独立调小：选中背景变矮）
++    shadow_radius: 0                       # 阴影区域半径，为 0 不显示阴影；需要同时在配色方案中指定非透明的阴影颜色
++    shadow_offset_x: 4                     # 阴影左右偏移距离
++    shadow_offset_y: 4                     # 阴影上下偏移距离
++    corner_radius: 8                       # 候选窗口圆角半径
++    round_corner: 8                        # 高亮背景色块圆角半径，与容器 corner_radius 一致
++    # type: vertical                       # 布局设置，效果和 style 下的设置相同：
++                                           # horizontal（横向）；vertical（竖向） ; vertical_text（竖排文本） ; vertical+fullscreen（全屏） ; horizontal+fullscreen（横向全屏）
++# [End of <style>]
++
++# [preset_color_schemes]
++# 配色设定
++# 在小狼毫用户目录新建 preview 文件夹，将自定义皮肤的截图重命名为 color_scheme_<name>.png 放入此文件夹，可以在「输入法设定」中看到自定义皮肤效果
++
++# 小狼毫配色在线设计：
++# [RIME 西米](https://fxliang.github.io/RimeSeeMe/)
++# [小狼毫配色详解](https://github.com/rime/weasel/wiki/定制小狼毫配色)
+ 
+ preset_color_schemes:
++  heng_blue:                               # 衡默认主题：白容器 + 蓝色高亮块白字（M1 视觉）
++    name: "衡／Heng Blue"
++    author: HengIME
++    color_format: argb                     # 0xAARRGGBB
++    # 容器
++    back_color: 0xFFFFFFFF                 # 白色窗体
++    border_color: 0x00000000               # 无边框
++    shadow_color: 0x2E000000               # ~18% 黑轻阴影
++    # 编码区（preedit）
++    text_color: 0xFF000000                 # 黑字
++    hilited_text_color: 0xFF000000
++    hilited_back_color: 0xFFE8EAED         # 浅灰高亮底
++    # 普通候选项
++    candidate_text_color: 0xFF000000       # 黑字
++    candidate_back_color: 0x00000000       # 透明
++    candidate_shadow_color: 0x00000000
++    candidate_border_color: 0x00000000
++    label_color: 0xFF9C9C9C                # 淡灰序号
++    comment_text_color: 0xFFB0B0B0         # 淡灰注释
++    # 选中的候选项：蓝色高亮块 + 白字
++    hilited_candidate_text_color: 0xFFFFFFFF
++    hilited_candidate_back_color: 0xFF4F7CFE   # 蓝 #4F7CFE
++    hilited_candidate_shadow_color: 0x00000000
++    hilited_candidate_border_color: 0x00000000
++    hilited_label_color: 0xFFFFFFFF
++    hilited_comment_text_color: 0xFFFFFFFF
++    hilited_mark_color: 0x00000000
++    prevpage_color: 0x00000000
++    nextpage_color: 0x00000000
++
++  # 以下是一个配色方案示例
++  nord:                                      # 在 `style/color_schema` 指定的配色方案值
++    name: "远山／Nord"                       # 方案设置中显示的配色名称
++    author: Mirtle                           # 配色作者名称
++    color_format: rgba                       # 颜色格式：argb（0xaarrggbb）；rgba（0xrrggbbaa）；abgr（0xaabbggrr 默认）
++    # 默认配色
++    text_color: 0x2E3440                     # 文字
++    shadow_color: 0x000000b4                 # 阴影
++    label_color: 0x4C566A                    # 标签
++    comment_text_color: 0xD08770             # 注释
++    border_color: 0xECEFF4                   # 边框
++    back_color: 0xECEFF4                     # 背景
++    # 普通候选项配色
++    candidate_back_color: 0xECEFF4           # 背景
++    # candidate_border_color:                # 边框
++    # candidate_shadow_color:                # 阴影
++    candidate_text_color: 0x2E3440           # 文字
++    # 编码区域配色
++    hilited_text_color: 0x000000             # 文字
++    hilited_back_color: 0xEBCB8B             # 背景
++    # hilited_shadow_color:                  # 阴影
++    # 选中的候选区域配色
++    hilited_mark_color: 0xBF616A             # 标签前的标记
++    hilited_label_color: 0x4C566A            # 标签
++    hilited_comment_text_color: 0xBF616A     # 注释
++    hilited_candidate_text_color: 0x2E3440   # 文字
++    hilited_candidate_border_color: 0x8FBCBB # 边框
++    hilited_candidate_back_color: 0x8FBCBB   # 背景
++    # hilited_candidate_shadow_color:        # 阴影
++    # inline_preedit: false 时翻页箭头颜色，不设置则不显示箭头
++    # nextpage_color: 0x000000               # 下一页
++    # prevpage_color: 0x000000               # 上一页
++
++  # 修改自鼠须管配色方案
++  purity_of_form_custom:
++    name: "純粹的形式／Purity of Form Custom"
++    author: 雨過之後、佛振
++    text_color: 0x808080
++    back_color: 0x545554
++    label_color: 0xBBBBBB
++    border_color: 0x545554
++    shadow_color: 0xb4000000
++    comment_text_color: 0x808080
++    candidate_text_color: 0xEEEEEE
++    hilited_text_color: 0xEEEEEE
++    hilited_comment_text_color: 0x808080
++    hilited_candidate_back_color: 0xE3E3E3
++    hilited_candidate_border_color: 0xE3E3E3
++    hilited_candidate_label_color: 0x4C4C4C
++    hilited_candidate_text_color: 0x000000
++
++  # 以下为 weasel 自带的配色方案
++  # source: <https://github.com/rime/weasel/blob/master/output/data/weasel.yaml>
++
+   aqua:
+     name: 碧水／Aqua
+     author: 佛振 <chen.sst@gmail.com>
+-    text_color: 0x000000                          #默认文字颜色
+-    back_color: 0xeceeee                          #候选窗背景色
+-    shadow_color: 0x00000000                      #候选窗阴影色，默认全透明（无阴影）
+-    border_color: 0xe0e0e0                        #候选窗边框颜色
+-    hilited_text_color: 0x000000                  #编码文字颜色
+-    hilited_back_color: 0xd4d4d4                  #编码背景颜色
+-    hilited_shadow_color: 0x00000000              #编码背景块阴影颜色
+-    hilited_candidate_text_color: 0xffffff        #高亮候选文字颜色
+-    hilited_candidate_back_color: 0xfa3a0a        #高亮候选背景颜色
+-    hilited_candidate_shadow_color: 0x00000000    #高亮候选背景块阴影颜色
+-    candidate_text_color: 0x000000                #非高亮候选文字颜色
+-    candidate_back_color: 0xeceeee                #非高亮候选背景颜色
+-    candidate_shadow_color: 0x00000000            #非高亮候选背景块阴影颜色
++    text_color: 0x000000
++    back_color: 0xeceeee
++    shadow_color: 0x00000000
++    border_color: 0xe0e0e0
++    hilited_text_color: 0x000000
++    hilited_back_color: 0xd4d4d4
++    hilited_shadow_color: 0x00000000
++    hilited_candidate_text_color: 0xffffff
++    hilited_candidate_back_color: 0xfa3a0a
++    hilited_candidate_shadow_color: 0x00000000
++    candidate_text_color: 0x000000
++    candidate_back_color: 0xeceeee
++    candidate_shadow_color: 0x00000000
+ 
+   azure:
+     name: 青天／Azure
+@@ -574,3 +720,4 @@ preset_color_schemes:
+     hilited_candidate_back_color: 0xd8bf00
+     comment_text_color: 0x808080
+     hilited_comment_text_color: 0x444444
++# [End of <preset_color_schemes>]
