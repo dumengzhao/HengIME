@@ -78,6 +78,8 @@ git clone --depth 1 -b 0.17.4 https://github.com/rime/weasel third_party/src/wea
 | `weasel-0.17.4-heng-m1.patch` | 全部源码改动（10 文件）：RimeWithWeasel 数据源换血 + v4 样式/app_options 配置通道、布局间距修复、ContextUpdater 零宽保护、rc winres 替换、build-x64.bat、include/heng.h（v4） |
 | `weasel.props` / `env.bat` | 编译配置（BOOST_ROOT 等，上游 gitignore 忽略） |
 | `rime-default.yaml` | 雾凇 default.yaml + 左右键切换候选（上游 gitignore 忽略） |
+| `rime-weasel.yaml` | 雾凇 weasel.yaml + 衡默认主题 heng_blue（白底蓝块白字配色方案）（上游 gitignore 忽略） |
+| `rime-ice.schema.yaml` | 雾凇 rime_ice.schema.yaml + 模糊音全开（平翘舌/前后鼻音/n-l；2026-10-04）（上游 gitignore 忽略） |
 | `boost-project-config.jam` | b2 MSVC 显式配置（修复 setup 路径 bug） |
 
 **新机器重建步骤**（克隆 weasel 后）：
@@ -87,6 +89,8 @@ cd third_party/src/weasel
 git apply --whitespace=nowarn ../../../patches/weasel-0.17.4-heng-m1.patch
 cp ../../../patches/weasel.props ../../../patches/env.bat .
 cp ../../../patches/rime-default.yaml output/data/default.yaml
+cp ../../../patches/rime-weasel.yaml output/data/weasel.yaml
+cp ../../../patches/rime-ice.schema.yaml output/data/rime_ice.schema.yaml
 cp ../../../patches/boost-project-config.jam deps/boost_1_84_0/project-config.jam
 ```
 

@@ -2483,6 +2483,91 @@ index 99d8e64..0ad9d36 100644
        if (id == i)
          w += base_offset;
        /* Label */
+diff --git a/WeaselUI/StandardLayout.cpp b/WeaselUI/StandardLayout.cpp
+index 1855ec4..0033921 100644
+--- a/WeaselUI/StandardLayout.cpp
++++ b/WeaselUI/StandardLayout.cpp
+@@ -204,51 +204,56 @@ void weasel::StandardLayout::_PrepareRoundInfo(CDCHandle& dc) {
+       //  level 2: BackType
+       //  level 3: IsTopLeftNeedToRound, IsBottomLeftNeedToRound,
+       //  IsTopRightNeedToRound, IsBottomRightNeedToRound
++      // 衡改动（偏离上游）：上游此表按「高亮块与相邻块拼成连续条带」设计，
++      // 中间候选四角恒直角、首尾块仅外侧圆角。实际布局中 candidate_spacing
++      // 通常大于 hilite_padding*2（块与块之间有间隙），拼接圆角在间隙下
++      // 呈现为生硬的直角断头。改为每个候选块独立四角圆角（药丸形），
++      // 首尾块与容器壁的留白由 margin > hilite_padding 保证。
+       const static bool is_to_round_corner[3][2][5][4] = {
+           // LAYOUT_VERTICAL
+           {// not inline_preedit
+            {
+-               {false, false, false, false},  // FIRST_CAND
+-               {false, false, false, false},  // MID_CAND
+-               {false, true, false, true},    // LAST_CAND
+-               {false, true, false, true},    // ONLY_CAND
++               {true, true, true, true},     // FIRST_CAND
++               {true, true, true, true},     // MID_CAND
++               {true, true, true, true},     // LAST_CAND
++               {true, true, true, true},     // ONLY_CAND
+            },
+            // inline_preedit
+            {
+-               {true, false, true, false},    // FIRST_CAND
+-               {false, false, false, false},  // MID_CAND
+-               {false, true, false, true},    // LAST_CAND
+-               {true, true, true, true},      // ONLY_CAND
++               {true, true, true, true},     // FIRST_CAND
++               {true, true, true, true},     // MID_CAND
++               {true, true, true, true},     // LAST_CAND
++               {true, true, true, true},     // ONLY_CAND
+            }},
+           // LAYOUT_HORIZONTAL
+           {// not inline_preedit
+            {
+-               {false, true, false, false},   // FIRST_CAND
+-               {false, false, false, false},  // MID_CAND
+-               {false, false, false, true},   // LAST_CAND
+-               {false, true, false, true},    // ONLY_CAND
++               {true, true, true, true},     // FIRST_CAND
++               {true, true, true, true},     // MID_CAND
++               {true, true, true, true},     // LAST_CAND
++               {true, true, true, true},     // ONLY_CAND
+            },
+            // inline_preedit
+            {
+-               {true, true, false, false},    // FIRST_CAND
+-               {false, false, false, false},  // MID_CAND
+-               {false, false, true, true},    // LAST_CAND
+-               {true, true, true, true},      // ONLY_CAND
++               {true, true, true, true},     // FIRST_CAND
++               {true, true, true, true},     // MID_CAND
++               {true, true, true, true},     // LAST_CAND
++               {true, true, true, true},     // ONLY_CAND
+            }},
+           // LAYOUT_VERTICAL_TEXT
+           {// not inline_preedit
+            {
+-               {false, false, false, false},  // FIRST_CAND
+-               {false, false, false, false},  // MID_CAND
+-               {true, true, false, false},    // LAST_CAND
+-               {false, false, true, true},    // ONLY_CAND
++               {true, true, true, true},     // FIRST_CAND
++               {true, true, true, true},     // MID_CAND
++               {true, true, true, true},     // LAST_CAND
++               {true, true, true, true},     // ONLY_CAND
+            },
+            // inline_preedit
+            {
+-               {false, false, true, true},    // FIRST_CAND
+-               {false, false, false, false},  // MID_CAND
+-               {true, true, false, false},    // LAST_CAND
+-               {true, true, true, true},      // ONLY_CAND
++               {true, true, true, true},     // FIRST_CAND
++               {true, true, true, true},     // MID_CAND
++               {true, true, true, true},     // LAST_CAND
++               {true, true, true, true},     // ONLY_CAND
+            }},
+       };
+       for (auto i = 0; i < candidates_count; i++) {
 diff --git a/WeaselUI/VerticalLayout.cpp b/WeaselUI/VerticalLayout.cpp
 index fee38f6..b8f0984 100644
 --- a/WeaselUI/VerticalLayout.cpp
