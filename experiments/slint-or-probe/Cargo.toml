@@ -1,0 +1,16 @@
+[package]
+name = "slint-or-probe"
+version = "0.1.0"
+edition = "2021"
+
+# 独立于根 workspace（M-P1 试验工程）
+[workspace]
+
+[dependencies]
+slint = { version = "1", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "renderer-software",
+    "software-renderer-systemfonts",
+] }
+x11rb = "0.13"
