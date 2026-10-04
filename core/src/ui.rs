@@ -230,6 +230,13 @@ fn create_backend() -> Option<Box<dyn UiBackend>> {
     Some(Box::new(win_backend::WinWindow::new()?))
 }
 
+// macOS 后端（NSPanel + nonactivating panel，M-P4）尚未实现；
+// 无后端时自绘候选窗不可用，引擎/会话/配置等其余能力不受影响。
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn create_backend() -> Option<Box<dyn UiBackend>> {
+    None
+}
+
 /// 系统 DPI 缩放因子（96dpi = 1.0）。渲染与窗口尺寸均按此放大；
 /// 指针事件坐标反向除回逻辑像素。
 #[cfg(target_os = "windows")]
