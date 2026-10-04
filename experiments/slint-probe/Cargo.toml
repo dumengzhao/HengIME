@@ -1,0 +1,16 @@
+[package]
+name = "slint-probe"
+version = "0.1.0"
+edition = "2021"
+
+# 独立于根 workspace（M0.5 试验工程，见 docs/M0.5-slint-window-probe.md）
+[workspace]
+
+[dependencies]
+slint = { version = "1", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-software",
+] }
+x11rb = "0.13"
