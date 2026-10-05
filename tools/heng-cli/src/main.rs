@@ -345,7 +345,7 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
         };
         let rc = heng_hello(5, &mut hello);
         check!("heng_hello 填充成功", rc == 1);
-        check!("hello.abi_version == 6", hello.abi_version == 6);
+        check!("hello.abi_version == 7", hello.abi_version == 7);
         check!("hello.data_size > 0", hello.data_size > 0);
         check!("min_abi_version <= abi_version", hello.min_abi_version <= hello.abi_version);
 
