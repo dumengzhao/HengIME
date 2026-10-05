@@ -12,84 +12,89 @@
 
 自用输入法，不上架应用商店，仅使用免费证书。目标是在五个平台上提供**行为、视觉、设置、功能完全统一**的输入体验。
 
-## 六条核心判断
+## 总体架构
 
-1. **不自己写输入法框架。** 调研的 12 个跨端输入法实现（搜狗 / 微信 / 百度 / 讯飞 / RIME 全家桶 / Mozc / Keyman / Gboard），无一例外全部复用系统框架（TSF / IMK / Fcitx5 / IMS / IME Kit）。
-2. **不自研引擎。** librime + YAML 配置体系免费提供全部上层逻辑，且跨平台天然通用。只有资源远超本项目的商业公司才自研引擎。
-3. **候选窗该放在哪个进程，由宿主框架决定。** Windows 的 TSF 是注入宿主进程的 DLL，候选窗**必须外置**到服务进程；macOS / Android / 鸿蒙的输入法是独立进程，候选窗可同进程。
-4. **「热路径必须同进程」不成立。** 小狼毫（Weasel）每一次按键都走命名管道 IPC，候选窗与引擎都在独立进程 `WeaselServer.exe` 里。真正的约束是「无阻塞 + 协议精简」。
-5. **「配置级统一」有天花板。** RIME 三个前端对「开关记住范围」的处理各不相同，这类差异写在前端代码里。要突破只能自研外壳——见 `docs/ARCHITECTURE.md` 第 9 章的两条路线。
-6. **鸿蒙是唯一必须自研外壳的一端。** librime 无任何 HarmonyOS 前端。参考微信输入法节奏：基础版到能力齐全约 21 个月（大团队 + 成熟引擎的前提下）。
-
-## 架构速览
+所有跨端一致的能力收敛到 core（一份代码），外壳只保留与宿主系统交互所必需的最薄一层；候选窗也收进 core，由内置自绘 UI 统一呈现。
 
 ```
-设置界面（Web）                   写一次 ×1
+设置界面（Web，计划中）              写一次 ×1
         ↕ 本地 HTTP
-core 服务进程（Rust，常驻）        写一次 ×1
-librime · 词库词频 · 数据同步
-AI 预测 · 设置存储 · 本地 IPC
+core（Rust，heng-core）             写一次 ×1
+├─ librime 封装与 FFI
+├─ 版本化 C ABI（include/heng.h）
+├─ 内置自绘候选窗（Slint 软渲染）
+├─ 本地 HTTP 服务（127.0.0.1:9371）
+└─ 配置中心对接（config-center/shared/heng.yaml 为配置真源）
         ↕ 同进程 C ABI（macOS / Linux / Android / 鸿蒙）
-        ↕ 命名管道 IPC（Windows，候选窗也在服务进程里）
-五端外壳                          每端一次 ×5
-（只做：按键转发 + 候选窗渲染）
+        ↕ 命名管道 IPC（Windows：TSF 注入宿主进程，引擎与候选窗都在服务进程）
+五端外壳                            每端一次 ×5
+（只做：按键转发 + 会话管理 + 输入位置上报）
         ↕
-librime + 词库                    现成 ×0
+librime + 词库（雾凇拼音）           现成 ×0
 ```
 
-完整设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（含竞品架构对照、可借鉴清单 30 条、C ABI 草案、里程碑、风险清单）。
+## 五端外壳
+
+| 平台 | 宿主框架 | 外壳形态 | 候选窗 | 状态 |
+|---|---|---|---|---|
+| Windows | TSF | Weasel 改造（服务进程 `WeaselServer.exe`） | core 内置自绘（Win32 分层窗口） | **可用** |
+| Linux | Fcitx5 | fcitx5 addon + heng_blue 主题 | core 内置自绘（X11/XWayland） | **可用** |
+| macOS | IMK | Squirrel 改造 | core 内置自绘（NSPanel，待实现） | 外壳接入中 |
+| Android | IMS | Trime 参考 | core 内置自绘（计划） | 未开始 |
+| 鸿蒙 | IME Kit | 自研（librime 无鸿蒙前端） | core 内置自绘（计划） | 未开始 |
+
+## core 组件
+
+| 模块 | 职责 |
+|---|---|
+| `engine/` | librime FFI 绑定与会话封装（组词、候选、上屏、开关状态） |
+| `capi.rs` | 版本化 C ABI（`heng.h`，abi_version=7），各端外壳唯一的对接面 |
+| `ui.rs` | 内置自绘候选窗：Slint 软渲染产出预乘 ARGB 帧，平台后端只负责搬帧与指针事件（Linux=X11，Windows=Win32 分层窗口，macOS=NSPanel 待实现） |
+| `server.rs` | 本地 HTTP 服务（设置界面与诊断用，127.0.0.1:9371） |
+| `global.rs` | 全局引擎与会话表 |
 
 ## 目录结构
 
 ```
 HengIME/
-├── docs/
-│   ├── ARCHITECTURE.md     架构方案 v2（含竞品对照、可借鉴清单、风险清单）
-│   └── M0.5-*.md           决策门三问试验报告（薄壳化 / Slint / 前端差异）
+├── docs/                    架构方案与决策记录
+│   ├── ARCHITECTURE.md        架构方案 v2（竞品对照、路线决策）
+│   └── ROUTE-P.md             路线 P 裁决与规划
 │
-├── core/                   Rust 统一能力模块（cdylib: heng_core.dll）
-│   ├── src/
-│   │   ├── engine/           librime FFI 绑定与封装（M0 已就绪）
-│   │   ├── capi.rs           版本化 C ABI（abi_version=3，23 个导出）
-│   │   └── server/           本地 HTTP 服务（127.0.0.1:9371）
-│   └── include/heng.h        C ABI 头文件（供各端外壳 include）
+├── core/                    统一能力模块（cdylib: heng_core.dll/.so/.dylib）
+│   ├── src/                   engine · capi · ui · server · global
+│   └── include/heng.h         C ABI 头文件（供各端外壳 include）
 │
-├── tools/
-│   └── heng-cli/           命令行校验器（version/cand/commit/bench/serve/abitest）
+├── shells/                  五端外壳
+│   ├── linux/fcitx5/          fcitx5 集成 + heng_blue 主题
+│   ├── macos/                 Squirrel 改造（进行中）
+│   ├── windows/               Weasel 改造（改动固化为 patches/）
+│   ├── android/               计划中
+│   └── harmony/               计划中
 │
-├── third_party/            预编译依赖与参考源码（gitignored，见 third_party/README.md）
-│   └── src/weasel/           小狼毫源码（M1 起：RimeWithWeasel 数据源已换 heng-core）
-│
-├── settings-web/           计划中：设置界面（Web，五端共用）
-│
-├── skins/                  计划中：皮肤
-│
-├── shells/                 计划中：五端外壳（Windows 走 Weasel 改造，见里程碑 M1）
-│   ├── android/              Kotlin + JNI
-│   ├── harmony/              ArkTS + NAPI
-│   ├── windows/              Weasel 改造（TSF + 服务进程，命名管道 IPC）
-│   ├── macos/                ObjC/Swift，基于 Squirrel 改造
-│   └── linux/                Fcitx5 addon（+ 可选独立 UI 进程）
-│
-└── config-center/          计划中：配置中心
+├── config-center/           配置中心（shared/heng.yaml 为配置真源）
+├── patches/                 weasel 源码改动的固化补丁与配置
+├── tools/heng-cli/          命令行校验器（version/cand/commit/serve/abitest/uitest）
+├── third_party/             预编译依赖与参考源码（gitignored，见 third_party/README.md）
+├── settings-web/            计划中：设置界面（Web，五端共用）
+└── skins/                   计划中：皮肤
 ```
 
 ## 里程碑
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| M0 | 地基：Rust 骨架 + librime C API 绑定 + 版本化 C ABI + heng-cli + 本地 HTTP | **完成（2026-09）**：abitest 28 项全过 · heng_core.dll 18 个导出经外部进程验证 · HTTP 全链路跑通 |
-| M0.5 | **决策门**：薄壳化试验 · 跨端 GUI 工具包验证 · 前端行为差异清单 | **完成并已裁决（2026-10-03）**：三问数据齐备（`docs/M0.5-*.md`），证据倒向路线 P；Windows 外壳裁决选 **A（Weasel 改造）** |
-| M1 | **Windows 外壳（Weasel 改造，路线 A 首站）**：Weasel 编译链 + core 数据源整体换血 + 真机打字验证 | **完成（2026-10-03）**：boost/MSVC 编译链闭环 · `RimeWithWeaselHandler` 全部 rime_api 调用替换为 heng_* C ABI · WeaselServer.exe 导入表验证换血成功 · 真机注册 TSF 后打字/候选窗/上屏全链路可用 · 修复上游高亮块溢出压序号问题（横竖排布局间距补偿） |
-| M2 | 设置界面与配置中心 | 未开始 |
+| M0 | core 地基：librime 绑定 + 版本化 C ABI + heng-cli + 本地 HTTP | 已完成 |
+| M0.5 | 决策门：三条试验（薄壳化 / GUI 工具包 / 前端差异），裁决走路线 P（core 前置） | 已完成 |
+| M1 | Windows 外壳：Weasel 改造，数据源整体换为 heng-core | 已完成 |
+| M5 | Windows 收尾：样式配置化、app_options、配置中心对接 | 已完成 |
+| M-P1 | core 内置自绘候选窗（Linux + Windows），替代各端自带候选 UI | 已完成 |
+| M7 | Linux 外壳：fcitx5 addon + heng_blue 主题 | 主体完成 |
+| M6 | macOS 外壳：Squirrel 改造（ABI v7 已就绪） | 进行中 |
+| M2 | 设置界面与配置中心完善 | 未开始 |
 | M3 | 词库与数据同步 | 未开始 |
-| M4 | 鸿蒙外壳（交叉编译 librime + NAPI + InputMethodExtensionAbility） | 未开始 |
-| M5 | Windows 外壳收尾（样式配置化、app_options、通知消息、诊断日志清理） | **进行中（2026-10-03）**：core config API v4（8 个 `heng_config_*` C ABI 直通 librime）+ Engine 启动自动 `deploy_config_file("weasel.yaml")`（对齐官方 WeaselDeployer，librime config 组件只读 staging）· abitest 32/32（雾凇 38 套配色遍历命中）· weasel 侧 `_UpdateUIStyle`/`_UpdateUIStyleColor`/`_LoadAppOptions` 全键表移植接线（Initialize/AddSession/UpdateColorTheme/_ReadClientInfo）· app_options 通道恢复（`session.client_app` → 按应用 set_option）· 诊断插桩全清（hlog/tsflog/debuglog.h）· patches 补丁重生成 · 待办：MSBuild 编译验证（手动跑 build-x64.bat）、通知消息恢复 |
-| M6 | macOS 外壳（基于 Squirrel 改造） | 未开始 |
-| M7 | Linux（Fcitx5 addon + ClassicUI SVG 主题） | 未开始 |
-| M8 | AI 预测（Keyman lexical model 式可插拔模块） | 未开始 |
-
-**M0.5 是决策门，不是可选项。** 路线选择（第 9 章的两条路线）推迟到拿到试验数据之后，而不是在方案阶段预设。
+| M4 | 鸿蒙外壳 | 未开始 |
+| M8 | AI 预测（可插拔模块） | 未开始 |
 
 ## 命名约定
 
@@ -103,8 +108,9 @@ HengIME/
 
 > 注意：鸿蒙端的包名一旦确定不要修改——改包名会导致旧 Profile 直接失效，需重新申请签名。
 
-## 需要提前接受的三件事
+## 设计文档
 
-1. **逐像素一致性不可达。** 五端字体渲染引擎不同。目标定为「设计一致、比例一致、间距一致」。
-2. **Linux 的 Wayland 会话下候选窗受限。** 需使用 X11 / XWayland 会话——搜狗、微信、百度、讯飞也都是这么建议用户的。
-3. **「完全统一」分两个层次。** 配置级统一成本低但够不到「由前端代码决定的行为差异」；要全量统一必须自研四端外壳，成本高一个数量级。两者的取舍见 `docs/ARCHITECTURE.md` 第 9 章。
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 架构方案 v2：竞品架构对照、可借鉴清单、两条路线的决策依据
+- [docs/ROUTE-P.md](docs/ROUTE-P.md) —— 路线 P（core 前置 + 内置候选窗）的裁决与规划
+- [docs/M0.5-*.md](docs/) —— 决策门三问的试验数据
+- [third_party/README.md](third_party/README.md) —— 第三方依赖重建步骤
