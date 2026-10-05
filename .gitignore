@@ -40,3 +40,5 @@ shells/linux/build/
 .idea/
 .DS_Store
 Thumbs.db
+installation.yaml
+user.yaml
