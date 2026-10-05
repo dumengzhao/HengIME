@@ -268,6 +268,37 @@ HENG_API int heng_config_next(HengConfigIterator* iter);
 /* 结束遍历，释放迭代器资源。 */
 HENG_API void heng_config_end(HengConfigIterator* iter);
 
+/* ---- Squirrel 外壳所需（v7；增量追加，v6 及之前全部不变） ---- */
+
+/* 取当前组合串的原始输入（如拼音串，只读快照）。返回 TRUE 且 *out 非 NULL
+ * 表示有输入（heng_free_string 释放）；*out 为 NULL 表示无组合。 */
+HENG_API int heng_get_input(heng_session_t session, char** out);
+
+/* 组合串内光标位置（UTF-8 字节偏移）。无组合/失败返回 0。 */
+HENG_API int heng_get_caret_pos(heng_session_t session);
+
+/* 设置组合串内光标位置（UTF-8 字节偏移）。返回 HENG_TRUE=已设置。 */
+HENG_API int heng_set_caret_pos(heng_session_t session, int pos);
+
+/* 用户数据同步（Rime sync 机制）。返回 HENG_TRUE=成功。 */
+HENG_API int heng_sync_user_data(void);
+
+/* 选项状态标签（abbreviated 非 0 取短标签；菜单栏图标/浮窗用）。
+ * 返回 >0 且 < buf_len：已写入字节数（不含 NUL）；
+ * 返回 > buf_len：缓冲不足（返回所需长度含 NUL）；
+ * 返回 0：无标签 / 参数无效。 */
+HENG_API int heng_get_state_label_abbreviated(heng_session_t session,
+                                              const char* option, int state,
+                                              int abbreviated, char* buf,
+                                              int buf_len);
+
+/* 打开方案的已部署配置（如 "luna_pinyin"，方案级样式覆盖）。返回句柄，NULL 失败。 */
+HENG_API heng_config_t heng_config_open_schema(const char* schema_id);
+
+/* 读浮点。返回 HENG_TRUE=命中（*out 已填），HENG_FALSE=未命中。 */
+HENG_API int heng_config_get_double(heng_config_t config, const char* key,
+                                    double* out);
+
 /* ---- 内存释放 ---- */
 
 HENG_API void heng_free_string(char* s);

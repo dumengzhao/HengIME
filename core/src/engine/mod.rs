@@ -174,12 +174,13 @@ impl Engine {
             join_maintenance_thread();
         }
 
-        // 对齐官方 WeaselDeployer（Configurator.cpp: deploy_config_file("weasel.yaml")）：
+        // 对齐官方 WeaselDeployer（Configurator.cpp: deploy_config_file("weasel.yaml")）
+        // 与官方 Squirrel（SquirrelApplicationDelegate.startRime: deploy_config_file("squirrel.yaml")）：
         // librime 的 "config" 组件只读 staging 目录，标准部署只处理 default.yaml 与
-        // 各方案，外壳样式配置 weasel.yaml 必须显式编译进 staging 才能被
-        // config_open("weasel") 读到。shared 目录无此文件时失败返回 False，无害。
+        // 各方案，外壳样式配置 weasel.yaml / squirrel.yaml 必须显式编译进 staging 才能
+        // 被 config_open 读到。shared 目录无对应文件时失败返回 False，无害。
         if let Some(deploy_config_file) = api.deploy_config_file.as_ref() {
-            for name in ["weasel.yaml", "heng.yaml"] {
+            for name in ["weasel.yaml", "squirrel.yaml", "heng.yaml"] {
                 let name = CString::new(name).unwrap();
                 let version_key = CString::new("config_version").unwrap();
                 unsafe { deploy_config_file(name.as_ptr(), version_key.as_ptr()) };
@@ -520,6 +521,34 @@ impl Engine {
         (ok == rime_ffi::TRUE).then_some(value != rime_ffi::FALSE)
     }
 
+    /// 读浮点。None = 键不存在。（v7：Squirrel 外壳读 chord_duration / 字号等）
+    pub fn config_get_double(&self, config: &rime_ffi::RimeConfig, key: &str) -> Option<f64> {
+        let get = self.api().config_get_double.as_ref()?;
+        let k = CString::new(key).ok()?;
+        let mut value: f64 = 0.0;
+        let ok = unsafe { get(config as *const _ as *mut _, k.as_ptr(), &mut value) };
+        (ok == rime_ffi::TRUE).then_some(value)
+    }
+
+    /// 打开方案的已部署配置（RimeSchemaOpen，供外壳读方案级样式覆盖）。（v7）
+    pub fn schema_open(&self, schema_id: &str) -> Result<rime_ffi::RimeConfig, EngineError> {
+        let open = self
+            .api()
+            .schema_open
+            .ok_or(EngineError::ApiMissing("schema_open"))?;
+        let id =
+            CString::new(schema_id).map_err(|_| EngineError::ApiCall("schema_id 含非法字符"))?;
+        let mut config = rime_ffi::RimeConfig {
+            ptr: std::ptr::null_mut(),
+        };
+        let ok = unsafe { open(id.as_ptr(), &mut config) == rime_ffi::TRUE };
+        if ok {
+            Ok(config)
+        } else {
+            Err(EngineError::ApiCall("schema_open"))
+        }
+    }
+
     /// 开始遍历 map 的直属子键。`iter` 指向调用方分配的 HengConfigIterator（布局同 librime）。
     ///
     /// # Safety
@@ -564,6 +593,74 @@ impl Engine {
             .commit_composition
             .ok_or(EngineError::ApiMissing("commit_composition"))?;
         Ok(unsafe { commit(id) == rime_ffi::TRUE })
+    }
+
+    // ---------- 会话辅助（v7：Squirrel 外壳所需） ----------
+
+    /// 当前组合串的原始输入（如拼音串）。Err = 无组合。
+    pub fn get_input(&self, id: RimeSessionId) -> Result<String, EngineError> {
+        let get = self
+            .api()
+            .get_input
+            .ok_or(EngineError::ApiMissing("get_input"))?;
+        let ptr = unsafe { get(id) };
+        if ptr.is_null() {
+            return Err(EngineError::ApiCall("get_input"));
+        }
+        Ok(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+    }
+
+    /// 组合串内光标位置（UTF-8 字节偏移）。
+    pub fn get_caret_pos(&self, id: RimeSessionId) -> Result<usize, EngineError> {
+        let get = self
+            .api()
+            .get_caret_pos
+            .ok_or(EngineError::ApiMissing("get_caret_pos"))?;
+        Ok(unsafe { get(id) })
+    }
+
+    /// 设置组合串内光标位置（UTF-8 字节偏移）。
+    pub fn set_caret_pos(&self, id: RimeSessionId, pos: usize) -> Result<(), EngineError> {
+        let set = self
+            .api()
+            .set_caret_pos
+            .ok_or(EngineError::ApiMissing("set_caret_pos"))?;
+        unsafe { set(id, pos) };
+        Ok(())
+    }
+
+    /// 用户数据同步（Rime sync 机制）。返回是否成功。
+    pub fn sync_user_data(&self) -> Result<bool, EngineError> {
+        let sync = self
+            .api()
+            .sync_user_data
+            .ok_or(EngineError::ApiMissing("sync_user_data"))?;
+        Ok(unsafe { sync() == rime_ffi::TRUE })
+    }
+
+    /// 选项状态标签（abbreviated=true 取短标签，用于菜单栏图标）。None = 无标签。
+    pub fn get_state_label_abbreviated(
+        &self,
+        id: RimeSessionId,
+        option: &str,
+        state: bool,
+        abbreviated: bool,
+    ) -> Option<String> {
+        let get = self.api().get_state_label_abbreviated.as_ref()?;
+        let k = CString::new(option).ok()?;
+        let slice = unsafe {
+            get(
+                id,
+                k.as_ptr(),
+                state as rime_ffi::Bool,
+                abbreviated as rime_ffi::Bool,
+            )
+        };
+        if slice.str.is_null() || slice.length == 0 {
+            return None;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(slice.str as *const u8, slice.length) };
+        Some(String::from_utf8_lossy(bytes).into_owned())
     }
 
     /// 从零化的 `RimeContext` 提取快照（get_context 成功后调用）。

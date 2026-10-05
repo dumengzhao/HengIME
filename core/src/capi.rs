@@ -23,7 +23,7 @@ pub const HENG_TRUE: c_int = 1;
 pub const HENG_FALSE: c_int = 0;
 
 /// 当前 C ABI 版本（v6：传播策略 + app_options 统一 + 选项持久化）
-pub const HENG_ABI_VERSION: c_int = 6;
+pub const HENG_ABI_VERSION: c_int = 7;
 /// 仍兼容的最低调用方 ABI（v4 起有 config API；更早调用方未验证）
 pub const HENG_MIN_ABI_VERSION: c_int = 4;
 
@@ -290,6 +290,9 @@ pub extern "C" fn heng_describe() -> *const c_char {
                 "heng_config_begin_map", "heng_config_next", "heng_config_end",
                 "heng_set_propagation_policy", "heng_get_propagation_policy",
                 "heng_ui_sync", "heng_ui_hide", "heng_take_ui_commit",
+                "heng_get_input", "heng_get_caret_pos", "heng_set_caret_pos",
+                "heng_sync_user_data", "heng_get_state_label_abbreviated",
+                "heng_config_open_schema", "heng_config_get_double",
                 "heng_clear", "heng_free_string", "heng_last_error"
             ]
         });
@@ -1152,6 +1155,213 @@ pub extern "C" fn heng_config_end(iter: *mut HengConfigIterator) {
             let _guard = crate::global::OP_LOCK.lock().unwrap();
             let rime_iter = iter as *mut crate::engine::RimeConfigIterator;
             unsafe { engine.config_end(rime_iter) };
+        }
+    })
+}
+
+// ---- v7：Squirrel 外壳所需增量 ----
+
+/// 取当前组合串的原始输入（消费不适用：只读快照）。
+/// 返回 TRUE 且 *out 非 NULL 表示有输入（heng_free_string 释放）；否则 *out 为 NULL。
+#[no_mangle]
+pub extern "C" fn heng_get_input(session: HengSession, out: *mut *mut c_char) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if session == 0 || out.is_null() {
+            return HENG_FALSE;
+        }
+        unsafe { *out = std::ptr::null_mut() };
+        let engine = match engine() {
+            Ok(e) => e,
+            Err(e) => {
+                set_err(e);
+                return HENG_FALSE;
+            }
+        };
+        let Some(rime_id) = SESSIONS.rime_id(session) else {
+            set_err(format!("会话 {session} 不存在"));
+            return HENG_FALSE;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        match engine.get_input(rime_id) {
+            Ok(input) => match CString::new(input) {
+                Ok(s) => {
+                    unsafe { *out = s.into_raw() };
+                    HENG_TRUE
+                }
+                Err(_) => HENG_FALSE,
+            },
+            Err(_) => HENG_FALSE, // 无组合串属正常情形，不视为错误
+        }
+    })
+}
+
+/// 组合串内光标位置（UTF-8 字节偏移）。无组合/失败返回 0。
+#[no_mangle]
+pub extern "C" fn heng_get_caret_pos(session: HengSession) -> c_int {
+    ffi_guard!(0, {
+        if session == 0 {
+            return 0;
+        }
+        let engine = match engine() {
+            Ok(e) => e,
+            Err(_) => return 0,
+        };
+        let Some(rime_id) = SESSIONS.rime_id(session) else {
+            return 0;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        engine.get_caret_pos(rime_id).unwrap_or(0) as c_int
+    })
+}
+
+/// 设置组合串内光标位置（UTF-8 字节偏移）。返回 TRUE=已设置。
+#[no_mangle]
+pub extern "C" fn heng_set_caret_pos(session: HengSession, pos: c_int) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if session == 0 || pos < 0 {
+            return HENG_FALSE;
+        }
+        let engine = match engine() {
+            Ok(e) => e,
+            Err(e) => {
+                set_err(e);
+                return HENG_FALSE;
+            }
+        };
+        let Some(rime_id) = SESSIONS.rime_id(session) else {
+            set_err(format!("会话 {session} 不存在"));
+            return HENG_FALSE;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        match engine.set_caret_pos(rime_id, pos as usize) {
+            Ok(()) => HENG_TRUE,
+            Err(e) => {
+                set_err(e);
+                HENG_FALSE
+            }
+        }
+    })
+}
+
+/// 用户数据同步（Rime sync 机制）。返回 TRUE=成功。
+#[no_mangle]
+pub extern "C" fn heng_sync_user_data() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        let engine = match engine() {
+            Ok(e) => e,
+            Err(e) => {
+                set_err(e);
+                return HENG_FALSE;
+            }
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        match engine.sync_user_data() {
+            Ok(done) => done as c_int,
+            Err(e) => {
+                set_err(e);
+                HENG_FALSE
+            }
+        }
+    })
+}
+
+/// 选项状态标签（abbreviated 非 0 取短标签）。
+/// 返回 >0 且 < buf_len：已写入字节数（不含 NUL）；
+/// 返回 > buf_len：缓冲不足（返回所需长度含 NUL）；
+/// 返回 0：无标签 / 参数无效。
+#[no_mangle]
+pub extern "C" fn heng_get_state_label_abbreviated(
+    session: HengSession,
+    option: *const c_char,
+    state: c_int,
+    abbreviated: c_int,
+    buf: *mut c_char,
+    buf_len: c_int,
+) -> c_int {
+    ffi_guard!(0, {
+        if session == 0 || option.is_null() || buf.is_null() || buf_len <= 0 {
+            return 0;
+        }
+        let engine = match engine() {
+            Ok(e) => e,
+            Err(_) => return 0,
+        };
+        let Some(rime_id) = SESSIONS.rime_id(session) else {
+            return 0;
+        };
+        let Some(name) = (unsafe { cstr_to_string(option) }) else {
+            return 0;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        let label = engine.get_state_label_abbreviated(
+            rime_id,
+            &name,
+            state != 0,
+            abbreviated != 0,
+        );
+        let Some(label) = label else {
+            return 0;
+        };
+        let bytes = label.as_bytes();
+        if (bytes.len() as c_int) < buf_len {
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, bytes.len());
+                *buf.add(bytes.len()) = 0;
+            }
+            bytes.len() as c_int
+        } else {
+            (bytes.len() + 1) as c_int
+        }
+    })
+}
+
+/// 打开方案的已部署配置（如 "luna_pinyin"）。返回句柄，NULL 失败。
+#[no_mangle]
+pub extern "C" fn heng_config_open_schema(schema_id: *const c_char) -> *mut c_void {
+    ffi_guard!(ptr::null_mut(), {
+        if let Err(e) = engine() {
+            set_err(e);
+            return ptr::null_mut();
+        }
+        let Some(id) = (unsafe { cstr_to_string(schema_id) }) else {
+            return ptr::null_mut();
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        match engine().unwrap().schema_open(&id) {
+            Ok(config) => config.ptr,
+            Err(e) => {
+                set_err(e);
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// 读浮点。返回 TRUE=命中（*out 已填），FALSE=未命中。
+#[no_mangle]
+pub extern "C" fn heng_config_get_double(
+    config: *mut c_void,
+    key: *const c_char,
+    out: *mut f64,
+) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if config.is_null() || key.is_null() || out.is_null() {
+            return HENG_FALSE;
+        }
+        let Ok(engine) = engine() else {
+            return HENG_FALSE;
+        };
+        let Some(k) = (unsafe { cstr_to_string(key) }) else {
+            return HENG_FALSE;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        let cfg = crate::engine::RimeConfig { ptr: config };
+        match engine.config_get_double(&cfg, &k) {
+            Some(value) => {
+                unsafe { *out = value };
+                HENG_TRUE
+            }
+            None => HENG_FALSE,
         }
     })
 }
