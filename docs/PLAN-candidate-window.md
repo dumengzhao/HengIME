@@ -56,7 +56,7 @@
 | 里程碑 | 内容 | 依赖 | 验收 |
 |---|---|---|---|
 | **CW0 收尾** | D1 宽度实测（A 方案）；D2 主题 tokens 进 heng.yaml 并三端读取；D3 事件驱动化；线程 panic 后自动重建（当前 UI 线程死亡即候选窗永久失效）；abitest 补 v7 用例（Linux 侧回归） | 无 | 笔记本空转 CPU 占用 ≈0；换主题改 heng.yaml 一处生效 |
-| **CW1 功能完备** | 竖排候选（配置切换）；翻页（候选超宽 → ›/‹ 与 PgUp/PgDn）；中英状态小图标（微信同款角标）；注释（comment）列显示 | CW0 | 微信键盘横排可见功能对齐 |
+| **CW1 功能完备** | 竖排候选（配置切换）；翻页（候选超宽 → ›/‹ 与 PgUp/PgDn）；中英状态小图标（微信同款角标）；注释（comment）列显示；**工具条菜单（就地展开：设置入口→settings-web、开关切换→set_option，见红线 5）** | CW0 | 微信键盘横排可见功能对齐 |
 | **CW2 macOS 后端** | `UiBackend` NSPanel 实现：nonactivating panel + NSBitmapImageRep/layer 内容 + NSEvent 轮询；配合 M-P4 Squirrel 的 `ui/builtin` 开关（对齐 weasel 集成模式：宿主面板隐藏 + heng_ui_sync/hide/take_ui_commit） | M-P4 Squirrel 骨架 | Mac 真机候选窗三交互（悬浮/点击/焦点）与 Win/Linux 一致 |
 | **CW3 Android 后端** | SurfaceControl/WindowManager 弹窗 + JNI 桥接 blit；触屏点击（无 hover）；配合 M-P3 IMS 骨架 | M-P3 | 真机横排候选 + 点击上屏 |
 | **持续项** | 多屏/fractional DPI（Linux per-screen、Wayland 原生路径评估）；partial blit（X11 按 DirtyRegion 局部 PutImage，Win 分层窗保持全量）；候选数据超长截断策略 | — | — |
@@ -69,6 +69,7 @@
 2. **一处样式真源**：tokens 只进 heng.yaml（config-center 分发），禁止各端再写死颜色
 3. **无 GPU 依赖**：SoftwareRenderer 路线锁定，D4 不翻案
 4. **平台坑档案随代码走**：新后端实现必须先读 §1.2，新增坑必须补录
+5. **功能优先「就地展开」**：菜单/工具条/面板一律做进同一窗口的 Slint 场景（状态切换），禁止为功能新建平台窗口——保住「一端加功能全端都有」；仅系统能力（托盘图标等）允许进后端，且语义仍须留在 core
 
 ---
 
