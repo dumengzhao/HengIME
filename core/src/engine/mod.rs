@@ -406,31 +406,27 @@ impl Engine {
             .filter(|c| !c.text.is_empty())
             .map(|c| c.text.clone())
             .collect();
-        // 翻页循环方案（如雾凇 Page_Down 绕回首页）会让 is_last_page 永不成立，
-        // 必须记录已访问页号，回头即停；总量封顶防异常方案
+        // 翻页循环方案（如雾凇 Page_Down 绕回首页）需要记录已访问页号防绕圈；
+        // 注意 visited 不能在翻页前检查（当前页必在集合里 → 循环必立即退出，
+        // 只会收集到第一页——这正是"展开后词少"的根因），只在翻页后检查新页。
+        // 总量封顶防异常方案
         let mut visited: std::collections::HashSet<i32> =
             std::collections::HashSet::from([first.page_no]);
         let mut walked = 0i32;
         loop {
             let snap = self.get_context(id)?;
-            if snap.is_last_page || snap.candidates.is_empty() || visited.contains(&snap.page_no)
-            {
-                // 停在当前页；若已绕回非原页，先归位再统一走回
+            if snap.candidates.is_empty() || snap.is_last_page {
                 break;
             }
-            visited.insert(snap.page_no);
             if !self.process_key(id, XK_PAGE_DOWN, 0)? {
                 break;
             }
             walked += 1;
             let after = self.get_context(id)?;
-            if after.candidates.is_empty() {
-                break;
+            if after.candidates.is_empty() || visited.contains(&after.page_no) {
+                break; // 没翻动（到末页）或绕回已访问页：循环方案，停止
             }
-            if visited.contains(&after.page_no) {
-                visited.insert(after.page_no);
-                break; // 绕回已访问页：循环方案，停止
-            }
+            visited.insert(after.page_no);
             all.extend(
                 after
                     .candidates
@@ -446,6 +442,74 @@ impl Engine {
             let _ = self.process_key(id, XK_PAGE_UP, 0)?;
         }
         Ok((all, page_size))
+    }
+
+    /// 单行横条候选（微信同款尽量充满一行）：**锚定菜单第一页**收集，凑满
+    /// want 个，取完翻回原页（翻页保序已用 pagetest 验证：PageDown/Up 不改
+    /// 页内高亮位）。锚定保证 ←→ 跨页移动高亮时列表不滚动（原第 6 个词不会
+    /// 变成第 1 个）。返回 (候选列表, 高亮全局序号, 列表首项全局序号)。
+    pub fn get_bar_candidates(
+        &self,
+        id: RimeSessionId,
+        want: usize,
+    ) -> Result<(Vec<String>, i32, i32), EngineError> {
+        const XK_PAGE_DOWN: i32 = 0xff56;
+        const XK_PAGE_UP: i32 = 0xff55;
+        let first = self.get_context(id)?;
+        let page_size = first.page_size.max(first.candidates.len() as i32).max(1);
+        let orig_page = first.page_no;
+        let hl_page = first.highlighted.max(0);
+        let hl_global = orig_page * page_size + hl_page;
+        // 上翻到菜单第一页
+        for _ in 0..orig_page {
+            if !self.process_key(id, XK_PAGE_UP, 0)? {
+                break;
+            }
+        }
+        let anchor = self.get_context(id)?;
+        let base = anchor.page_no * page_size;
+        let mut items: Vec<String> = anchor
+            .candidates
+            .iter()
+            .filter(|c| !c.text.is_empty())
+            .map(|c| c.text.clone())
+            .collect();
+        // 向后收集到 want 与「覆盖高亮所在页再多一页」的较大者
+        let target = want.max(((orig_page + 2) * page_size) as usize);
+        let mut fwd = 0i32;
+        while items.len() < target && fwd <= 8 {
+            let snap = self.get_context(id)?;
+            if snap.is_last_page {
+                break;
+            }
+            if !self.process_key(id, XK_PAGE_DOWN, 0)? {
+                break;
+            }
+            fwd += 1;
+            let after = self.get_context(id)?;
+            if after.candidates.is_empty() {
+                break;
+            }
+            items.extend(
+                after
+                    .candidates
+                    .iter()
+                    .filter(|c| !c.text.is_empty())
+                    .map(|c| c.text.clone()),
+            );
+        }
+        // 翻回原页（当前在 anchor.page_no + fwd）
+        let cur_page = anchor.page_no + fwd;
+        if cur_page >= orig_page {
+            for _ in 0..(cur_page - orig_page) {
+                let _ = self.process_key(id, XK_PAGE_UP, 0)?;
+            }
+        } else {
+            for _ in 0..(orig_page - cur_page) {
+                let _ = self.process_key(id, XK_PAGE_DOWN, 0)?;
+            }
+        }
+        Ok((items, hl_global, base))
     }
 
     /// 按全局序号选候选（跨页）：翻到目标页后在页内选中。

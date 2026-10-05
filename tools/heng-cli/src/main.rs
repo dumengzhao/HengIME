@@ -293,35 +293,119 @@ mod abi {
 }
 
 /// 自绘候选窗调试：模拟 nihao 后调用 ui_sync，窗口保持数秒供抓屏分析
-fn cmd_uitest() -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_uitest(seq: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
+    let keys: String = seq.map(|s| s.as_str()).unwrap_or("nihao").to_string();
     let engine = heng_core::global::engine()?;
     let session = engine.create_session()?;
     let rime_id = session.into_raw();
-    let _ = engine.simulate_key_sequence(rime_id, "nihao");
+    let _ = engine.simulate_key_sequence(rime_id, &keys);
     let snapshot = engine.get_context(rime_id)?;
     println!(
         "候选数={} preedit={:?}",
         snapshot.candidates.len(),
         snapshot.preedit
     );
-    for (i, c) in snapshot.candidates.iter().enumerate() {
-        println!("候选[{}] = {:?} (len={})", i, c.text, c.text.chars().count());
+    // bug1 证据：跨页真实候选总数（展开面板的内容来源）
+    match engine.get_all_candidates(rime_id) {
+        Ok((all, ps)) => println!("跨页真实候选 total={} page_size={}", all.len(), ps),
+        Err(e) => println!("get_all_candidates 失败: {e}"),
     }
     heng_core::ui::ensure_started();
+    // 帧捕获：HENG_UI_DUMP=1 时每次 paint 写 %TEMP%\heng-bar.ppm，
+    // 每阶段 sleep 后拷贝留档，供像素级断言
+    let tmp = std::env::temp_dir();
+    let dump = tmp.join("heng-bar.ppm");
+    let snap = |stage: &str| {
+        std::thread::sleep(Duration::from_millis(1200));
+        let dst = tmp.join(format!("heng-{stage}.ppm"));
+        match std::fs::copy(&dump, &dst) {
+            Ok(n) => println!("  帧 {stage}: {n} 字节 → {}", dst.display()),
+            Err(e) => println!("  帧 {stage}: 拷贝失败 {e}"),
+        }
+    };
     heng_core::ui::ui_sync(rime_id, 200, 500);
-    println!("ui_sync 已调用");
-    std::thread::sleep(Duration::from_secs(2));
+    snap("1-bar"); // 收起横条：圆角/垂直居中/两个按钮
     heng_core::ui::ui_toggle();
-    println!("ui_toggle 已调用（展开面板）");
-    std::thread::sleep(Duration::from_secs(2));
-    heng_core::ui::ui_move_hl(6);
-    println!("ui_move_hl(6) 已调用（高亮移到第二行）");
-    std::thread::sleep(Duration::from_secs(2));
+    snap("2-expanded"); // 展开面板：候选行数
+    heng_core::ui::ui_sync(rime_id, 200, 500); // 模拟外壳每个按键后的 _UpdateUI
+    snap("3-after-sync"); // 修复点：必须与 2 相同（不被打回页 1）
+    heng_core::ui::ui_move_hl(1);
+    snap("4-hl-right1"); // ←→ 高亮 +1（格移）
+    heng_core::ui::ui_row_move(1);
+    snap("5-rowdown"); // ↓ 行移（行感知，非固定 ±6）
+    heng_core::ui::ui_row_move(-1);
+    snap("6-rowup"); // ↑ 行移回来
+    // —— 收起态：图标 / 菜单（占位）——
+    heng_core::ui::ui_set_expanded(false); // ↑ 首行收起的同款路径
+    snap("7-collapsed"); // 横条恢复（网格布局重建成流式）
+    heng_core::ui::ui_bar_icon(true);
+    snap("8-icon"); // ☰ 选中：词高亮隐藏 + ☰ 底色
+    heng_core::ui::ui_menu_open();
+    snap("9-menu"); // 菜单占位面板 460x126
+    heng_core::ui::ui_menu_close();
+    heng_core::ui::ui_bar_icon(false);
+    snap("10-back"); // 回横条，词高亮恢复
+    // —— 展开态滚动跟随：↓ 超出 5 行可视区，面板应滚动 + 滚动条下移 ——
+    heng_core::ui::ui_toggle(); // 重新展开
+    snap("11-expand0"); // 展开初始（滚动位置应归零）
+    for _ in 0..8 {
+        heng_core::ui::ui_row_move(1);
+    }
+    snap("12-scrolldown"); // 高亮超出可视区：Flickable 应跟随，药丸仍在视区内
     heng_core::ui::ui_select_hl();
-    println!("ui_select_hl 已调用（选中面板高亮项）");
-    std::thread::sleep(Duration::from_secs(5));
+    std::thread::sleep(Duration::from_secs(2));
     println!("退出");
+    Ok(())
+}
+
+/// 验证 librime 翻页（PageDown/PageUp）是否保持选中位置不变
+/// 单行锚定验证：连按 → 跨页移动高亮，横条列表不应滚动
+fn cmd_bartest() -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
+    let engine = heng_core::global::engine()?;
+    let session = engine.create_session()?;
+    let rime_id = session.into_raw();
+    let _ = engine.simulate_key_sequence(rime_id, "shi");
+    heng_core::ui::ensure_started();
+    let tmp = std::env::temp_dir();
+    let dump = tmp.join("heng-bar.ppm");
+    let snap = |stage: &str| {
+        std::thread::sleep(Duration::from_millis(1200));
+        let _ = std::fs::copy(&dump, tmp.join(format!("heng-{stage}.ppm")));
+        println!("帧 {stage} 已捕获");
+    };
+    heng_core::ui::ui_sync(rime_id, 200, 500);
+    snap("b1");
+    for _ in 0..6 {
+        let _ = engine.process_key(rime_id, 0xff54, 0); // Down（→ 经 binder 的等效键）
+    }
+    heng_core::ui::ui_sync(rime_id, 200, 500);
+    snap("b2");
+    Ok(())
+}
+
+fn cmd_pagetest() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = heng_core::global::engine()?;
+    let session = engine.create_session()?;
+    let rime_id = session.into_raw();
+    let _ = engine.simulate_key_sequence(rime_id, "shi");
+    for _ in 0..2 {
+        let _ = engine.process_key(rime_id, 0xff54, 0); // Down 移高亮
+    }
+    let a = engine.get_context(rime_id)?;
+    println!("初始:      page_no={} highlighted={}", a.page_no, a.highlighted);
+    let _ = engine.process_key(rime_id, 0xff56, 0); // PageDown
+    let b = engine.get_context(rime_id)?;
+    println!("PageDown 后: page_no={} highlighted={}", b.page_no, b.highlighted);
+    let _ = engine.process_key(rime_id, 0xff55, 0); // PageUp
+    let c = engine.get_context(rime_id)?;
+    println!("PageUp 后:  page_no={} highlighted={}", c.page_no, c.highlighted);
+    if c.page_no == a.page_no && c.highlighted == a.highlighted {
+        println!("结论: 翻页保序 ✓");
+    } else {
+        println!("结论: 翻页改变高亮 ✗");
+    }
     Ok(())
 }
 
@@ -675,7 +759,7 @@ fn main() -> ExitCode {
     }
 
     // serve / abitest / uitest 走 global 层（自带引擎单例），不能用 make_engine 重复初始化 librime
-    if args[0] == "serve" || args[0] == "abitest" || args[0] == "uitest" {
+    if args[0] == "serve" || args[0] == "abitest" || args[0] == "uitest" || args[0] == "pagetest" || args[0] == "bartest" {
         let result: Result<(), Box<dyn std::error::Error>> = match args[0].as_str() {
             "serve" => {
                 let port: u16 = args
@@ -684,7 +768,9 @@ fn main() -> ExitCode {
                     .unwrap_or(DEFAULT_PORT);
                 cmd_serve(port)
             }
-            "uitest" => cmd_uitest(),
+            "uitest" => cmd_uitest(args.get(1)),
+            "pagetest" => cmd_pagetest(),
+            "bartest" => cmd_bartest(),
             _ => cmd_abitest(),
         };
         return match result {

@@ -41,6 +41,10 @@ const PANEL_WIDTH: u32 = 460;
 const FLOW_ROW_H: i32 = 38;
 const FLOW_MAX_ROWS: i32 = 40; // 可滚动，上限放宽
 const PANEL_VISIBLE_ROWS: i32 = 5; // 展开态可视行数
+/// ☰ 菜单高度（占位）：上留白 4 + 3 行 × 38 + 下留白 8
+const MENU_HEIGHT: i32 = FLOW_TOP + 3 * FLOW_ROW_H + 8;
+/// 首行 y 基线：40px 横条内 28px 格子上下各留 6px（留白要明显）
+const FLOW_TOP: i32 = 6;
 
 // ---- 对外接口（capi 调用） ----
 
@@ -53,10 +57,20 @@ enum UiCmd {
     ToggleExpand,
     /// 键盘 ↑（第一行）触发的收起（内部命令）
     SetExpanded(bool),
-    /// 面板内移动视觉高亮（±1 格 / ±6 行，内部命令）
+    /// 面板内移动视觉高亮（±1 格，内部命令）
     MoveHL(i32),
+    /// 面板内按行移动高亮（+1 下一行 / -1 上一行；-1 在首行 → 收起）
+    RowMove(i32),
     /// 键盘空格/回车：选中面板当前高亮项（内部命令）
     SelectHL,
+    /// 收起横条：选中/取消选中 ☰ 图标（true=选中，词高亮隐藏）
+    BarIcon(bool),
+    /// 收起横条：按全局横条下标选词（鼠标点击 / 空格确认 / 数字键）
+    BarSelect(usize),
+    /// 打开 ☰ 菜单（占位：符号/常用语/设置）
+    MenuOpen,
+    /// 关闭菜单回到横条
+    MenuClose,
 }
 
 static UI_CMD_TX: LazyLock<Mutex<Option<Sender<UiCmd>>>> = LazyLock::new(|| Mutex::new(None));
@@ -69,6 +83,12 @@ pub static PENDING_UI_COMMITS: LazyLock<Mutex<std::collections::HashMap<u64, Str
 pub static UI_EXPANDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static UI_HL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 pub static UI_TOTAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+/// 收起横条词数（capi 判断 → 是否到达最后一个词）
+pub static UI_BAR_COUNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+/// 收起横条：☰（最右图标）是否被选中（→ 到词尾跳过 ▾ 直达 ☰）
+pub static UI_ICON_SEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// ☰ 菜单是否打开（打开时 ←/→ 关闭回横条）
+pub static UI_MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn send_cmd(cmd: UiCmd) -> bool {
     UI_CMD_TX
@@ -104,9 +124,34 @@ pub fn ui_move_hl(delta: i32) {
     send_cmd(UiCmd::MoveHL(delta));
 }
 
+/// 面板内按行移动视觉高亮（capi 拦截；-1 在首行时由 UI 线程收起面板）
+pub fn ui_row_move(delta: i32) {
+    send_cmd(UiCmd::RowMove(delta));
+}
+
 /// 选中面板当前高亮项（capi 拦截：空格/回车）
 pub fn ui_select_hl() {
     send_cmd(UiCmd::SelectHL);
+}
+
+/// 收起横条：☰ 图标选中/取消（capi 拦截：→ 到词尾 / ← 返回）
+pub fn ui_bar_icon(on: bool) {
+    send_cmd(UiCmd::BarIcon(on));
+}
+
+/// 收起横条：按横条下标选词（capi 拦截：空格确认 / 数字键 / 鼠标点击）
+pub fn ui_bar_select(idx: usize) {
+    send_cmd(UiCmd::BarSelect(idx));
+}
+
+/// 打开 ☰ 菜单（capi 拦截：☰ 选中时按空格/回车）
+pub fn ui_menu_open() {
+    send_cmd(UiCmd::MenuOpen);
+}
+
+/// 关闭菜单回横条（capi 拦截：菜单打开时 ←/→）
+pub fn ui_menu_close() {
+    send_cmd(UiCmd::MenuClose);
 }
 
 /// 惰性启动 UI 线程（首次 ui_sync 时）。启动失败（无 X 显示等）返回 false，
@@ -154,9 +199,20 @@ slint::slint! {
         in property <int> panel-height;   // 展开态可视高度
         in property <int> content-height; // 展开态内容总高（滚动范围）
         in property <[CandCell]> all-cells;
+        in property <bool> icon-sel;  // ☰ 被键盘选中（单行 → 到词尾跳过 ▾）
+        in property <bool> menu-open; // ☰ 菜单打开（覆盖层显示 符号/常用语/设置）
+        in property <int> hl-y;       // 高亮格 y（逻辑 px），变化时滚动跟随
         width: root.panel-width * 1px;
         height: root.expanded ? root.panel-height * 1px : 40px;
+        background: transparent;
+        // 外层圆角容器：窗口本身透明，8px 圆角靠这层裁出（两态共用）
+        round := Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
         background: #f7f8fa;
+        border-radius: 8px;
         // 候选词流式格子（两态共用；收起时 40px 窗口只露出第一行）
         flick := Flickable {
             x: 0;
@@ -171,9 +227,10 @@ slint::slint! {
                     x: cell.x * 1px;
                     y: cell.y * 1px;
                     width: cell.w * 1px;
-                    height: 32px;
+                    height: 28px;
                     border-radius: 8px;
-                    background: cell.hl ? #2164f1 : #ffffff;
+                    // 只有选中项有背景药丸，其余纯文字不加底色区分边界
+                    background: cell.hl ? #2164f1 : transparent;
                     HorizontalLayout {
                         padding-left: 8px;
                         padding-right: 4px;
@@ -181,6 +238,8 @@ slint::slint! {
                         alignment: center;
                         Text {
                             text: cell.num;
+                            // 序号固定占宽：空串时也占 7px，序号出现/隐藏不引起正文横移
+                            width: 7px;
                             color: cell.hl ? #cfe0ff : #999999;
                             font-size: 11px;
                             vertical-alignment: center;
@@ -223,19 +282,26 @@ slint::slint! {
                 height: thumb-h;
             }
         }
-        // 收起态右上按钮：▾ 展开箭头 + 菜单（预留）
+        // 收起态右上按钮（换位后：▾ 在左、☰ 在最右 = 键盘导航的"最后一个图标"）：
+        // → 到词尾跳过 ▾ 直达 ☰，☰ 上再按 → 展开面板、按空格/回车打开菜单
+        // 图标用 Path/色块矢量绘制而非字符 "▾"/"☰"：Windows 默认字体缺
+        // 这两个码位的字形，软件渲染器不做逐字形回退，会渲染成空白
         if !root.expanded: Rectangle {
-            x: parent.width - 30px;
-            y: 4px;
+            x: parent.width - 58px;
+            y: 6px;
             width: 26px;
-            height: 32px;
+            height: 28px;
             border-radius: 8px;
             background: ta_arrow.has-hover ? #e8ebef : transparent;
-            Text {
-                text: "▾";
-                color: #666666;
-                font-size: 13px;
-                vertical-alignment: center;
+            Path {
+                width: 8px;
+                height: 5px;
+                x: (parent.width - 8px) / 2;
+                y: (parent.height - 5px) / 2;
+                viewbox-width: 8;
+                viewbox-height: 5;
+                commands: "M 0 0 L 8 0 L 4 5 Z";
+                fill: #666666;
             }
             ta_arrow := TouchArea {
                 mouse-cursor: pointer;
@@ -243,22 +309,71 @@ slint::slint! {
             }
         }
         if !root.expanded: Rectangle {
-            x: parent.width - 58px;
-            y: 4px;
+            x: parent.width - 30px;
+            y: 6px;
             width: 26px;
-            height: 32px;
+            height: 28px;
             border-radius: 8px;
-            background: ta_menu.has-hover ? #e8ebef : transparent;
-            Text {
-                text: "☰";
-                color: #666666;
-                font-size: 13px;
-                vertical-alignment: center;
+            background: ta_menu.has-hover || root.icon-sel ? #2164f1 : transparent;
+            Rectangle {
+                width: 12px;
+                height: 8px;
+                x: (parent.width - 12px) / 2;
+                y: (parent.height - 8px) / 2;
+                Rectangle { y: 0; width: parent.width; height: 1.5px; background: root.icon-sel ? #ffffff : #666666; }
+                Rectangle { y: 3.25px; width: parent.width; height: 1.5px; background: root.icon-sel ? #ffffff : #666666; }
+                Rectangle { y: 6.5px; width: parent.width; height: 1.5px; background: root.icon-sel ? #ffffff : #666666; }
             }
             ta_menu := TouchArea {
                 mouse-cursor: pointer;
                 clicked => { root.menu_clicked(); }
             }
+        }
+        // ☰ 菜单覆盖层（占位：符号/常用语/设置，功能后续迭代）
+        if root.menu-open: Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            background: #f7f8fa;
+            border-radius: 8px;
+            VerticalLayout {
+                padding: 4px;
+                spacing: 2px;
+                for name in ["符号", "常用语", "设置"]: Rectangle {
+                    height: 34px;
+                    border-radius: 6px;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        alignment: center;
+                        Text {
+                            text: name;
+                            color: #1f2328;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            // 吞掉点击，避免穿透到下层按钮
+            TouchArea { }
+        }
+        // ↓/↑ 移动高亮后把高亮行滚进可视区（自绘滚动条由 flick.content-y
+        // 驱动，自动跟随）。28px = 格子高，6px = 视区上下呼吸边距。
+        // 注意：Slint Flickable 的 content-y ≤ 0（向下滚动为负），
+        // 可视区顶偏移 = -content-y，底 = -content-y + flick.height。
+        // changed 只能监听本元素属性，故用镜像属性间接观察 root.hl-y
+        property <int> hl-y-obs: root.hl-y;
+        changed hl-y-obs => {
+            if (((hl-y-obs * 1px) + 28px) > ((0px - flick.content-y) + flick.height)) {
+                // 高亮在视区下方 → 滚到刚好露出（留 6px 呼吸）
+                flick.content-y = Math.max(0px - scroll-range,
+                    flick.height - ((hl-y-obs * 1px) + 28px + 6px));
+            } else if ((hl-y-obs * 1px) < (0px - flick.content-y)) {
+                // 高亮在视区上方
+                flick.content-y = Math.min(0px, 6px - (hl-y-obs * 1px));
+            }
+        }
         }
         callback candidate_clicked(int);
         callback toggle_expand();
@@ -618,7 +733,6 @@ mod win_backend {
     use super::{Argb, UiBackend, BAR_HEIGHT};
     use slint::platform::{PointerEventButton, WindowEvent};
     use slint::LogicalPosition;
-    use std::cell::Cell;
 use std::cell::RefCell;
     use std::mem::size_of;
     use windows_sys::Win32::Foundation::{
@@ -917,50 +1031,124 @@ use std::cell::RefCell;
     }
 }
 
-/// 收起态横条格子 = 页 1 候选的流式第一行
-fn set_bar_cells(ui: &CandWindow, snapshot: &crate::engine::ContextSnapshot) {
-    let texts: Vec<String> = snapshot
-        .candidates
-        .iter()
-        .filter(|c| !c.text.is_empty())
-        .map(|c| c.text.clone())
-        .collect();
-    let (cells, _rows) = build_flow_cells(&texts, snapshot.highlighted);
+/// 收起态横条格子：锚定菜单第一页收集（当前页 + 向后借页凑满一行，微信
+/// 同款尽量充满，单字≈9 个），取词需翻页调用方须持 OP_LOCK。
+/// bar_base = 列表首项的全局序号，点击/空格/数字键选词换算用。
+/// 同时登记 bar_items 缓存（横条导航不重取词）与词数/高亮共享状态。
+fn set_bar_cells(
+    ui: &CandWindow,
+    engine: &crate::engine::Engine,
+    rime_id: RimeSessionId,
+    snapshot: &crate::engine::ContextSnapshot,
+    bar_base: &Cell<i32>,
+    bar_items: &RefCell<Vec<String>>,
+    panel_hl: &Cell<i32>,
+) {
+    let (mut texts, hl, base) = match engine.get_bar_candidates(rime_id, 10) {
+        Ok((t, hl, base)) => (t, hl, base),
+        Err(_) => (
+            snapshot
+                .candidates
+                .iter()
+                .filter(|c| !c.text.is_empty())
+                .map(|c| c.text.clone())
+                .collect(),
+            snapshot.highlighted,
+            snapshot.page_no * snapshot.page_size.max(1),
+        ),
+    };
+    bar_base.set(base);
+    // 只保留首行可见词：40px 横条只显示一行，放不下的词不显示也不参与
+    // 键盘导航（否则 → 要穿过一堆看不见的词才能到图标）
+    let (cells0, _) = build_flow_cells(&texts, hl);
+    let visible = cells0.iter().filter(|c| c.y == FLOW_TOP).count().max(1);
+    let visible = visible.min(texts.len());
+    texts.truncate(visible);
+    panel_hl.set(hl.min(visible as i32 - 1).max(0));
+    UI_HL.store(panel_hl.get(), Ordering::Relaxed);
+    UI_BAR_COUNT.store(visible as i32, Ordering::Relaxed);
+    *bar_items.borrow_mut() = texts.clone();
+    let (cells, _rows) = build_flow_cells(&texts, panel_hl.get());
     ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
     ui.set_panel_width(PANEL_WIDTH as i32);
 }
 
 
-/// 槽位制排布（微信同款）：每行 6 个槽位，每槽约容纳 3 字 + 序号；
-/// 词的槽位跨度 = ceil(字数/3)（4 字占 2 格、7 字占 3 格）；序号每行从 1 开始。
+/// 中间省略：字符数超 cap 时保留前半 + … + 后半（微信同款截断样式）
+fn mid_ellipsis(t: &str, cap: usize) -> String {
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() <= cap {
+        return t.to_string();
+    }
+    if cap < 1 {
+        return "…".into();
+    }
+    let front = (cap - 1 + 1) / 2; // 前半多留一位
+    let back = cap - 1 - front;
+    let mut s: String = chars[..front].iter().collect();
+    s.push('…');
+    if back > 0 {
+        s.extend(chars[chars.len() - back..].iter());
+    }
+    s
+}
+
+/// 内容自适应流式排布（收起单行同款）：格子宽度随词长走，一行能塞几个塞几个，
+/// 不限个数；超长词封顶 150px 并中间省略。序号每行从 1 开始。
 /// 返回 (cells, 行数)。hl_global 为当前选中候选的全局序号。
 fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
     let margin = 6i32;
-    let gap = 4i32;
-    const SLOTS_PER_ROW: i32 = 6;
+    let gap = 3i32;
     let panel_w = PANEL_WIDTH as i32;
-    let slot_w = (panel_w - margin * 2) / SLOTS_PER_ROW;
+    // 首行右侧给 ▾/☰ 两个按钮留位；展开行给滚动条留位
+    let first_row_right = panel_w - margin - 58;
+    let row_right = panel_w - margin - 8;
     let mut cells: Vec<CandCell> = Vec::new();
-    let (mut x, mut y) = (margin, 8);
-    let mut used_slots = 0i32;
+    let (mut x, mut y) = (margin, FLOW_TOP);
     let mut num = 0i32;
     for (i, t) in all.iter().enumerate() {
         let disp = t.clone();
-        let chars = disp.chars().count() as i32;
-        let spans = (((chars + 2) / 3).max(1)).min(SLOTS_PER_ROW);
-        // 第一行右侧给收起箭头留 30px
-        let row_max = panel_w - margin - if y == 8 { 30 } else { 0 };
-        if x + spans * slot_w > row_max && num > 0 {
-            // 换行：序号从 1 重新开始
+        // 宽度估算：emoji ≈ 20px（Windows 彩色 emoji 实渲染比 14px 字号宽，
+        // 估 14px 会被 Text elide 剪成省略号）；零宽字符（变体选择符/ZWJ）算 0；
+        // CJK 字 ≈ 14px（字号 14），ASCII ≈ 8px；序号 11px 字号 ≈ 7px/位
+        let text_w: i32 = disp
+            .chars()
+            .map(|c| {
+                let u = c as u32;
+                if u == 0xFE0F || u == 0x200D {
+                    0
+                } else if u >= 0x1F000 || (0x2600..=0x27BF).contains(&u) {
+                    20
+                } else if u > 0x2E80 {
+                    14
+                } else {
+                    8
+                }
+            })
+            .sum();
+        let num_w0 = if num < 9 { 7 } else { 14 };
+        let full_w = 8 + num_w0 + 4 + text_w + 6;
+        // 当前装不下完整一词 → 换行（每词完整显示，绝不截断塞边角）
+        let right = if y == FLOW_TOP { first_row_right } else { row_right };
+        if x + full_w > right && num > 0 {
             y += FLOW_ROW_H;
             x = margin;
-            used_slots = 0;
             num = 0;
         }
-        if y > 8 + FLOW_MAX_ROWS * FLOW_ROW_H {
+        // 只有当一个词连一整行可填宽度都放不下（超长句）才中间省略
+        let right = if y == FLOW_TOP { first_row_right } else { row_right };
+        let max_w = right - margin;
+        let num_w = if num < 9 { 7 } else { 14 };
+        let full_w = 8 + num_w + 4 + text_w + 6;
+        let (w, disp) = if full_w > max_w {
+            let cap = ((max_w - 8 - num_w - 4 - 6).max(0) / 14) as usize;
+            (max_w, mid_ellipsis(t, cap))
+        } else {
+            (full_w, disp)
+        };
+        if y > FLOW_TOP + FLOW_MAX_ROWS * FLOW_ROW_H {
             break; // 行数封顶，超出部分后续做滚动
         }
-        let w = spans * slot_w - gap;
         cells.push(CandCell {
             num: SharedString::from((num + 1).to_string()),
             text: SharedString::from(disp),
@@ -969,11 +1157,65 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
             y,
             w,
         });
+        x += w + gap;
+        num += 1;
+    }
+    let rows = ((y - FLOW_TOP) / FLOW_ROW_H) + 1;
+    (cells, rows)
+}
+
+/// 固定 6 槽网格排布（展开面板同款）：每槽容纳 3 字 + 序号；
+/// 词的槽位跨度 = ceil(字数/3)（4 字占 2 格、7 字占 3 格），占满 6 槽换行；
+/// 槽内容纳不下时中间省略。序号每行从 1 开始。返回 (cells, 行数)。
+fn build_grid_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
+    let margin = 6i32;
+    let gap = 4i32;
+    const SLOTS_PER_ROW: i32 = 6;
+    let panel_w = PANEL_WIDTH as i32;
+    let slot_w = (panel_w - margin * 2) / SLOTS_PER_ROW;
+    let mut cells: Vec<CandCell> = Vec::new();
+    let (mut x, mut y) = (margin, FLOW_TOP);
+    let mut used_slots = 0i32;
+    let mut num = 0i32;
+    let mut hl_row: Option<i32> = None;
+    for (i, t) in all.iter().enumerate() {
+        let chars = t.chars().count() as i32;
+        let spans = (((chars + 2) / 3).max(1)).min(SLOTS_PER_ROW);
+        if used_slots + spans > SLOTS_PER_ROW {
+            // 换行：序号从 1 重新开始
+            y += FLOW_ROW_H;
+            x = margin;
+            used_slots = 0;
+            num = 0;
+        }
+        if y > FLOW_TOP + FLOW_MAX_ROWS * FLOW_ROW_H {
+            break; // 行数封顶，超出部分后续做滚动
+        }
+        let disp = mid_ellipsis(t, (spans * 3) as usize);
+        cells.push(CandCell {
+            num: SharedString::from((num + 1).to_string()),
+            text: SharedString::from(disp),
+            hl: (i as i32) == hl_global,
+            x,
+            y,
+            w: spans * slot_w - gap,
+        });
+        if (i as i32) == hl_global {
+            hl_row = Some(y);
+        }
         x += spans * slot_w;
         used_slots += spans;
         num += 1;
     }
-    let rows = ((y - 8) / FLOW_ROW_H) + 1;
+    // 微信同款：只有选中项所在行显示序号（数字键选词），其他行不显示
+    if let Some(hy) = hl_row {
+        for c in cells.iter_mut() {
+            if c.y != hy {
+                c.num = SharedString::from("");
+            }
+        }
+    }
+    let rows = ((y - FLOW_TOP) / FLOW_ROW_H) + 1;
     (cells, rows)
 }
 
@@ -1022,10 +1264,25 @@ fn first_syllable(raw: &str) -> String {
     String::new()
 }
 
+/// 轻量诊断日志（%TEMP%\heng-ui.log）：WeaselServer 是 GUI 进程无 stderr，
+/// 展开面板内容异常（候选少/同音词空）时靠它定位是哪一环
+fn ui_log(msg: &str) {
+    use std::io::Write;
+    let path = std::env::temp_dir().join("heng-ui.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{msg}");
+    }
+}
+
 /// 同音词填充：临时会话输入首音节，收集其候选（排除已展示的）
 fn collect_homophones(engine: &crate::engine::Engine, rime_id: RimeSessionId, existing: &[String]) -> Vec<String> {
     let raw = engine.get_input(rime_id).unwrap_or_default();
-    let syl = first_syllable(&raw);
+    let mut syl = first_syllable(&raw);
+    // 简拼（如 "nh"）提不出完整音节 → 回退用首字母作查询，保证展开面板不空
+    if syl.is_empty() {
+        syl = raw.chars().find(|c| c.is_ascii_lowercase()).map(String::from).unwrap_or_default();
+    }
+    ui_log(&format!("homophones: raw={raw:?} 音节={syl:?}"));
     if syl.is_empty() {
         return vec![];
     }
@@ -1055,6 +1312,7 @@ fn collect_homophones(engine: &crate::engine::Engine, rime_id: RimeSessionId, ex
         }
     }
     engine.destroy_session(tid);
+    ui_log(&format!("homophones: 音节={syl:?} 取得={}（去重后）", out.len()));
     out
 }
 
@@ -1097,9 +1355,17 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         items: Vec<String>,
         page_size: i32,
         real_count: usize, // 真实候选数（其后为同音词）
+        geo: Vec<(i32, i32, i32)>, // 每格 (x,y,w)，按行导航用
     }
     let panel: Rc<RefCell<Option<PanelSnap>>> = Rc::new(RefCell::new(None));
     let panel_hl = Rc::new(Cell::new(0i32));
+    // 收起横条列表首项的全局序号（点击/键盘选词换算用）
+    let bar_base = Rc::new(Cell::new(0i32));
+    // 收起横条词表缓存（←→ 移动视觉高亮时不重取词）
+    let bar_items: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    // 收起横条：☰（最右图标）选中态；菜单打开态
+    let icon_sel = Rc::new(Cell::new(false));
+    let menu_open = Rc::new(Cell::new(false));
     let last_panel_h = Cell::new(0u32);
     let last_x = Cell::new(200);
     let last_y = Cell::new(500);
@@ -1172,7 +1438,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     ui.on_menu_clicked({
         let tx = tx.clone();
         move || {
-            let _ = tx.send(UiCmd::ToggleExpand); // 占位：菜单未实现，先复用展开（CI 验证按钮通路）
+            let _ = tx.send(UiCmd::MenuOpen); // ☰ 菜单（占位：符号/常用语/设置）
         }
     });
     ui.on_expanded_clicked({
@@ -1184,40 +1450,18 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         }
     });
 
-    // 点击 → core 内部直接选词 + 取走 commit（不回传外壳）。
-    // 收起态第一行 idx = 页内序号；展开态 idx = 全局序号
+    // 点击选词：收起态走 BarSelect（横条跨页换算在命令处理器里统一做），
+    // 展开态走 SelectHL（面板快照 + 同音词路径）
     ui.on_candidate_clicked({
-        let ui = ui.clone();
-        let current = current.clone();
         let expanded = expanded.clone();
         let panel_hl = panel_hl.clone();
         let tx = tx.clone();
         move |idx| {
-            let Some(rime_id) = *current.borrow() else { return };
-            let Ok(engine) = engine() else { return };
-            let _guard = OP_LOCK.lock().unwrap();
             if expanded.get() {
-                // 展开态：第一行 = 面板前 6 项，走面板选中（含同音词路径）
-                drop(_guard);
                 panel_hl.set(idx as i32);
                 let _ = tx.send(UiCmd::SelectHL);
-                return;
-            }
-            let selected =
-                engine.select_candidate_on_current_page(rime_id, idx as usize).unwrap_or(false);
-            if selected {
-                if let Ok(text) = engine.get_commit(rime_id) {
-                    if !text.is_empty() {
-                        // 挂到对应外壳会话句柄（反向查 handle）
-                        if let Some(h) = SESSIONS.handle_of(rime_id) {
-                            PENDING_UI_COMMITS.lock().unwrap().insert(h, text);
-                        }
-                    }
-                }
-                // 刷新窗口（选词后组合串可能仍在：输入下一个字母继续）
-                if let Ok(snapshot) = engine.get_context(rime_id) {
-                    set_bar_cells(&ui, &snapshot);
-                }
+            } else {
+                let _ = tx.send(UiCmd::BarSelect(idx as usize));
             }
         }
     });
@@ -1244,19 +1488,36 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             *visible.borrow_mut() = false;
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
+                        } else if !input_changed {
+                            // 视觉态保持，什么都不做：
+                            // - 展开面板：内容 = 展开瞬间快照（导航键不碰 rime）
+                            // - 收起横条：高亮是视觉态（bar_items + panel_hl），
+                            //   ←→/空格/数字键被 core 拦截后外壳仍会 sync，
+                            //   重建会把药丸打回 librime 高亮位置（选错词的根源）
                         } else {
-                            set_bar_cells(&ui, &snapshot);
+                            // 新输入 / 首次显示：重建横条（借页凑满需持锁翻页）
+                            let _guard = OP_LOCK.lock().unwrap();
+                            menu_open.set(false);
+                            UI_MENU_OPEN.store(false, Ordering::Relaxed);
+                            ui.set_menu_open(false);
+                            icon_sel.set(false);
+                            UI_ICON_SEL.store(false, Ordering::Relaxed);
+                            ui.set_icon_sel(false);
+                            set_bar_cells(
+                                &ui,
+                                &engine,
+                                rime_id,
+                                &snapshot,
+                                &bar_base,
+                                &bar_items,
+                                &panel_hl,
+                            );
                             let w = (PANEL_WIDTH as f32 * scale).round() as u32;
-                            if expanded.get() && !input_changed {
-                                // 面板保持：内容是展开瞬间的快照，导航不重建、不碰 rime
-                            } else {
-                                // 输入变化：收起面板，恢复横条
-                                ui.set_expanded(false);
-                                expanded.set(false);
-                                UI_EXPANDED.store(false, Ordering::Relaxed);
-                                *panel.borrow_mut() = None;
-                                paint(&mut backend, w, bar_h, x, y, true);
-                            }
+                            ui.set_expanded(false);
+                            expanded.set(false);
+                            UI_EXPANDED.store(false, Ordering::Relaxed);
+                            *panel.borrow_mut() = None;
+                            paint(&mut backend, w, bar_h, x, y, true);
                         }
                     }
                 }
@@ -1285,22 +1546,38 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         }
                         let real_count = real.len();
                         let homophones = collect_homophones(engine, rime_id, &real);
+                        let homo_count = homophones.len();
                         let mut all = real.clone();
                         all.extend(homophones);
+                        let total = all.len() as i32;
                         let hl_global = snapshot
                             .as_ref()
                             .map(|s| s.page_no * s.page_size + s.highlighted)
                             .unwrap_or(0);
+                        // 诊断日志（%TEMP%\heng-ui.log）：展开内容不足时定位
+                        // 是真实候选收集少还是同音词没取到
+                        ui_log(&format!(
+                            "expand: 真实候选={real_count} 同音词={homo_count} 总={total} hl={hl_global}"
+                        ));
+                        panel_hl.set(hl_global.max(0));
+                        let (cells, rows) = build_grid_cells(&all, hl_global);
+                        let hl_y = cells.iter().find(|c| c.hl).map(|c| c.y).unwrap_or(0);
                         *panel.borrow_mut() = Some(PanelSnap {
-                            items: all.clone(),
+                            items: all,
                             page_size,
                             real_count,
+                            geo: cells
+                                .iter()
+                                .map(|c| (c.x, c.y, c.w))
+                                .collect(),
                         });
-                        panel_hl.set(hl_global.max(0));
-                        let (cells, rows) = build_flow_cells(&all, hl_global);
                         ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
+                        // 滚动跟随：先置 -1 强制触发 changed（顺带把展开前残留的
+                        // flick.content-y 归零），再写入真实高亮 y
+                        ui.set_hl_y(-1);
+                        ui.set_hl_y(hl_y);
                         ui.set_panel_width(PANEL_WIDTH as i32);
-                        let content_h = 8 + rows * FLOW_ROW_H + 8;
+                        let content_h = FLOW_TOP + (rows - 1) * FLOW_ROW_H + 28 + 8;
                         let h_logical =
                             (8 + PANEL_VISIBLE_ROWS * FLOW_ROW_H + 8).max(bar_h as i32);
                         ui.set_content_height(content_h);
@@ -1308,47 +1585,255 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         last_panel_h.set((h_logical as f32 * scale).round() as u32);
                         ui.set_expanded(true);
                         UI_EXPANDED.store(true, Ordering::Relaxed);
+                        icon_sel.set(false);
+                        UI_ICON_SEL.store(false, Ordering::Relaxed);
+                        ui.set_icon_sel(false);
+                        menu_open.set(false);
+                        UI_MENU_OPEN.store(false, Ordering::Relaxed);
+                        ui.set_menu_open(false);
                         UI_HL.store(hl_global, Ordering::Relaxed);
-                        UI_TOTAL.store(all.len() as i32, Ordering::Relaxed);
+                        UI_TOTAL.store(total, Ordering::Relaxed);
                         let w = (PANEL_WIDTH as f32 * scale).round() as u32;
                         paint(&mut backend, w, last_panel_h.get(), last_x.get(), last_y.get(), true);
                         expanded.set(true);
                     } else {
-                        // 收起：恢复横条
+                        // 收起：重建横条（展开网格布局 ≠ 横条流式布局，直接缩窗会错位）
                         ui.set_expanded(false);
                         UI_EXPANDED.store(false, Ordering::Relaxed);
                         *panel.borrow_mut() = None;
+                        if let Some(rime_id) = *current.borrow() {
+                            if let Ok(engine) = engine() {
+                                let _guard = OP_LOCK.lock().unwrap();
+                                if let Ok(snapshot) = engine.get_context(rime_id) {
+                                    set_bar_cells(
+                                        &ui,
+                                        &engine,
+                                        rime_id,
+                                        &snapshot,
+                                        &bar_base,
+                                        &bar_items,
+                                        &panel_hl,
+                                    );
+                                }
+                            }
+                        }
                         let w = (PANEL_WIDTH as f32 * scale).round() as u32;
                         paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
                         expanded.set(false);
                     }
                 }
                 UiCmd::MoveHL(delta) => {
-                    let total = {
+                    // 展开态 = 面板快照（6 槽网格）；收起态 = 横条缓存（流式一行）
+                    let in_panel = panel.borrow().as_ref().is_some();
+                    let (items, total) = if in_panel {
                         let p = panel.borrow();
-                        let Some(snap) = p.as_ref() else { continue };
-                        snap.items.len() as i32
+                        let snap = p.as_ref().unwrap();
+                        (snap.items.clone(), snap.items.len() as i32)
+                    } else {
+                        let b = bar_items.borrow();
+                        (b.clone(), b.len() as i32)
                     };
+                    if total == 0 {
+                        continue;
+                    }
                     let new_hl = (panel_hl.get() + delta).clamp(0, total - 1);
                     if new_hl == panel_hl.get() {
                         continue;
                     }
                     panel_hl.set(new_hl);
                     UI_HL.store(new_hl, Ordering::Relaxed);
-                    // 仅重画高亮（内容 = 快照，不变）
-                    let items = panel.borrow().as_ref().map(|s| s.items.clone());
-                    if let Some(items) = items {
-                        let (cells, _rows) = build_flow_cells(&items, new_hl);
-                        ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
-                        paint(
-                            &mut backend,
-                            (PANEL_WIDTH as f32 * scale).round() as u32,
-                            last_panel_h.get(),
-                            last_x.get(),
-                            last_y.get(),
-                            false,
-                        );
+                    icon_sel.set(false);
+                    UI_ICON_SEL.store(false, Ordering::Relaxed);
+                    ui.set_icon_sel(false);
+                    let (cells, _rows) = if in_panel {
+                        build_grid_cells(&items, new_hl)
+                    } else {
+                        build_flow_cells(&items, new_hl)
+                    };
+                    let hl_y = cells.iter().find(|c| c.hl).map(|c| c.y).unwrap_or(0);
+                    ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
+                    ui.set_hl_y(hl_y);
+                    let h = if in_panel { last_panel_h.get() } else { bar_h };
+                    paint(
+                        &mut backend,
+                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        h,
+                        last_x.get(),
+                        last_y.get(),
+                        false,
+                    );
+                }
+                UiCmd::RowMove(delta) => {
+                    // 行感知导航：↓ 下一行 / ↑ 上一行，列位置取中心最近的一格。
+                    // 行内容自适应宽度后每行格数不定，固定 ±6 格会直接跳飞
+                    let Some((geo, items)) = panel.borrow().as_ref().map(|s| {
+                        (s.geo.clone(), s.items.clone())
+                    }) else {
+                        continue;
+                    };
+                    let hl = panel_hl.get();
+                    let Some(&(_, cy, _)) = geo.get(hl.max(0) as usize) else {
+                        continue;
+                    };
+                    let target_row = if delta < 0 {
+                        let first_row = geo.iter().map(|g| g.1).min().unwrap_or(cy);
+                        if cy <= first_row {
+                            // 首行 ↑ → 收起面板（重建横条：网格≠流式布局，
+                            // 直接缩窗会把网格第一行留在横条里、文字压到图标下）
+                            ui.set_expanded(false);
+                            expanded.set(false);
+                            UI_EXPANDED.store(false, Ordering::Relaxed);
+                            *panel.borrow_mut() = None;
+                            if let Some(rime_id) = *current.borrow() {
+                                if let Ok(engine) = engine() {
+                                    let _guard = OP_LOCK.lock().unwrap();
+                                    if let Ok(snapshot) = engine.get_context(rime_id) {
+                                        if !snapshot.candidates.is_empty() {
+                                            set_bar_cells(
+                                                &ui,
+                                                &engine,
+                                                rime_id,
+                                                &snapshot,
+                                                &bar_base,
+                                                &bar_items,
+                                                &panel_hl,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                            paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                            continue;
+                        }
+                        geo.iter().map(|g| g.1).filter(|&y| y < cy).max()
+                    } else {
+                        geo.iter().map(|g| g.1).filter(|&y| y > cy).min()
+                    };
+                    let Some(target_row) = target_row else { continue };
+                    // 同序位移动：选中本行第 N 个 → 目标行第 N 个；
+                    // 目标行更短（不足 N 个）→ 选该行最后一个
+                    let cur_pos = geo
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &(_, gy, _))| gy == cy)
+                        .position(|(i, _)| i == hl.max(0) as usize)
+                        .unwrap_or(0);
+                    let target_items: Vec<usize> = geo
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &(_, gy, _))| gy == target_row)
+                        .map(|(i, _)| i)
+                        .collect();
+                    let Some(&new_hl) = target_items
+                        .get(cur_pos)
+                        .or_else(|| target_items.last())
+                    else {
+                        continue;
+                    };
+                    panel_hl.set(new_hl as i32);
+                    UI_HL.store(new_hl as i32, Ordering::Relaxed);
+                    let (cells, _rows) = build_grid_cells(&items, new_hl as i32);
+                    let hl_y = cells.iter().find(|c| c.hl).map(|c| c.y).unwrap_or(0);
+                    ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
+                    ui.set_hl_y(hl_y);
+                    paint(
+                        &mut backend,
+                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        last_panel_h.get(),
+                        last_x.get(),
+                        last_y.get(),
+                        false,
+                    );
+                }
+                UiCmd::BarIcon(on) => {
+                    // ☰（最右图标）选中：词高亮隐藏；取消：恢复词高亮
+                    // （panel_hl 保持不动，← 回来即原词）
+                    icon_sel.set(on);
+                    UI_ICON_SEL.store(on, Ordering::Relaxed);
+                    ui.set_icon_sel(on);
+                    let items = bar_items.borrow().clone();
+                    let hl = if on { -1 } else { panel_hl.get() };
+                    let (cells, _rows) = build_flow_cells(&items, hl);
+                    ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
+                    paint(
+                        &mut backend,
+                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        bar_h,
+                        last_x.get(),
+                        last_y.get(),
+                        true,
+                    );
+                }
+                UiCmd::BarSelect(idx) => {
+                    // 收起横条选词（鼠标点击 / 空格确认 / 数字键）：
+                    // 横条列表锚定菜单第一页，idx + bar_base = 全局序号
+                    let Some(rime_id) = *current.borrow() else { continue };
+                    let Ok(engine) = engine() else { continue };
+                    let _guard = OP_LOCK.lock().unwrap();
+                    let selected = engine
+                        .select_candidate_global(rime_id, bar_base.get().max(0) as usize + idx)
+                        .unwrap_or(false);
+                    if !selected {
+                        continue;
                     }
+                    if let Ok(text) = engine.get_commit(rime_id) {
+                        if !text.is_empty() {
+                            // 挂到对应外壳会话句柄（反向查 handle），外壳取走上屏
+                            if let Some(h) = SESSIONS.handle_of(rime_id) {
+                                PENDING_UI_COMMITS.lock().unwrap().insert(h, text);
+                            }
+                        }
+                    }
+                    // 刷新横条（选词后组合串可能仍在：继续输入下一个字母）
+                    if let Ok(snapshot) = engine.get_context(rime_id) {
+                        if snapshot.candidates.is_empty() {
+                            backend.set_mapped(false);
+                            *visible.borrow_mut() = false;
+                            expanded.set(false);
+                            UI_EXPANDED.store(false, Ordering::Relaxed);
+                        } else {
+                            set_bar_cells(
+                                &ui,
+                                &engine,
+                                rime_id,
+                                &snapshot,
+                                &bar_base,
+                                &bar_items,
+                                &panel_hl,
+                            );
+                            let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                            paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                        }
+                    }
+                }
+                UiCmd::MenuOpen => {
+                    // ☰ 菜单（占位）：面板长高显示 符号/常用语/设置，功能后续迭代
+                    menu_open.set(true);
+                    UI_MENU_OPEN.store(true, Ordering::Relaxed);
+                    ui.set_menu_open(true);
+                    let h = (MENU_HEIGHT as f32 * scale).round() as u32;
+                    paint(
+                        &mut backend,
+                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        h,
+                        last_x.get(),
+                        last_y.get(),
+                        true,
+                    );
+                }
+                UiCmd::MenuClose => {
+                    menu_open.set(false);
+                    UI_MENU_OPEN.store(false, Ordering::Relaxed);
+                    ui.set_menu_open(false);
+                    paint(
+                        &mut backend,
+                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        bar_h,
+                        last_x.get(),
+                        last_y.get(),
+                        true,
+                    );
                 }
                 UiCmd::SelectHL => {
                     // 空格/回车：选中面板当前高亮项
@@ -1397,7 +1882,16 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                 backend.set_mapped(false);
                                 *visible.borrow_mut() = false;
                             } else {
-                                set_bar_cells(&ui, &snapshot);
+                                let _guard = OP_LOCK.lock().unwrap();
+                                set_bar_cells(
+                                    &ui,
+                                    &engine,
+                                    rime_id,
+                                    &snapshot,
+                                    &bar_base,
+                                    &bar_items,
+                                    &panel_hl,
+                                );
                                 let w = (PANEL_WIDTH as f32 * scale).round() as u32;
                                 paint(
                                     &mut backend,
@@ -1419,6 +1913,26 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     ui.set_expanded(false);
                     expanded.set(false);
                     UI_EXPANDED.store(false, Ordering::Relaxed);
+                    *panel.borrow_mut() = None;
+                    // 重建横条（原格子是展开网格布局，直接缩窗会错位）
+                    if let Some(rime_id) = *current.borrow() {
+                        if let Ok(engine) = engine() {
+                            let _guard = OP_LOCK.lock().unwrap();
+                            if let Ok(snapshot) = engine.get_context(rime_id) {
+                                if !snapshot.candidates.is_empty() {
+                                    set_bar_cells(
+                                        &ui,
+                                        &engine,
+                                        rime_id,
+                                        &snapshot,
+                                        &bar_base,
+                                        &bar_items,
+                                        &panel_hl,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     let w = (PANEL_WIDTH as f32 * scale).round() as u32;
                     paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
                 }

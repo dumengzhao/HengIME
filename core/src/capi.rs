@@ -842,43 +842,127 @@ pub extern "C" fn heng_process_key_ex(
         const XK_RETURN: i32 = 0xff0b;
         let mut ui_nav = false;
         let expanded = crate::ui::UI_EXPANDED.load(Ordering::Relaxed);
-        if expanded {
-            let hl = crate::ui::UI_HL.load(Ordering::Relaxed);
-            match keysym {
-                XK_DOWN => {
-                    crate::ui::ui_move_hl(6);
-                    ui_nav = true;
-                }
-                XK_UP => {
-                    if hl >= 0 && hl < 6 {
-                        crate::ui::ui_set_expanded(false);
-                    } else {
-                        crate::ui::ui_move_hl(-6);
+        // ibus RELEASE_MASK（weasel 的 bit14 经 expand_ibus_modifier 映到 bit30；
+        // fcitx5 原生 bit30）：keyup 不拦截不选中，否则一次按键 = keydown+keyup
+        // 两次导航（跳两格）/ 两次选中
+        if mask & (1 << 30) == 0 {
+            if expanded {
+                // ↓/↑ 按行移动（行内格数不定，收起/到底的边界判断在 UI 线程，
+                // 那里有格子几何）；←→ 按格；空格/回车选中
+                match keysym {
+                    XK_DOWN => {
+                        crate::ui::ui_row_move(1);
+                        ui_nav = true;
                     }
-                    ui_nav = true;
+                    XK_UP => {
+                        crate::ui::ui_row_move(-1);
+                        ui_nav = true;
+                    }
+                    XK_RIGHT => {
+                        crate::ui::ui_move_hl(1);
+                        ui_nav = true;
+                    }
+                    XK_LEFT => {
+                        crate::ui::ui_move_hl(-1);
+                        ui_nav = true;
+                    }
+                    0x20 | XK_RETURN => {
+                        crate::ui::ui_select_hl();
+                        ui_nav = true;
+                    }
+                    _ => {}
                 }
-                XK_RIGHT => {
-                    crate::ui::ui_move_hl(1);
-                    ui_nav = true;
+            } else {
+                // 收起单行：不分页，←→/空格/回车/数字 全部本地处理（↑ 吞掉）。
+                // 图标导航目标 = 最右图标（现为 ☰ 菜单）；将来若在 ☰ 右侧新增
+                // 图标，把"最后一个图标"目标改指新图标即可，跳过逻辑不变
+                let has_menu = engine
+                    .get_context(rime_id)
+                    .map(|s| !s.candidates.is_empty())
+                    .unwrap_or(false);
+                // UI_BAR_COUNT>0 = 横条状态已建立（UI 线程在跑且 sync 过）；
+                // 否则（HTTP/CLI/测试等无 UI 线程场景）全部回落 librime 原行为
+                let bar_ready = crate::ui::UI_BAR_COUNT.load(Ordering::Relaxed) > 0;
+                if has_menu && bar_ready {
+                    let icon_sel = crate::ui::UI_ICON_SEL.load(Ordering::Relaxed);
+                    let menu_open = crate::ui::UI_MENU_OPEN.load(Ordering::Relaxed);
+                    let hl = crate::ui::UI_HL.load(Ordering::Relaxed);
+                    let bar_last = crate::ui::UI_BAR_COUNT.load(Ordering::Relaxed) - 1;
+                    if menu_open {
+                        // ☰ 菜单打开：←/→ 关闭回横条；空格/回车暂吞（菜单功能未做）
+                        match keysym {
+                            XK_LEFT | XK_RIGHT => {
+                                crate::ui::ui_menu_close();
+                                ui_nav = true;
+                            }
+                            0x20 | XK_RETURN => {
+                                ui_nav = true;
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match keysym {
+                            XK_DOWN => {
+                                crate::ui::ui_toggle();
+                                ui_nav = true;
+                            }
+                            XK_UP => {
+                                // 单行不分页：↑ 不做任何事（吞掉）
+                                ui_nav = true;
+                            }
+                            XK_RIGHT => {
+                                if icon_sel {
+                                    // 最后图标上再按 → = 展开面板
+                                    crate::ui::ui_toggle();
+                                } else if hl >= bar_last {
+                                    // 最后一个词 → 跳过 ▾ 直达最右图标 ☰
+                                    crate::ui::ui_bar_icon(true);
+                                } else {
+                                    crate::ui::ui_move_hl(1);
+                                }
+                                ui_nav = true;
+                            }
+                            XK_LEFT => {
+                                if icon_sel {
+                                    // ☰ ← 回到最后一个词（跳过 ▾）
+                                    crate::ui::ui_bar_icon(false);
+                                } else if hl > 0 {
+                                    crate::ui::ui_move_hl(-1);
+                                }
+                                // 首词再 ←：吞掉（不分页）
+                                ui_nav = true;
+                            }
+                            0x20 | XK_RETURN => {
+                                if icon_sel {
+                                    // ☰ 上确认 = 打开菜单（占位：符号/常用语/设置）
+                                    crate::ui::ui_menu_open();
+                                } else {
+                                    // 内联同步选词（横条锚定菜单第一页，高亮序号
+                                    // 即全局序号）：commit 由本次 _Respond 直接取走，
+                                    // 不能走异步 BarSelect（会错过本轮 _Respond）
+                                    let _ = engine.select_candidate_global(
+                                        rime_id,
+                                        hl.max(0) as usize,
+                                    );
+                                }
+                                ui_nav = true;
+                            }
+                            c if (0x30..=0x39).contains(&c) => {
+                                // 数字键按横条序号选词：'1'-'9' → 0-8，'0' → 9
+                                let n = if c == 0x30 { 9 } else { (c - 0x31) as i32 };
+                                if n <= bar_last {
+                                    let _ = engine.select_candidate_global(
+                                        rime_id,
+                                        n.max(0) as usize,
+                                    );
+                                    ui_nav = true;
+                                }
+                                // 超出横条词数：不拦，交给 librime（页内选词）
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-                XK_LEFT => {
-                    crate::ui::ui_move_hl(-1);
-                    ui_nav = true;
-                }
-                0x20 | XK_RETURN => {
-                    crate::ui::ui_select_hl();
-                    ui_nav = true;
-                }
-                _ => {}
-            }
-        } else if keysym == XK_DOWN {
-            let has_menu = engine
-                .get_context(rime_id)
-                .map(|s| !s.candidates.is_empty())
-                .unwrap_or(false);
-            if has_menu {
-                crate::ui::ui_toggle();
-                ui_nav = true;
             }
         }
         // 1. 按键
