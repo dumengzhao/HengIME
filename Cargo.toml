@@ -5,3 +5,8 @@ members = ["core", "tools/heng-cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+
+# macOS 27 dyld 拒绝 llvm-objcopy strip 出的未对齐 LINKEDIT（mis-aligned string pool，
+# rust#157750）：cdylib 供 .app 链接必须关闭 strip，否则 Xcode 链接报错
+[profile.release]
+strip = "none"

@@ -22,6 +22,10 @@ fn main() {
             );
         }
         println!("cargo:rustc-link-search=native={}", lib.display());
+        // install_name 写成 @rpath/libheng_core.dylib：嵌入 .app 的 Contents/Frameworks
+        // 后由主程序 LC_RPATH 解析。注意不要在此加 -Wl,-rpath：<abs 路径>——
+        // Xcode 27 的 ld 链接此类 dylib 时报 mis-aligned LINKEDIT string pool。
+        println!("cargo:rustc-link-arg=-Wl,-install_name,@rpath/libheng_core.dylib");
     } else if lib.join("librime.so").exists() {
         println!("cargo:rustc-link-search=native={}", lib.display());
     }
