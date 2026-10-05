@@ -23,7 +23,7 @@ pub const HENG_TRUE: c_int = 1;
 pub const HENG_FALSE: c_int = 0;
 
 /// 当前 C ABI 版本（v6：传播策略 + app_options 统一 + 选项持久化）
-pub const HENG_ABI_VERSION: c_int = 7;
+pub const HENG_ABI_VERSION: c_int = 8;
 /// 仍兼容的最低调用方 ABI（v4 起有 config API；更早调用方未验证）
 pub const HENG_MIN_ABI_VERSION: c_int = 4;
 
@@ -1062,6 +1062,31 @@ pub extern "C" fn heng_ui_sync(session: HengSession, x: c_int, y: c_int) -> c_in
             return HENG_FALSE;
         }
         crate::ui::ui_sync(rime_id, x, y);
+        HENG_TRUE
+    })
+}
+
+/// 同步候选窗（扩展版，v8）：额外传入光标所在文本行的顶边 y（屏幕坐标）。
+/// 展开面板向上翻转时以此为准（面板底边贴输入行上方，不遮输入行）。
+/// 外壳未升级时仍用 heng_ui_sync（顶边按底边-40 估算）。
+#[no_mangle]
+pub extern "C" fn heng_ui_sync_ex(
+    session: HengSession,
+    x: c_int,
+    caret_bottom: c_int,
+    caret_top: c_int,
+) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if session == 0 {
+            return HENG_FALSE;
+        }
+        let Some(rime_id) = SESSIONS.rime_id(session) else {
+            return HENG_FALSE;
+        };
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        crate::ui::ui_sync_ex(rime_id, x, caret_bottom, caret_top);
         HENG_TRUE
     })
 }

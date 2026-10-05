@@ -210,6 +210,12 @@ HENG_API int heng_get_propagation_policy(void);
  * 无候选则隐藏。返回 HENG_TRUE=已同步，HENG_FALSE=UI 不可用。 */
 HENG_API int heng_ui_sync(heng_session_t session, int x, int y);
 
+/* 同步候选窗（v8 扩展版）：额外传入光标所在文本行顶边 caret_top（屏幕坐标）。
+ * 展开面板向上翻转时以此为准（面板底边贴输入行上方，不遮输入行）。
+ * 未升级的外壳继续用 heng_ui_sync（顶边按底边-40 估算）。 */
+HENG_API int heng_ui_sync_ex(heng_session_t session, int x, int caret_bottom,
+                             int caret_top);
+
 /* 隐藏候选窗（焦点离开时调用）。 */
 HENG_API int heng_ui_hide(void);
 

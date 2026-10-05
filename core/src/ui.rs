@@ -51,7 +51,7 @@ const FLOW_TOP: i32 = 6;
 /// UI 线程命令
 enum UiCmd {
     /// 拉取当前会话 context 并刷新显示；有候选则显示在 (x,y)，无候选则隐藏
-    Sync { rime_id: RimeSessionId, x: i32, y: i32 },
+    Sync { rime_id: RimeSessionId, x: i32, y: i32, top: i32 },
     Hide,
     /// 展开箭头：切换「全部候选」面板（内部命令，来自 Slint 回调）
     ToggleExpand,
@@ -102,7 +102,15 @@ fn send_cmd(cmd: UiCmd) -> bool {
 /// 同步候选窗（外壳在 process_key_ex / 光标移动后调用）。
 /// x/y 为屏幕坐标（通常取输入光标左下角）。UI 线程未启动或无显示时静默跳过。
 pub fn ui_sync(rime_id: RimeSessionId, x: i32, y: i32) {
-    send_cmd(UiCmd::Sync { rime_id, x, y });
+    // 旧路径无行顶信息：按一个横条高（40 逻辑px × DPI）估算行高
+    let est_line = (40.0 * ui_scale()).round() as i32;
+    send_cmd(UiCmd::Sync { rime_id, x, y, top: y - est_line });
+}
+
+/// 同步候选窗（v8 扩展版）：额外传入光标所在文本行顶边（屏幕坐标），
+/// 向上展开时面板底边贴输入行上方、不遮输入行。
+pub fn ui_sync_ex(rime_id: RimeSessionId, x: i32, y: i32, top: i32) {
+    send_cmd(UiCmd::Sync { rime_id, x, y, top });
 }
 
 pub fn ui_hide() {
@@ -488,6 +496,45 @@ fn ui_scale() -> f32 {
 #[cfg(not(target_os = "windows"))]
 fn ui_scale() -> f32 {
     1.0
+}
+
+/// 查询指定点所在显示器的工作区（任务栏除外）的上下边界（设备 px）。
+/// 用于展开面板的向上翻转判断：光标下方放不下时朝上展开。
+/// 返回 (top, bottom)；查不到返回 None（此时不翻转，维持向下展开）。
+/// 测试钩子：HENG_UI_WORK="top,bottom" 可覆盖（沙箱无真实显示器）。
+#[cfg(target_os = "windows")]
+fn work_area_at(x: i32, y: i32) -> Option<(i32, i32)> {
+    if let Ok(env) = std::env::var("HENG_UI_WORK") {
+        let parts: Vec<&str> = env.splitn(2, ',').collect();
+        if parts.len() == 2 {
+            if let (Ok(top), Ok(bottom)) = (parts[0].trim().parse(), parts[1].trim().parse()) {
+                return Some((top, bottom));
+            }
+        }
+    }
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    unsafe {
+        let pt = POINT { x, y };
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        if hmon.is_null() {
+            return None;
+        }
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(hmon, &mut mi) == 0 {
+            return None;
+        }
+        Some((mi.rcWork.top, mi.rcWork.bottom))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn work_area_at(_x: i32, _y: i32) -> Option<(i32, i32)> {
+    // TODO(linux): 经 x11rb randr 查显示器工作区；当前不翻转
+    None
 }
 
 // =====================================================================
@@ -1388,6 +1435,12 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     let render_buf: RefCell<Vec<Argb>> = RefCell::new(Vec::new());
     let visible = RefCell::new(false);
     let cur_h = Cell::new(bar_h); // 当前物理高度（展开态会变）
+    // 向上展开状态：光标下方放不下时翻转，窗口底边锚定输入行顶边、面板向上长。
+    // flip_top = 所在显示器工作区顶（防向上越出屏幕）
+    let flip = Cell::new(false);
+    let flip_top = Cell::new(0);
+    // 光标所在文本行顶边（外壳经 heng_ui_sync_ex 传入；旧路径按底边-40 估算）
+    let last_caret_top = Cell::new(0);
     let last_preedit: RefCell<String> = RefCell::new(String::new());
     // 渲染并上屏（Sync / 展开 / 收起共用）。w,h 物理像素；map=true 时确保已映射
     // （XWayland：未映射窗口的 PutImage 会被静默丢弃，必须先 map 再画）
@@ -1397,9 +1450,17 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                  x: i32,
                  y: i32,
                  map: bool| {
+        // 翻转态：面板/菜单底边 = 输入行顶边（整体悬在输入行上面、不遮输入行，
+        // 微信同款）。翻转只在展开态存在（收起即复位），故 h 恒为面板/菜单高；
+        // flip_top 防向上越出屏幕
+        let y_eff = if flip.get() {
+            (last_caret_top.get() - h as i32).max(flip_top.get())
+        } else {
+            y
+        };
         cur_h.set(h);
         msw.set_size(PhysicalSize { width: w, height: h });
-        backend.configure(x, y, w, h);
+        backend.configure(x, y_eff, w, h);
         if render_buf.borrow().len() != (w * h) as usize {
             *render_buf.borrow_mut() = vec![Argb::default(); (w * h) as usize];
         }
@@ -1470,7 +1531,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         // 1. 命令
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                UiCmd::Sync { rime_id, x, y } => {
+                UiCmd::Sync { rime_id, x, y, top } => {
                     *current.borrow_mut() = Some(rime_id);
                     let Ok(engine) = engine() else { continue };
                     let snapshot = {
@@ -1480,6 +1541,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     if let Ok(snapshot) = snapshot {
                         last_x.set(x);
                         last_y.set(y);
+                        // 行顶合法范围：[y-400, y]（行高 ≤400px；防外壳传脏值）
+                        last_caret_top.set(top.clamp(y - 400, y));
                         // 输入串变化才收起面板（↓/↑ 导航不改 preedit，面板保持）
                         let input_changed = *last_preedit.borrow() != snapshot.preedit;
                         *last_preedit.borrow_mut() = snapshot.preedit.clone();
@@ -1488,6 +1551,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             *visible.borrow_mut() = false;
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
+                            flip.set(false);
                         } else if !input_changed {
                             // 视觉态保持，什么都不做：
                             // - 展开面板：内容 = 展开瞬间快照（导航键不碰 rime）
@@ -1516,6 +1580,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             ui.set_expanded(false);
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
+                            flip.set(false);
                             *panel.borrow_mut() = None;
                             paint(&mut backend, w, bar_h, x, y, true);
                         }
@@ -1583,6 +1648,26 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         ui.set_content_height(content_h);
                         ui.set_panel_height(h_logical);
                         last_panel_h.set((h_logical as f32 * scale).round() as u32);
+                        // 展开方向：光标下方放不下 → 向上展开（微信同款，
+                        // 面板底边贴输入行上方，整体悬在输入行上面）
+                        let panel_h_phys = last_panel_h.get();
+                        match work_area_at(last_x.get(), last_y.get()) {
+                            Some((top, bottom)) if bottom > top && bottom > 0 => {
+                                if last_y.get() + panel_h_phys as i32 + 8 > bottom {
+                                    flip.set(true);
+                                    flip_top.set(top);
+                                } else {
+                                    flip.set(false);
+                                }
+                            }
+                            _ => flip.set(false),
+                        }
+                        ui_log(&format!(
+                            "expand: flip={} panel_bottom_y={} panel_h={}",
+                            flip.get(),
+                            last_y.get(),
+                            panel_h_phys
+                        ));
                         ui.set_expanded(true);
                         UI_EXPANDED.store(true, Ordering::Relaxed);
                         icon_sel.set(false);
@@ -1683,6 +1768,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             ui.set_expanded(false);
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
+                            flip.set(false);
                             *panel.borrow_mut() = None;
                             if let Some(rime_id) = *current.borrow() {
                                 if let Ok(engine) = engine() {
@@ -1792,6 +1878,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             *visible.borrow_mut() = false;
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
+                            flip.set(false);
                         } else {
                             set_bar_cells(
                                 &ui,
@@ -1862,6 +1949,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             ui.set_expanded(false);
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
+                            flip.set(false);
                             *panel.borrow_mut() = None;
                             backend.set_mapped(false);
                             *visible.borrow_mut() = false;
@@ -1872,6 +1960,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         ui.set_expanded(false);
                         expanded.set(false);
                         UI_EXPANDED.store(false, Ordering::Relaxed);
+                        flip.set(false);
                         *panel.borrow_mut() = None;
                         let snapshot = {
                             let _guard = OP_LOCK.lock().unwrap();
@@ -1913,6 +2002,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     ui.set_expanded(false);
                     expanded.set(false);
                     UI_EXPANDED.store(false, Ordering::Relaxed);
+                    flip.set(false);
                     *panel.borrow_mut() = None;
                     // 重建横条（原格子是展开网格布局，直接缩窗会错位）
                     if let Some(rime_id) = *current.borrow() {

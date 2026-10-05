@@ -324,11 +324,11 @@ fn cmd_uitest(seq: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => println!("  帧 {stage}: 拷贝失败 {e}"),
         }
     };
-    heng_core::ui::ui_sync(rime_id, 200, 500);
+    heng_core::ui::ui_sync_ex(rime_id, 200, 500, 460); // 模拟外壳 v8：底 500 / 行顶 460
     snap("1-bar"); // 收起横条：圆角/垂直居中/两个按钮
     heng_core::ui::ui_toggle();
     snap("2-expanded"); // 展开面板：候选行数
-    heng_core::ui::ui_sync(rime_id, 200, 500); // 模拟外壳每个按键后的 _UpdateUI
+    heng_core::ui::ui_sync_ex(rime_id, 200, 500, 460); // 模拟外壳每个按键后的 _UpdateUI
     snap("3-after-sync"); // 修复点：必须与 2 相同（不被打回页 1）
     heng_core::ui::ui_move_hl(1);
     snap("4-hl-right1"); // ←→ 高亮 +1（格移）
@@ -441,7 +441,7 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
         };
         let rc = heng_hello(5, &mut hello);
         check!("heng_hello 填充成功", rc == 1);
-        check!("hello.abi_version == 7", hello.abi_version == 7);
+        check!("hello.abi_version == 8", hello.abi_version == 8);
         check!("hello.data_size > 0", hello.data_size > 0);
         check!("min_abi_version <= abi_version", hello.min_abi_version <= hello.abi_version);
 
