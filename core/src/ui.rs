@@ -16,9 +16,11 @@
 //! 线程模型：Slint 侧全部对象（platform/window/组件）只在 UI 线程触碰；
 //! ABI 线程经 mpsc 命令通道与 UI 线程通信。
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::atomic::Ordering;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -32,8 +34,13 @@ use crate::engine::RimeSessionId;
 use crate::global::{engine, SESSIONS, OP_LOCK};
 
 /// 横排候选栏尺寸：宽度按内容估算（上限截断），高度固定单条
-const MAX_WIDTH: u32 = 780;
 const BAR_HEIGHT: u32 = 40;
+/// 横条与展开面板统一固定宽度（微信同款：宽度不随内容变化，超长词显示省略号）
+const PANEL_WIDTH: u32 = 460;
+/// 展开面板行高与最大行数
+const FLOW_ROW_H: i32 = 38;
+const FLOW_MAX_ROWS: i32 = 40; // 可滚动，上限放宽
+const PANEL_VISIBLE_ROWS: i32 = 5; // 展开态可视行数
 
 // ---- 对外接口（capi 调用） ----
 
@@ -42,6 +49,14 @@ enum UiCmd {
     /// 拉取当前会话 context 并刷新显示；有候选则显示在 (x,y)，无候选则隐藏
     Sync { rime_id: RimeSessionId, x: i32, y: i32 },
     Hide,
+    /// 展开箭头：切换「全部候选」面板（内部命令，来自 Slint 回调）
+    ToggleExpand,
+    /// 键盘 ↑（第一行）触发的收起（内部命令）
+    SetExpanded(bool),
+    /// 面板内移动视觉高亮（±1 格 / ±6 行，内部命令）
+    MoveHL(i32),
+    /// 键盘空格/回车：选中面板当前高亮项（内部命令）
+    SelectHL,
 }
 
 static UI_CMD_TX: LazyLock<Mutex<Option<Sender<UiCmd>>>> = LazyLock::new(|| Mutex::new(None));
@@ -49,6 +64,11 @@ static UI_CMD_TX: LazyLock<Mutex<Option<Sender<UiCmd>>>> = LazyLock::new(|| Mute
 /// UI 点击产生的待上屏文本：外壳经 heng_take_ui_commit 取走
 pub static PENDING_UI_COMMITS: LazyLock<Mutex<std::collections::HashMap<u64, String>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+// ---- 展开面板共享状态（UI 线程写，capi 键盘拦截读） ----
+pub static UI_EXPANDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static UI_HL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+pub static UI_TOTAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 fn send_cmd(cmd: UiCmd) -> bool {
     UI_CMD_TX
@@ -69,6 +89,26 @@ pub fn ui_hide() {
     send_cmd(UiCmd::Hide);
 }
 
+/// 键盘 ↓（capi 拦截）触发的展开/收起切换
+pub fn ui_toggle() {
+    send_cmd(UiCmd::ToggleExpand);
+}
+
+/// 键盘 ↑（capi 拦截，面板第一行）触发的收起
+pub fn ui_set_expanded(v: bool) {
+    send_cmd(UiCmd::SetExpanded(v));
+}
+
+/// 面板内移动视觉高亮（capi 拦截）
+pub fn ui_move_hl(delta: i32) {
+    send_cmd(UiCmd::MoveHL(delta));
+}
+
+/// 选中面板当前高亮项（capi 拦截：空格/回车）
+pub fn ui_select_hl() {
+    send_cmd(UiCmd::SelectHL);
+}
+
 /// 惰性启动 UI 线程（首次 ui_sync 时）。启动失败（无 X 显示等）返回 false，
 /// 外壳可回退到宿主候选窗。
 pub fn ensure_started() -> bool {
@@ -77,10 +117,11 @@ pub fn ensure_started() -> bool {
         return true;
     }
     let (tx, rx) = std::sync::mpsc::channel();
+    let tx_for_thread = tx.clone();
     let ok = std::panic::catch_unwind(|| {
         std::thread::Builder::new()
             .name("heng-ui".into())
-            .spawn(move || ui_thread_main(rx))
+            .spawn(move || ui_thread_main(rx, tx_for_thread))
     })
     .is_ok();
     if ok {
@@ -95,58 +136,134 @@ pub fn ensure_started() -> bool {
 // ---- UI 线程内部 ----
 
 slint::slint! {
-    // 微信输入法式横排候选栏：单条横排，蓝块白字选中，悬浮细蓝边框提示
+    export struct CandCell {
+        num: string,
+        text: string,
+        hl: bool,
+        x: int,
+        y: int,
+        w: int,
+    }
+    // 微信输入法式候选窗（单窗口两态，仅宽高与内容不同）：
+    // 收起 = 高 40px，只露出流式格子第一行（页 1 候选），右上 ▾ + 菜单（预留）
+    // 展开 = 变高，整窗一行行候选词（第一行原内容 + 真实候选 + 同音词），
+    //        Flickable 滚动 + 自绘滚动条，按钮消失
     export component CandWindow inherits Window {
-        in property <int> highlight;
-        in property <[string]> labels;
-        in property <[string]> candidates;
-        in property <int> hover;
-        in property <int> bar-width;
-        width: root.bar-width * 1px;
-        height: 40px;
-        background: transparent;
-        // 最外层容器：与选中块相同圆角（8px）
-        Rectangle {
-            width: 100%;
-            height: 100%;
-            border-radius: 8px;
-            background: #f7f8fa;
-        HorizontalLayout {
-            padding: 4px;
-            spacing: 2px;
-            for c[idx] in root.candidates: Rectangle {
-                height: 32px;
-                border-radius: 8px;
-                background: idx == root.highlight ? #2164f1 : transparent;
-                border-width: 1px;
-                border-color: (idx == root.hover && idx != root.highlight)
-                    ? #7fa8f5 : transparent;
-                HorizontalLayout {
-                    padding-left: 7px;
-                    padding-right: 7px;
-                    spacing: 4px;
-                    alignment: center;
-                    Text {
-                        text: root.labels[idx];
-                        color: idx == root.highlight ? #cfe0ff : #999999;
-                        font-size: 12px;
-                        vertical-alignment: center;
+        in property <bool> expanded;
+        in property <int> panel-width;
+        in property <int> panel-height;   // 展开态可视高度
+        in property <int> content-height; // 展开态内容总高（滚动范围）
+        in property <[CandCell]> all-cells;
+        width: root.panel-width * 1px;
+        height: root.expanded ? root.panel-height * 1px : 40px;
+        background: #f7f8fa;
+        // 候选词流式格子（两态共用；收起时 40px 窗口只露出第一行）
+        flick := Flickable {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            content-height: root.expanded ? root.content-height * 1px : parent.height;
+            Rectangle {
+                width: parent.width;
+                height: root.expanded ? root.content-height * 1px : parent.height;
+                for cell[idx] in root.all-cells: Rectangle {
+                    x: cell.x * 1px;
+                    y: cell.y * 1px;
+                    width: cell.w * 1px;
+                    height: 32px;
+                    border-radius: 8px;
+                    background: cell.hl ? #2164f1 : #ffffff;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 4px;
+                        spacing: 4px;
+                        alignment: center;
+                        Text {
+                            text: cell.num;
+                            color: cell.hl ? #cfe0ff : #999999;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: cell.text;
+                            color: cell.hl ? #ffffff : #1f2328;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
                     }
-                    Text {
-                        text: c;
-                        color: idx == root.highlight ? #ffffff : #1f2328;
-                        font-size: 15px;
-                        vertical-alignment: center;
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.candidate_clicked(idx); }
                     }
-                }
-                TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.candidate_clicked(idx); }
                 }
             }
         }
+        // 展开态自绘滚动条（thumb 高 = 轨道高 × 可视/内容；位置 clamp 防负坐标）
+        property <length> track-h: Math.max(1px, flick.height - 12px);
+        property <length> scroll-range: Math.max(1px, root.content-height * 1px - flick.height);
+        property <length> thumb-h: Math.min(track-h,
+            Math.max(30px, track-h * flick.height
+                / Math.max(1px, root.content-height * 1px)));
+        if root.expanded: Rectangle {
+            x: parent.width - 5px;
+            y: 6px;
+            width: 3px;
+            height: track-h;
+            border-radius: 2px;
+            background: #d8dce2;
+            Rectangle {
+                width: parent.width;
+                border-radius: 2px;
+                background: #aeb4bd;
+                y: Math.min(track-h - thumb-h,
+                    Math.max(0px, (track-h - thumb-h)
+                        * ((0px - flick.content-y) / scroll-range)));
+                height: thumb-h;
+            }
+        }
+        // 收起态右上按钮：▾ 展开箭头 + 菜单（预留）
+        if !root.expanded: Rectangle {
+            x: parent.width - 30px;
+            y: 4px;
+            width: 26px;
+            height: 32px;
+            border-radius: 8px;
+            background: ta_arrow.has-hover ? #e8ebef : transparent;
+            Text {
+                text: "▾";
+                color: #666666;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+            ta_arrow := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.toggle_expand(); }
+            }
+        }
+        if !root.expanded: Rectangle {
+            x: parent.width - 58px;
+            y: 4px;
+            width: 26px;
+            height: 32px;
+            border-radius: 8px;
+            background: ta_menu.has-hover ? #e8ebef : transparent;
+            Text {
+                text: "☰";
+                color: #666666;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+            ta_menu := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.menu_clicked(); }
+            }
         }
         callback candidate_clicked(int);
+        callback toggle_expand();
+        callback expanded_clicked(int);
+        callback menu_clicked();
     }
 }
 
@@ -501,7 +618,8 @@ mod win_backend {
     use super::{Argb, UiBackend, BAR_HEIGHT};
     use slint::platform::{PointerEventButton, WindowEvent};
     use slint::LogicalPosition;
-    use std::cell::RefCell;
+    use std::cell::Cell;
+use std::cell::RefCell;
     use std::mem::size_of;
     use windows_sys::Win32::Foundation::{
         GetLastError, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM,
@@ -799,41 +917,145 @@ mod win_backend {
     }
 }
 
-/// 估算横排候选栏宽度：外边距 + 每项（内边距 + 标签 + 候选文本）
-fn estimate_bar_width(snapshot: &crate::engine::ContextSnapshot) -> u32 {
-    let text_w = |s: &str| -> u32 {
-        s.chars()
-            .map(|c| if c.is_ascii() { 9 } else { 16 })
-            .sum()
-    };
-    let mut w = 12u32; // 外层 padding
-    for (i, c) in snapshot.candidates.iter().enumerate() {
-        let label = snapshot.select_labels.get(i).cloned().unwrap_or_else(|| (i + 1).to_string());
-        w += 14 + text_w(&label) + 4 + text_w(&c.text) + 2;
-    }
-    w.max(120)
-}
-
-fn apply_context_to(ui: &CandWindow, snapshot: &crate::engine::ContextSnapshot) {
-    ui.set_highlight(snapshot.highlighted as i32);
-    ui.set_hover(-1);
-    let texts: Vec<SharedString> =
-        snapshot.candidates.iter().map(|c| SharedString::from(c.text.clone())).collect();
-    ui.set_candidates(ModelRc::new(VecModel::from(texts)));
-    let labels: Vec<SharedString> = snapshot
+/// 收起态横条格子 = 页 1 候选的流式第一行
+fn set_bar_cells(ui: &CandWindow, snapshot: &crate::engine::ContextSnapshot) {
+    let texts: Vec<String> = snapshot
         .candidates
         .iter()
-        .enumerate()
-        .map(|(i, _)| {
-            let l = snapshot
-                .select_labels
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| (i + 1).to_string());
-            SharedString::from(l)
-        })
+        .filter(|c| !c.text.is_empty())
+        .map(|c| c.text.clone())
         .collect();
-    ui.set_labels(ModelRc::new(VecModel::from(labels)));
+    let (cells, _rows) = build_flow_cells(&texts, snapshot.highlighted);
+    ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
+    ui.set_panel_width(PANEL_WIDTH as i32);
+}
+
+
+/// 槽位制排布（微信同款）：每行 6 个槽位，每槽约容纳 3 字 + 序号；
+/// 词的槽位跨度 = ceil(字数/3)（4 字占 2 格、7 字占 3 格）；序号每行从 1 开始。
+/// 返回 (cells, 行数)。hl_global 为当前选中候选的全局序号。
+fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
+    let margin = 6i32;
+    let gap = 4i32;
+    const SLOTS_PER_ROW: i32 = 6;
+    let panel_w = PANEL_WIDTH as i32;
+    let slot_w = (panel_w - margin * 2) / SLOTS_PER_ROW;
+    let mut cells: Vec<CandCell> = Vec::new();
+    let (mut x, mut y) = (margin, 8);
+    let mut used_slots = 0i32;
+    let mut num = 0i32;
+    for (i, t) in all.iter().enumerate() {
+        let disp = t.clone();
+        let chars = disp.chars().count() as i32;
+        let spans = (((chars + 2) / 3).max(1)).min(SLOTS_PER_ROW);
+        // 第一行右侧给收起箭头留 30px
+        let row_max = panel_w - margin - if y == 8 { 30 } else { 0 };
+        if x + spans * slot_w > row_max && num > 0 {
+            // 换行：序号从 1 重新开始
+            y += FLOW_ROW_H;
+            x = margin;
+            used_slots = 0;
+            num = 0;
+        }
+        if y > 8 + FLOW_MAX_ROWS * FLOW_ROW_H {
+            break; // 行数封顶，超出部分后续做滚动
+        }
+        let w = spans * slot_w - gap;
+        cells.push(CandCell {
+            num: SharedString::from((num + 1).to_string()),
+            text: SharedString::from(disp),
+            hl: (i as i32) == hl_global,
+            x,
+            y,
+            w,
+        });
+        x += spans * slot_w;
+        used_slots += spans;
+        num += 1;
+    }
+    let rows = ((y - 8) / FLOW_ROW_H) + 1;
+    (cells, rows)
+}
+
+/// 拼音音节表（声母+韵母组合，贪心最长匹配用）
+const SYLLABLES: &[&str] = &[
+    "a","ai","an","ang","ao","bai","ban","bang","bao","bei","ben","beng","bi","bian","biao",
+    "bie","bin","bing","bo","bu","ca","cai","can","cang","cao","ce","cen","ceng","cha","chai",
+    "chan","chang","chao","che","chen","cheng","chi","chong","chou","chu","chua","chuai","chuan",
+    "chuang","chui","chun","chuo","ci","cong","cou","cu","cuan","cui","cun","cuo","da","dai",
+    "dan","dang","dao","de","deng","di","dia","dian","diao","die","ding","diu","dong","dou",
+    "du","duan","dui","dun","duo","e","ei","en","er","fa","fan","fang","fei","fen","feng","fo",
+    "fou","fu","ga","gai","gan","gang","gao","ge","gei","gen","geng","gong","gou","gu","gua",
+    "guai","guan","guang","gui","gun","guo","ha","hai","han","hang","hao","he","hei","hen",
+    "heng","hong","hou","hu","hua","huai","huan","huang","hui","hun","huo","ji","jia","jian",
+    "jiang","jiao","jie","jin","jing","jiong","jiu","ju","juan","jue","jun","ka","kai","kan",
+    "kang","kao","ke","ken","keng","kong","kou","ku","kua","kuai","kuan","kuang","kui","kun",
+    "kuo","la","lai","lan","lang","lao","le","lei","leng","li","lia","lian","liang","liao",
+    "lie","lin","ling","liu","lo","long","lou","lu","luan","lun","luo","ma","mai","man","mang",
+    "mao","me","mei","men","meng","mi","mian","miao","mie","min","ming","miu","mo","mou","mu",
+    "na","nai","nan","nang","nao","ne","nei","nen","neng","ni","nian","niang","niao","nie",
+    "nin","ning","niu","nong","nou","nu","nuan","nuo","o","ou","pa","pai","pan","pang","pao",
+    "pei","pen","peng","pi","pian","piao","pie","pin","ping","po","pou","pu","qi","qia","qian",
+    "qiang","qiao","qie","qin","qing","qiong","qiu","qu","quan","que","qun","ran","rang","rao",
+    "re","ren","reng","ri","rong","rou","ru","rua","ruan","rui","run","ruo","sa","sai","san",
+    "sang","sao","se","sen","seng","sha","shai","shan","shang","shao","she","shei","shen",
+    "sheng","shi","shou","shu","shua","shuai","shuan","shuang","shui","shun","shuo","si","song",
+    "sou","su","suan","sui","sun","suo","ta","tai","tan","tang","tao","te","teng","ti","tian",
+    "tiao","tie","ting","tong","tou","tu","tuan","tui","tun","tuo","wa","wai","wan","wang",
+    "wei","wen","weng","wo","wu","xi","xia","xian","xiang","xiao","xie","xin","xing","xiong",
+    "xiu","xu","xuan","xue","xun","ya","yan","yang","yao","ye","yi","yin","ying","yo","yong",
+    "you","yu","yuan","yue","yun","za","zai","zan","zang","zao","ze","zei","zen","zeng","zha",
+    "zhai","zhan","zhang","zhao","zhe","zhen","zheng","zhi","zhong","zhou","zhu","zhua","zhuai",
+    "zhuan","zhuang","zhui","zhun","zhuo","zi","zong","zou","zu","zuan","zui","zun","zuo",
+];
+
+/// 从原始输入提取第一个音节（贪心最长匹配）
+fn first_syllable(raw: &str) -> String {
+    let letters: String = raw.chars().filter(|c| c.is_ascii_lowercase()).collect();
+    let chars: Vec<char> = letters.chars().collect();
+    for len in (1..=chars.len().min(6)).rev() {
+        let candidate: String = chars[..len].iter().collect();
+        if SYLLABLES.contains(&candidate.as_str()) {
+            return candidate;
+        }
+    }
+    String::new()
+}
+
+/// 同音词填充：临时会话输入首音节，收集其候选（排除已展示的）
+fn collect_homophones(engine: &crate::engine::Engine, rime_id: RimeSessionId, existing: &[String]) -> Vec<String> {
+    let raw = engine.get_input(rime_id).unwrap_or_default();
+    let syl = first_syllable(&raw);
+    if syl.is_empty() {
+        return vec![];
+    }
+    let Ok(session) = engine.create_session() else {
+        return vec![];
+    };
+    let tid = session.into_raw();
+    let mut out = Vec::new();
+    if engine.simulate_key_sequence(tid, &syl).unwrap_or(false) {
+        // 首页 + 多翻几页（微信可滚很久，这里尽量多给）
+        for _ in 0..6 {
+            let Ok(snap) = engine.get_context(tid) else { break };
+            if snap.candidates.is_empty() {
+                break;
+            }
+            for c in &snap.candidates {
+                if !c.text.is_empty()
+                    && !existing.contains(&c.text)
+                    && !out.contains(&c.text)
+                {
+                    out.push(c.text.clone());
+                }
+            }
+            if snap.is_last_page || !engine.process_key(tid, 0xff56, 0).unwrap_or(false) {
+                break;
+            }
+        }
+    }
+    engine.destroy_session(tid);
+    out
 }
 
 /// 调试用：导出当前帧为 PPM（HENG_UI_DUMP 环境变量开启）。
@@ -866,9 +1088,21 @@ fn dump_frame(buf: &[Argb], w: u32, h: u32) {
     );
 }
 
-fn ui_thread_main(rx: Receiver<UiCmd>) {
+fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // Slint 平台必须先于组件创建注册
     slint::platform::set_platform(Box::new(XPlatform)).expect("heng-ui: set_platform 失败");
+    let expanded = Rc::new(Cell::new(false));
+    // 展开面板快照：内容在展开瞬间固定，导航只动视觉高亮，不碰 rime
+    struct PanelSnap {
+        items: Vec<String>,
+        page_size: i32,
+        real_count: usize, // 真实候选数（其后为同音词）
+    }
+    let panel: Rc<RefCell<Option<PanelSnap>>> = Rc::new(RefCell::new(None));
+    let panel_hl = Rc::new(Cell::new(0i32));
+    let last_panel_h = Cell::new(0u32);
+    let last_x = Cell::new(200);
+    let last_y = Cell::new(500);
     let Some(mut backend) = create_backend() else {
         eprintln!("heng-ui: 平台窗口创建失败，自绘候选窗不可用（外壳回退宿主候选窗）");
         return;
@@ -887,16 +1121,91 @@ fn ui_thread_main(rx: Receiver<UiCmd>) {
     let current: Rc<RefCell<Option<RimeSessionId>>> = Rc::new(RefCell::new(None));
     let render_buf: RefCell<Vec<Argb>> = RefCell::new(Vec::new());
     let visible = RefCell::new(false);
+    let cur_h = Cell::new(bar_h); // 当前物理高度（展开态会变）
+    let last_preedit: RefCell<String> = RefCell::new(String::new());
+    // 渲染并上屏（Sync / 展开 / 收起共用）。w,h 物理像素；map=true 时确保已映射
+    // （XWayland：未映射窗口的 PutImage 会被静默丢弃，必须先 map 再画）
+    let paint = |backend: &mut Box<dyn UiBackend>,
+                 w: u32,
+                 h: u32,
+                 x: i32,
+                 y: i32,
+                 map: bool| {
+        cur_h.set(h);
+        msw.set_size(PhysicalSize { width: w, height: h });
+        backend.configure(x, y, w, h);
+        if render_buf.borrow().len() != (w * h) as usize {
+            *render_buf.borrow_mut() = vec![Argb::default(); (w * h) as usize];
+        }
+        if map {
+            backend.set_mapped(true);
+        }
+        msw.window().request_redraw();
+        {
+            let mut buf = render_buf.borrow_mut();
+            // 渲染器内部对异常内容可能 panic（如负坐标 Overflow），
+            // 捕获以保证 UI 线程存活（最坏丢一帧）
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                msw.draw_if_needed(|r: &SoftwareRenderer| {
+                    let _ = r.render(&mut buf, w as usize);
+                });
+            }));
+        }
+        {
+            let buf = render_buf.borrow();
+            if std::env::var_os("HENG_UI_DUMP").is_some() {
+                dump_frame(&buf, w, h);
+            }
+            backend.blit(&buf, w, h);
+        }
+        *visible.borrow_mut() = map || *visible.borrow();
+    };
 
-    // 点击 → core 内部直接选词 + 取走 commit（不回传外壳）
+
+    // 展开箭头 / 展开列表点击 → 内部命令（在循环里统一处理，避免借用冲突）
+    ui.on_toggle_expand({
+        let tx = tx.clone();
+        move || {
+            let _ = tx.send(UiCmd::ToggleExpand);
+        }
+    });
+    ui.on_menu_clicked({
+        let tx = tx.clone();
+        move || {
+            let _ = tx.send(UiCmd::ToggleExpand); // 占位：菜单未实现，先复用展开（CI 验证按钮通路）
+        }
+    });
+    ui.on_expanded_clicked({
+        let tx = tx.clone();
+        let panel_hl = panel_hl.clone();
+        move |idx| {
+            panel_hl.set(idx as i32);
+            let _ = tx.send(UiCmd::SelectHL);
+        }
+    });
+
+    // 点击 → core 内部直接选词 + 取走 commit（不回传外壳）。
+    // 收起态第一行 idx = 页内序号；展开态 idx = 全局序号
     ui.on_candidate_clicked({
         let ui = ui.clone();
         let current = current.clone();
+        let expanded = expanded.clone();
+        let panel_hl = panel_hl.clone();
+        let tx = tx.clone();
         move |idx| {
             let Some(rime_id) = *current.borrow() else { return };
             let Ok(engine) = engine() else { return };
             let _guard = OP_LOCK.lock().unwrap();
-            if engine.select_candidate_on_current_page(rime_id, idx as usize).unwrap_or(false) {
+            if expanded.get() {
+                // 展开态：第一行 = 面板前 6 项，走面板选中（含同音词路径）
+                drop(_guard);
+                panel_hl.set(idx as i32);
+                let _ = tx.send(UiCmd::SelectHL);
+                return;
+            }
+            let selected =
+                engine.select_candidate_on_current_page(rime_id, idx as usize).unwrap_or(false);
+            if selected {
                 if let Ok(text) = engine.get_commit(rime_id) {
                     if !text.is_empty() {
                         // 挂到对应外壳会话句柄（反向查 handle）
@@ -907,7 +1216,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>) {
                 }
                 // 刷新窗口（选词后组合串可能仍在：输入下一个字母继续）
                 if let Ok(snapshot) = engine.get_context(rime_id) {
-                    apply_context_to(&ui, &snapshot);
+                    set_bar_cells(&ui, &snapshot);
                 }
             }
         }
@@ -925,46 +1234,193 @@ fn ui_thread_main(rx: Receiver<UiCmd>) {
                         engine.get_context(rime_id)
                     };
                     if let Ok(snapshot) = snapshot {
+                        last_x.set(x);
+                        last_y.set(y);
+                        // 输入串变化才收起面板（↓/↑ 导航不改 preedit，面板保持）
+                        let input_changed = *last_preedit.borrow() != snapshot.preedit;
+                        *last_preedit.borrow_mut() = snapshot.preedit.clone();
                         if snapshot.candidates.is_empty() {
                             backend.set_mapped(false);
                             *visible.borrow_mut() = false;
+                            expanded.set(false);
+                            UI_EXPANDED.store(false, Ordering::Relaxed);
                         } else {
-                            apply_context_to(&ui, &snapshot);
-                            let w_logical = estimate_bar_width(&snapshot).min(MAX_WIDTH);
-                            ui.set_bar_width(w_logical as i32);
-                            let w = (w_logical as f32 * scale).round() as u32;
-                            let h = bar_h;
-                            msw.set_size(PhysicalSize { width: w, height: h });
-                            backend.configure(x, y, w, h);
-                            if render_buf.borrow().len() != (w * h) as usize {
-                                *render_buf.borrow_mut() =
-                                    vec![Argb::default(); (w * h) as usize];
+                            set_bar_cells(&ui, &snapshot);
+                            let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                            if expanded.get() && !input_changed {
+                                // 面板保持：内容是展开瞬间的快照，导航不重建、不碰 rime
+                            } else {
+                                // 输入变化：收起面板，恢复横条
+                                ui.set_expanded(false);
+                                expanded.set(false);
+                                UI_EXPANDED.store(false, Ordering::Relaxed);
+                                *panel.borrow_mut() = None;
+                                paint(&mut backend, w, bar_h, x, y, true);
                             }
-                            // 必须先映射再画内容（XWayland：未映射窗口的 PutImage
-                            // 会被静默丢弃；Windows 上保证 SetWindowPos 在 blit 前）
-                            backend.set_mapped(true);
-                            msw.window().request_redraw();
-                            // 立即渲染 + blit 一次（不等下一轮 draw_if_needed）
-                            {
-                                let mut buf = render_buf.borrow_mut();
-                                let _ = msw.draw_if_needed(|r: &SoftwareRenderer| {
-                                    let _ = r.render(&mut buf, w as usize);
-                                });
-                            }
-                            {
-                                let buf = render_buf.borrow();
-                                if std::env::var_os("HENG_UI_DUMP").is_some() {
-                                    dump_frame(&buf, w, h);
-                                }
-                                backend.blit(&buf, w, h);
-                            }
-                            *visible.borrow_mut() = true;
                         }
                     }
                 }
                 UiCmd::Hide => {
                     backend.set_mapped(false);
                     *visible.borrow_mut() = false;
+                }
+                UiCmd::ToggleExpand => {
+                    if !*visible.borrow() {
+                        continue;
+                    }
+                    let expanding = !expanded.get();
+                    if expanding {
+                        // 展开：真实候选（跨页）+ 首音节同音词填充。
+                        // 面板内容 = 展开瞬间的快照，导航不碰 rime
+                        let Some(rime_id) = *current.borrow() else { continue };
+                        let Ok(engine) = engine() else { continue };
+                        let (real, page_size, snapshot) = {
+                            let _guard = OP_LOCK.lock().unwrap();
+                            let r = engine.get_all_candidates(rime_id).unwrap_or_default();
+                            let snap = engine.get_context(rime_id).ok();
+                            (r.0, r.1, snap)
+                        };
+                        if real.is_empty() {
+                            continue;
+                        }
+                        let real_count = real.len();
+                        let homophones = collect_homophones(engine, rime_id, &real);
+                        let mut all = real.clone();
+                        all.extend(homophones);
+                        let hl_global = snapshot
+                            .as_ref()
+                            .map(|s| s.page_no * s.page_size + s.highlighted)
+                            .unwrap_or(0);
+                        *panel.borrow_mut() = Some(PanelSnap {
+                            items: all.clone(),
+                            page_size,
+                            real_count,
+                        });
+                        panel_hl.set(hl_global.max(0));
+                        let (cells, rows) = build_flow_cells(&all, hl_global);
+                        ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
+                        ui.set_panel_width(PANEL_WIDTH as i32);
+                        let content_h = 8 + rows * FLOW_ROW_H + 8;
+                        let h_logical =
+                            (8 + PANEL_VISIBLE_ROWS * FLOW_ROW_H + 8).max(bar_h as i32);
+                        ui.set_content_height(content_h);
+                        ui.set_panel_height(h_logical);
+                        last_panel_h.set((h_logical as f32 * scale).round() as u32);
+                        ui.set_expanded(true);
+                        UI_EXPANDED.store(true, Ordering::Relaxed);
+                        UI_HL.store(hl_global, Ordering::Relaxed);
+                        UI_TOTAL.store(all.len() as i32, Ordering::Relaxed);
+                        let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                        paint(&mut backend, w, last_panel_h.get(), last_x.get(), last_y.get(), true);
+                        expanded.set(true);
+                    } else {
+                        // 收起：恢复横条
+                        ui.set_expanded(false);
+                        UI_EXPANDED.store(false, Ordering::Relaxed);
+                        *panel.borrow_mut() = None;
+                        let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                        paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                        expanded.set(false);
+                    }
+                }
+                UiCmd::MoveHL(delta) => {
+                    let total = {
+                        let p = panel.borrow();
+                        let Some(snap) = p.as_ref() else { continue };
+                        snap.items.len() as i32
+                    };
+                    let new_hl = (panel_hl.get() + delta).clamp(0, total - 1);
+                    if new_hl == panel_hl.get() {
+                        continue;
+                    }
+                    panel_hl.set(new_hl);
+                    UI_HL.store(new_hl, Ordering::Relaxed);
+                    // 仅重画高亮（内容 = 快照，不变）
+                    let items = panel.borrow().as_ref().map(|s| s.items.clone());
+                    if let Some(items) = items {
+                        let (cells, _rows) = build_flow_cells(&items, new_hl);
+                        ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
+                        paint(
+                            &mut backend,
+                            (PANEL_WIDTH as f32 * scale).round() as u32,
+                            last_panel_h.get(),
+                            last_x.get(),
+                            last_y.get(),
+                            false,
+                        );
+                    }
+                }
+                UiCmd::SelectHL => {
+                    // 空格/回车：选中面板当前高亮项
+                    let idx = panel_hl.get().max(0) as usize;
+                    let Some(rime_id) = *current.borrow() else { continue };
+                    let Ok(engine) = engine() else { continue };
+                    let item = panel.borrow().as_ref().and_then(|snap| {
+                        let real = idx < snap.real_count;
+                        snap.items.get(idx).cloned().map(|t| (t, real))
+                    });
+                    let Some((text, is_real)) = item else { continue };
+                    {
+                        let _guard = OP_LOCK.lock().unwrap();
+                        let ok = if is_real {
+                            engine.select_candidate_global(rime_id, idx).unwrap_or(false)
+                        } else {
+                            // 同音词：清组合串 + 文本直接上屏
+                            let _ = engine.clear_composition(rime_id);
+                            if let Some(h) = SESSIONS.handle_of(rime_id) {
+                                PENDING_UI_COMMITS.lock().unwrap().insert(h, text.clone());
+                            }
+                            true
+                        };
+                        if ok && !is_real {
+                            // 同音词上屏后组合串已清，直接收起
+                            ui.set_expanded(false);
+                            expanded.set(false);
+                            UI_EXPANDED.store(false, Ordering::Relaxed);
+                            *panel.borrow_mut() = None;
+                            backend.set_mapped(false);
+                            *visible.borrow_mut() = false;
+                        }
+                    }
+                    if is_real {
+                        // 真实候选：可能仍在组句（如首词后继续），收面板恢复横条
+                        ui.set_expanded(false);
+                        expanded.set(false);
+                        UI_EXPANDED.store(false, Ordering::Relaxed);
+                        *panel.borrow_mut() = None;
+                        let snapshot = {
+                            let _guard = OP_LOCK.lock().unwrap();
+                            engine.get_context(rime_id)
+                        };
+                        if let Ok(snapshot) = snapshot {
+                            if snapshot.candidates.is_empty() {
+                                backend.set_mapped(false);
+                                *visible.borrow_mut() = false;
+                            } else {
+                                set_bar_cells(&ui, &snapshot);
+                                let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                                paint(
+                                    &mut backend,
+                                    w,
+                                    bar_h,
+                                    last_x.get(),
+                                    last_y.get(),
+                                    true,
+                                );
+                            }
+                        }
+                    }
+                }
+                UiCmd::SetExpanded(v) => {
+                    if v || !*visible.borrow() {
+                        continue;
+                    }
+                    // 键盘 ↑（面板第一行）触发的收起
+                    ui.set_expanded(false);
+                    expanded.set(false);
+                    UI_EXPANDED.store(false, Ordering::Relaxed);
+                    let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                    paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
                 }
             }
         }
@@ -999,20 +1455,24 @@ fn ui_thread_main(rx: Receiver<UiCmd>) {
         // 3. Slint 推进 + 渲染
         slint::platform::update_timers_and_animations();
         msw.draw_if_needed(|renderer: &SoftwareRenderer| {
-            // 首次 Sync 前缓冲尚未按内容宽度分配，跳过渲染
-            let w = {
+            // 首次 Sync 前缓冲尚未按内容尺寸分配，跳过渲染
+            let (w, h) = {
                 let buf = render_buf.borrow();
-                if buf.is_empty() {
+                let h = cur_h.get();
+                if buf.is_empty() || buf.len() as u32 % h != 0 {
                     return;
                 }
-                buf.len() as u32 / bar_h
+                (buf.len() as u32 / h, h)
             };
             {
                 let mut buf = render_buf.borrow_mut();
-                let _ = renderer.render(&mut buf, w as usize);
+                // 同 paint：捕获渲染 panic，保证 UI 线程存活
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    renderer.render(&mut buf, w as usize)
+                }));
             }
             let buf = render_buf.borrow();
-            backend.blit(&buf, w, BAR_HEIGHT);
+            backend.blit(&buf, w, h);
         });
 
         std::thread::sleep(Duration::from_millis(8));

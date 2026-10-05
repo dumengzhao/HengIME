@@ -7,6 +7,21 @@ set -e
 cd "$(dirname "$0")"
 
 export FCITX_ADDON_DIRS="$HOME/.local/lib/fcitx5:/usr/lib/x86_64-linux-gnu/fcitx5"
+export RUST_BACKTRACE=1
+
+# X 环境：从任意 shell 启动时自动补齐（GNOME Wayland 的 XWayland 授权文件
+# 每次开机随机后缀，必须实时探测）。缺失时 fcitx5 与自绘候选窗都无法连 X。
+if [ -z "$DISPLAY" ]; then
+    export DISPLAY=:0
+fi
+if [ -z "$XAUTHORITY" ]; then
+    AUTH_FILE=$(ls /run/user/$(id -u)/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+    if [ -n "$AUTH_FILE" ]; then
+        export XAUTHORITY="$AUTH_FILE"
+    elif [ -f "$HOME/.Xauthority" ]; then
+        export XAUTHORITY="$HOME/.Xauthority"
+    fi
+fi
 
 if ! pgrep -x fcitx5 > /dev/null; then
     fcitx5 -d 2>/tmp/fcitx5-heng.log

@@ -831,12 +831,66 @@ pub extern "C" fn heng_process_key_ex(
             return HENG_FALSE;
         };
         let _guard = crate::global::OP_LOCK.lock().unwrap();
+        // 0. 自绘候选窗键盘语义（微信同款）：
+        //    ↓ 未展开 → 打开面板；面板内 ↑↓ = 行间移动、←→ = 格间移动
+        //    （纯面板视觉高亮，不碰 librime）；↑ 在第一行 → 收起；
+        //    空格/回车 → 选中面板当前高亮项（真实候选翻页选中 / 同音词清串直上）
+        const XK_UP: i32 = 0xff52;
+        const XK_DOWN: i32 = 0xff54;
+        const XK_LEFT: i32 = 0xff51;
+        const XK_RIGHT: i32 = 0xff53;
+        const XK_RETURN: i32 = 0xff0b;
+        let mut ui_nav = false;
+        let expanded = crate::ui::UI_EXPANDED.load(Ordering::Relaxed);
+        if expanded {
+            let hl = crate::ui::UI_HL.load(Ordering::Relaxed);
+            match keysym {
+                XK_DOWN => {
+                    crate::ui::ui_move_hl(6);
+                    ui_nav = true;
+                }
+                XK_UP => {
+                    if hl >= 0 && hl < 6 {
+                        crate::ui::ui_set_expanded(false);
+                    } else {
+                        crate::ui::ui_move_hl(-6);
+                    }
+                    ui_nav = true;
+                }
+                XK_RIGHT => {
+                    crate::ui::ui_move_hl(1);
+                    ui_nav = true;
+                }
+                XK_LEFT => {
+                    crate::ui::ui_move_hl(-1);
+                    ui_nav = true;
+                }
+                0x20 | XK_RETURN => {
+                    crate::ui::ui_select_hl();
+                    ui_nav = true;
+                }
+                _ => {}
+            }
+        } else if keysym == XK_DOWN {
+            let has_menu = engine
+                .get_context(rime_id)
+                .map(|s| !s.candidates.is_empty())
+                .unwrap_or(false);
+            if has_menu {
+                crate::ui::ui_toggle();
+                ui_nav = true;
+            }
+        }
         // 1. 按键
-        let handled = match engine.process_key(rime_id, keysym, mask) {
-            Ok(h) => h,
-            Err(e) => {
-                set_err(e);
-                return HENG_FALSE;
+        let handled = if ui_nav {
+            true
+        } else {
+            match engine.process_key(rime_id, keysym, mask) {
+                Ok(h) => h,
+                Err(e) => {
+                    set_err(e);
+                    return HENG_FALSE;
+                }
             }
         };
         // 2. 取走待上屏文本（消费语义）

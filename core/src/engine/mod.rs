@@ -390,6 +390,93 @@ impl Engine {
         Ok(unsafe { select(id, index) == rime_ffi::TRUE })
     }
 
+    /// 遍历全部候选页收集所有候选词，完成后回到原页。
+    /// 自绘候选窗「展开更多」用。返回 (候选文本列表, 每页条数)。
+    pub fn get_all_candidates(
+        &self,
+        id: RimeSessionId,
+    ) -> Result<(Vec<String>, i32), EngineError> {
+        const XK_PAGE_DOWN: i32 = 0xff56;
+        const XK_PAGE_UP: i32 = 0xff55;
+        let first = self.get_context(id)?;
+        let page_size = first.page_size.max(first.candidates.len() as i32).max(1);
+        let mut all: Vec<String> = first
+            .candidates
+            .iter()
+            .filter(|c| !c.text.is_empty())
+            .map(|c| c.text.clone())
+            .collect();
+        // 翻页循环方案（如雾凇 Page_Down 绕回首页）会让 is_last_page 永不成立，
+        // 必须记录已访问页号，回头即停；总量封顶防异常方案
+        let mut visited: std::collections::HashSet<i32> =
+            std::collections::HashSet::from([first.page_no]);
+        let mut walked = 0i32;
+        loop {
+            let snap = self.get_context(id)?;
+            if snap.is_last_page || snap.candidates.is_empty() || visited.contains(&snap.page_no)
+            {
+                // 停在当前页；若已绕回非原页，先归位再统一走回
+                break;
+            }
+            visited.insert(snap.page_no);
+            if !self.process_key(id, XK_PAGE_DOWN, 0)? {
+                break;
+            }
+            walked += 1;
+            let after = self.get_context(id)?;
+            if after.candidates.is_empty() {
+                break;
+            }
+            if visited.contains(&after.page_no) {
+                visited.insert(after.page_no);
+                break; // 绕回已访问页：循环方案，停止
+            }
+            all.extend(
+                after
+                    .candidates
+                    .iter()
+                    .filter(|c| !c.text.is_empty())
+                    .map(|c| c.text.clone()),
+            );
+            if all.len() > 60 {
+                break;
+            }
+        }
+        for _ in 0..walked {
+            let _ = self.process_key(id, XK_PAGE_UP, 0)?;
+        }
+        Ok((all, page_size))
+    }
+
+    /// 按全局序号选候选（跨页）：翻到目标页后在页内选中。
+    pub fn select_candidate_global(
+        &self,
+        id: RimeSessionId,
+        index: usize,
+    ) -> Result<bool, EngineError> {
+        const XK_PAGE_DOWN: i32 = 0xff56;
+        const XK_PAGE_UP: i32 = 0xff55;
+        let snap = self.get_context(id)?;
+        let page_size = snap.page_size.max(snap.candidates.len() as i32).max(1);
+        let target = (index as i32) / page_size;
+        let mut walked = 0i32;
+        loop {
+            let snap = self.get_context(id)?;
+            if snap.page_no == target {
+                break;
+            }
+            let keysym = if target > snap.page_no { XK_PAGE_DOWN } else { XK_PAGE_UP };
+            if !self.process_key(id, keysym, 0)? {
+                break;
+            }
+            walked += 1;
+            if walked > 100 {
+                break;
+            }
+        }
+        self.select_candidate_on_current_page(id, ((index as i32) % page_size) as usize)
+    }
+
     /// 高亮当前页第 `index` 个候选（不提交；候选窗移动光标用）。
     pub fn highlight_candidate_on_current_page(
         &self,

@@ -305,10 +305,22 @@ fn cmd_uitest() -> Result<(), Box<dyn std::error::Error>> {
         snapshot.candidates.len(),
         snapshot.preedit
     );
+    for (i, c) in snapshot.candidates.iter().enumerate() {
+        println!("候选[{}] = {:?} (len={})", i, c.text, c.text.chars().count());
+    }
     heng_core::ui::ensure_started();
     heng_core::ui::ui_sync(rime_id, 200, 500);
-    println!("ui_sync 已调用，窗口保持 20 秒...");
-    std::thread::sleep(Duration::from_secs(20));
+    println!("ui_sync 已调用");
+    std::thread::sleep(Duration::from_secs(2));
+    heng_core::ui::ui_toggle();
+    println!("ui_toggle 已调用（展开面板）");
+    std::thread::sleep(Duration::from_secs(2));
+    heng_core::ui::ui_move_hl(6);
+    println!("ui_move_hl(6) 已调用（高亮移到第二行）");
+    std::thread::sleep(Duration::from_secs(2));
+    heng_core::ui::ui_select_hl();
+    println!("ui_select_hl 已调用（选中面板高亮项）");
+    std::thread::sleep(Duration::from_secs(5));
     println!("退出");
     Ok(())
 }
