@@ -202,6 +202,20 @@ impl Engine {
         &self.user_data_dir
     }
 
+    /// 重新部署（full_check）：设置中心写入 custom.yaml patch 后调用。
+    /// 阻塞至部署完成（毫秒级），期间 session 全部重建。
+    pub fn redeploy(&self) {
+        if let (Some(sm), Some(join)) = (
+            self.api().start_maintenance.as_ref(),
+            self.api().join_maintenance_thread.as_ref(),
+        ) {
+            unsafe {
+                sm(rime_ffi::TRUE);
+                join();
+            }
+        }
+    }
+
     pub fn create_session(&self) -> Result<Session<'_>, EngineError> {
         let create = self
             .api()

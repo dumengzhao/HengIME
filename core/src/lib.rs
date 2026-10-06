@@ -12,6 +12,7 @@ pub mod capi;
 pub mod engine;
 pub mod global;
 pub mod server;
+pub mod settings;
 pub mod ui;
 
 pub use engine::{

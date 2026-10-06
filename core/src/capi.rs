@@ -23,7 +23,7 @@ pub const HENG_TRUE: c_int = 1;
 pub const HENG_FALSE: c_int = 0;
 
 /// 当前 C ABI 版本（v6：传播策略 + app_options 统一 + 选项持久化）
-pub const HENG_ABI_VERSION: c_int = 8;
+pub const HENG_ABI_VERSION: c_int = 9;
 /// 仍兼容的最低调用方 ABI（v4 起有 config API；更早调用方未验证）
 pub const HENG_MIN_ABI_VERSION: c_int = 4;
 
@@ -293,7 +293,8 @@ pub extern "C" fn heng_describe() -> *const c_char {
                 "heng_get_input", "heng_get_caret_pos", "heng_set_caret_pos",
                 "heng_sync_user_data", "heng_get_state_label_abbreviated",
                 "heng_config_open_schema", "heng_config_get_double",
-                "heng_clear", "heng_free_string", "heng_last_error"
+                "heng_clear", "heng_free_string", "heng_last_error",
+                "heng_settings_show", "heng_settings_hide"
             ]
         });
         CString::new(json.to_string()).unwrap()
@@ -1087,6 +1088,28 @@ pub extern "C" fn heng_ui_sync_ex(
             return HENG_FALSE;
         }
         crate::ui::ui_sync_ex(rime_id, x, caret_bottom, caret_top);
+        HENG_TRUE
+    })
+}
+
+/// 打开设置窗口（v9；运行于 core 内部 UI 线程，窗口属于宿主进程）。
+/// page = 初始页索引 0-5（0=输入方案 1=候选窗样式 2=快捷键 3=标点 4=词库 5=关于）。
+#[no_mangle]
+pub extern "C" fn heng_settings_show(page: c_int) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        crate::ui::ui_settings_show(page);
+        HENG_TRUE
+    })
+}
+
+/// 关闭设置窗口（v9）。
+#[no_mangle]
+pub extern "C" fn heng_settings_hide() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        crate::ui::ui_settings_hide();
         HENG_TRUE
     })
 }

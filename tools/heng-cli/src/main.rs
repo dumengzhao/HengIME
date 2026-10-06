@@ -359,6 +359,33 @@ fn cmd_uitest(seq: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 设置窗口调试：打开设置窗口保持数秒供人工检查 / HENG_UI_DUMP 抓帧
+fn cmd_settings(page: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
+    let stay = page.is_some();
+    let page: i32 = page.and_then(|s| s.parse().ok()).unwrap_or(1); // 默认页 = 样式
+    let engine = heng_core::global::engine()?;
+    let session = engine.create_session()?;
+    let rime_id = session.into_raw();
+    let _ = engine.simulate_key_sequence(rime_id, "ni");
+    heng_core::ui::ensure_started();
+    heng_core::ui::ui_settings_show(page);
+    if stay {
+        // 指定页码：保持打开 60 秒供真机交互测试（点击导航/拨杆/配色切换）
+        println!("设置窗口已打开（页{page}），保持 60 秒…");
+        std::thread::sleep(Duration::from_secs(60));
+    } else {
+        // 无参数：翻页遍历演示，每 2 秒切下一页（供抓帧断言）
+        for p in 0..6 {
+            heng_core::ui::ui_settings_show(p);
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    println!("退出");
+    Ok(())
+}
+
 /// 验证 librime 翻页（PageDown/PageUp）是否保持选中位置不变
 /// 单行锚定验证：连按 → 跨页移动高亮，横条列表不应滚动
 fn cmd_bartest() -> Result<(), Box<dyn std::error::Error>> {
@@ -441,7 +468,7 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
         };
         let rc = heng_hello(5, &mut hello);
         check!("heng_hello 填充成功", rc == 1);
-        check!("hello.abi_version == 8", hello.abi_version == 8);
+        check!("hello.abi_version == 9", hello.abi_version == 9);
         check!("hello.data_size > 0", hello.data_size > 0);
         check!("min_abi_version <= abi_version", hello.min_abi_version <= hello.abi_version);
 
@@ -758,8 +785,8 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // serve / abitest / uitest 走 global 层（自带引擎单例），不能用 make_engine 重复初始化 librime
-    if args[0] == "serve" || args[0] == "abitest" || args[0] == "uitest" || args[0] == "pagetest" || args[0] == "bartest" {
+    // serve / abitest / uitest / settings 走 global 层（自带引擎单例），不能用 make_engine 重复初始化 librime
+    if args[0] == "serve" || args[0] == "abitest" || args[0] == "uitest" || args[0] == "pagetest" || args[0] == "bartest" || args[0] == "settings" {
         let result: Result<(), Box<dyn std::error::Error>> = match args[0].as_str() {
             "serve" => {
                 let port: u16 = args
@@ -771,6 +798,7 @@ fn main() -> ExitCode {
             "uitest" => cmd_uitest(args.get(1)),
             "pagetest" => cmd_pagetest(),
             "bartest" => cmd_bartest(),
+            "settings" => cmd_settings(args.get(1)),
             _ => cmd_abitest(),
         };
         return match result {

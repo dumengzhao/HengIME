@@ -219,6 +219,13 @@ HENG_API int heng_ui_sync_ex(heng_session_t session, int x, int caret_bottom,
 /* 隐藏候选窗（焦点离开时调用）。 */
 HENG_API int heng_ui_hide(void);
 
+/* 打开设置窗口（v9；page = 初始页索引 0-5：0=输入方案 1=候选窗样式 2=快捷键
+ * 3=标点符号 4=词库 5=关于）。窗口运行于 core 内部 UI 线程（宿主进程内）。 */
+HENG_API int heng_settings_show(int page);
+
+/* 关闭设置窗口（v9）。 */
+HENG_API int heng_settings_hide(void);
+
 /* 取走 UI 点击产生的待上屏文本（消费语义）。返回 HENG_TRUE 且 *out 非 NULL
  * 表示有文本（heng_free_string 释放）；否则 *out 为 NULL。 */
 HENG_API int heng_take_ui_commit(heng_session_t session, char** out);
