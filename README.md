@@ -17,16 +17,14 @@
 所有跨端一致的能力收敛到 core（一份代码），外壳只保留与宿主系统交互所必需的最薄一层；候选窗也收进 core，由内置自绘 UI 统一呈现。
 
 ```
-设置界面（Web，计划中）              写一次 ×1
-        ↕ 本地 HTTP
 core（Rust，heng-core）             写一次 ×1
 ├─ librime 封装与 FFI
-├─ 版本化 C ABI（include/heng.h）
-├─ 内置自绘候选窗（Slint 软渲染）
-├─ 本地 HTTP 服务（127.0.0.1:9371）
-└─ 配置中心对接（config-center/shared/heng.yaml 为配置真源）
-        ↕ 同进程 C ABI（macOS / Linux / Android / 鸿蒙）
-        ↕ 命名管道 IPC（Windows：TSF 注入宿主进程，引擎与候选窗都在服务进程）
+├─ 版本化 C ABI（include/heng.h，abi_version=9）
+├─ 内置自绘候选窗 + 六页设置窗口（Slint）
+├─ 配置中心对接（config-center/shared/heng.yaml 为配置真源）
+└─ 本地 HTTP（诊断与外部工具用，127.0.0.1:9371，非输入链路）
+        ↕ 同进程 C ABI：五端外壳进程内直接加载 heng_core 动态库
+        （Windows 的 WeaselServer.exe 同样进程内加载 heng_core.dll，无 IPC）
 五端外壳                            每端一次 ×5
 （只做：按键转发 + 会话管理 + 输入位置上报）
         ↕
@@ -48,9 +46,10 @@ librime + 词库（雾凇拼音）           现成 ×0
 | 模块 | 职责 |
 |---|---|
 | `engine/` | librime FFI 绑定与会话封装（组词、候选、上屏、开关状态） |
-| `capi.rs` | 版本化 C ABI（`heng.h`，abi_version=7），各端外壳唯一的对接面 |
-| `ui.rs` | 内置自绘候选窗：Slint 软渲染产出预乘 ARGB 帧，平台后端只负责搬帧与指针事件（Linux=X11，Windows=Win32 分层窗口，macOS=NSPanel 待实现） |
-| `server.rs` | 本地 HTTP 服务（设置界面与诊断用，127.0.0.1:9371） |
+| `capi.rs` | 版本化 C ABI（`heng.h`，abi_version=9），各端外壳唯一的对接面 |
+| `ui.rs` | 内置自绘候选窗：Slint 软渲染产出预乘 ARGB 帧，平台后端只负责搬帧与指针事件（Linux=X11，Windows=Win32 分层窗口，macOS=NSPanel 待实现）；另含**六页设置窗口**（无边框 Slint 窗口，托盘菜单 `heng_settings_show` 唤起） |
+| `settings.rs` | 设置数据层：weasel.yaml / schema 读写、config 迭代器封装、用户词库文件列表 |
+| `server.rs` | 本地 HTTP 服务（诊断与 heng-cli serve 用，127.0.0.1:9371，不在输入链路上） |
 | `global.rs` | 全局引擎与会话表 |
 
 ## 目录结构
@@ -62,7 +61,7 @@ HengIME/
 │   └── ROUTE-P.md             路线 P 裁决与规划
 │
 ├── core/                    统一能力模块（cdylib: heng_core.dll/.so/.dylib）
-│   ├── src/                   engine · capi · ui · server · global
+│   ├── src/                   engine · capi · ui · settings · server · global
 │   └── include/heng.h         C ABI 头文件（供各端外壳 include）
 │
 ├── shells/                  五端外壳
@@ -74,7 +73,7 @@ HengIME/
 │
 ├── config-center/           配置中心（shared/heng.yaml 为配置真源）
 ├── patches/                 weasel 源码改动的固化补丁与配置
-├── tools/heng-cli/          命令行校验器（version/cand/commit/serve/abitest/uitest）
+├── tools/heng-cli/          命令行校验器（version/cand/commit/serve/abitest/uitest/settings）
 ├── third_party/             预编译依赖与参考源码（gitignored，见 third_party/README.md）
 ├── settings-web/            计划中：设置界面（Web，五端共用）
 └── skins/                   计划中：皮肤
@@ -91,7 +90,7 @@ HengIME/
 | M-P1 | core 内置自绘候选窗（Linux + Windows），替代各端自带候选 UI | 已完成 |
 | M7 | Linux 外壳：fcitx5 addon + heng_blue 主题 | 主体完成 |
 | M6 | macOS 外壳：Squirrel 改造（ABI v7 已就绪） | 进行中 |
-| M2 | 设置界面与配置中心完善 | 未开始 |
+| M2 | 设置界面与配置中心完善（core 内置六页设置窗已上线并接入托盘；Web 端未开始） | 进行中 |
 | M3 | 词库与数据同步 | 未开始 |
 | M4 | 鸿蒙外壳 | 未开始 |
 | M8 | AI 预测（可插拔模块） | 未开始 |
