@@ -83,6 +83,8 @@ private:
     Instance *instance_;
     std::unordered_map<uint64_t, heng_session_t> sessions_;
     std::unordered_map<heng_session_t, InputContext *> ics_;
+    // Shift 独按 → 中英切换：Shift 按下标记，期间无其它按键则释放时切换
+    std::unordered_map<uint64_t, bool> shift_pending_;
     int last_x_ = 200;
     int last_y_ = 500;
 };
@@ -143,6 +145,7 @@ void HengEngine::endSession(InputContext *ic) {
         ics_.erase(it->second);
         sessions_.erase(it);
     }
+    shift_pending_.erase(key);
 }
 
 void HengEngine::activate(const InputMethodEntry &, InputContextEvent &event) {
@@ -173,9 +176,35 @@ void HengEngine::reset(const InputMethodEntry &, InputContextEvent &event) {
 void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
     auto *ic = keyEvent.inputContext();
     auto key = keyEvent.key();
+    auto ickey = icKey(ic->uuid());
 
-    // 修饰键单独按/释放不进引擎
-    if (key.isModifier() || keyEvent.isRelease()) {
+    // Shift 独按释放 → 中英切换（ascii_mode 经 heng_set_option，含传播策略）
+    if (key.isModifier()) {
+        if (key.sym() == FcitxKey_Shift_L || key.sym() == FcitxKey_Shift_R) {
+            if (keyEvent.isRelease()) {
+                if (shift_pending_[ickey]) {
+                    shift_pending_[ickey] = false;
+                    heng_session_t session = sessionFor(ic);
+                    if (session != 0) {
+                        int cur = heng_get_option(session, "ascii_mode");
+                        int next = cur == HENG_TRUE ? HENG_FALSE : HENG_TRUE;
+                        heng_set_option(session, "ascii_mode", next);
+                        // 切换瞬态提示（core 自绘：大字「中/A」约 1 秒）
+                        heng_ui_mode_hint(next);
+                        ic->updateUserInterface(UserInterfaceComponent::InputPanel);
+                    }
+                    keyEvent.filterAndAccept();
+                }
+            } else {
+                shift_pending_[ickey] = true;
+            }
+        }
+        return; // 其余修饰键不进引擎
+    }
+
+    // 非修饰键打断 Shift 独按序列
+    shift_pending_[ickey] = false;
+    if (keyEvent.isRelease()) {
         return;
     }
 

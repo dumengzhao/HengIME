@@ -219,6 +219,10 @@ HENG_API int heng_ui_sync_ex(heng_session_t session, int x, int caret_bottom,
 /* 隐藏候选窗（焦点离开时调用）。 */
 HENG_API int heng_ui_hide(void);
 
+/* 中英切换瞬态提示（Shift 切换后由外壳调用）：候选窗显示大字「中」/「A」
+ * 约 1 秒后自动隐藏。ascii 非 0 = 英文。 */
+HENG_API int heng_ui_mode_hint(int ascii);
+
 /* 打开设置窗口（v9；page = 初始页索引 0-5：0=输入方案 1=候选窗样式 2=快捷键
  * 3=标点符号 4=词库 5=关于）。窗口运行于 core 内部 UI 线程（宿主进程内）。 */
 HENG_API int heng_settings_show(int page);

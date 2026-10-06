@@ -289,7 +289,7 @@ pub extern "C" fn heng_describe() -> *const c_char {
                 "heng_config_get_string", "heng_config_get_int", "heng_config_get_bool",
                 "heng_config_begin_map", "heng_config_next", "heng_config_end",
                 "heng_set_propagation_policy", "heng_get_propagation_policy",
-                "heng_ui_sync", "heng_ui_hide", "heng_take_ui_commit",
+                "heng_ui_sync", "heng_ui_hide", "heng_take_ui_commit", "heng_ui_mode_hint",
                 "heng_get_input", "heng_get_caret_pos", "heng_set_caret_pos",
                 "heng_sync_user_data", "heng_get_state_label_abbreviated",
                 "heng_config_open_schema", "heng_config_get_double",
@@ -1119,6 +1119,18 @@ pub extern "C" fn heng_settings_hide() -> c_int {
 pub extern "C" fn heng_ui_hide() -> c_int {
     ffi_guard!(HENG_TRUE, {
         crate::ui::ui_hide();
+        HENG_TRUE
+    })
+}
+
+/// 中英切换瞬态提示（Shift 切换后调用）：显示大字「中」/「A」约 1 秒。
+#[no_mangle]
+pub extern "C" fn heng_ui_mode_hint(ascii: c_int) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        crate::ui::ui_mode_hint(ascii != 0);
         HENG_TRUE
     })
 }

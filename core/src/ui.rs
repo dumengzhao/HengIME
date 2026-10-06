@@ -67,6 +67,8 @@ enum UiCmd {
     MoveHL(i32),
     /// 面板内按行移动高亮（+1 下一行 / -1 上一行；-1 在首行 → 收起）
     RowMove(i32),
+    /// 中英切换瞬态提示（内部命令）
+    ModeHint { ascii: bool },
     /// 键盘空格/回车：选中面板当前高亮项（内部命令）
     SelectHL,
     /// 收起横条：选中/取消选中 ☰ 图标（true=选中，词高亮隐藏）
@@ -152,6 +154,11 @@ pub fn ui_select_hl() {
     send_cmd(UiCmd::SelectHL);
 }
 
+/// 中英切换瞬态提示（capi：Shift 切换后调用）
+pub fn ui_mode_hint(ascii: bool) {
+    send_cmd(UiCmd::ModeHint { ascii });
+}
+
 /// 收起横条：☰ 图标选中/取消（capi 拦截：→ 到词尾 / ← 返回）
 pub fn ui_bar_icon(on: bool) {
     send_cmd(UiCmd::BarIcon(on));
@@ -230,6 +237,8 @@ slint::slint! {
         in property <bool> icon-sel;  // ☰ 被键盘选中（单行 → 到词尾跳过 ▾）
         in property <bool> menu-open; // ☰ 菜单打开（覆盖层显示 符号/常用语/设置）
         in property <int> hl-y;       // 高亮格 y（逻辑 px），变化时滚动跟随
+        in property <bool> ascii;     // true = 英文模式（切换提示用）
+        in property <int> hint;       // 中英切换瞬态提示：0=无 1=中 2=英
         width: root.panel-width * 1px;
         height: root.expanded ? root.panel-height * 1px : 40px;
         background: transparent;
@@ -402,6 +411,22 @@ slint::slint! {
                 flick.content-y = Math.min(0px, 6px - (hl-y-obs * 1px));
             }
         }
+        }
+        // 中英切换瞬态提示：居中大字，z 序最上
+        if root.hint > 0: Rectangle {
+            x: (parent.width - 120px) / 2;
+            y: 4px;
+            width: 120px;
+            height: 32px;
+            border-radius: 8px;
+            background: root.hint == 1 ? #2164f1 : #9aa3ad;
+            Text {
+                text: root.hint == 1 ? "中" : "A";
+                color: #ffffff;
+                font-size: 20px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
         callback candidate_clicked(int);
         callback toggle_expand();
@@ -1765,6 +1790,10 @@ fn set_bar_cells(
     let (cells, _rows) = build_flow_cells(&texts, panel_hl.get());
     ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
     ui.set_panel_width(PANEL_WIDTH as i32);
+    // 中英角标：状态来自 get_status（ContextSnapshot 已不含 ascii 位）
+    if let Ok(st) = engine.get_status(rime_id) {
+        ui.set_ascii(st.is_ascii_mode);
+    }
 }
 
 
@@ -2107,6 +2136,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // 光标所在文本行顶边（外壳经 heng_ui_sync_ex 传入；旧路径按底边-40 估算）
     let last_caret_top = Cell::new(0);
     let last_preedit: RefCell<String> = RefCell::new(String::new());
+    let hint_mode = Cell::new(0i32);
     // 渲染并上屏（Sync / 展开 / 收起共用）。w,h 物理像素；map=true 时确保已映射
     // （XWayland：未映射窗口的 PutImage 会被静默丢弃，必须先 map 再画）
     let paint = |backend: &mut Box<dyn UiBackend>,
@@ -2481,6 +2511,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 UiCmd::Hide => {
                     backend.set_mapped(0, false);
                     *visible.borrow_mut() = false;
+                    hint_mode.set(0);
+                    ui.set_hint(0);
                 }
                 UiCmd::SettingsShow(page) => {
                     let Ok(engine) = engine() else { continue };
@@ -2912,6 +2944,17 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             }
                         }
                     }
+                }
+                UiCmd::ModeHint { ascii } => {
+                    // 中英切换瞬态提示：横条形态居中大字，900ms 后自动隐藏
+                    hint_mode.set(if ascii { 2 } else { 1 });
+                    ui.set_hint(if ascii { 2 } else { 1 });
+                    let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                    paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(900));
+                        crate::ui::ui_hide();
+                    });
                 }
                 UiCmd::SetExpanded(v) => {
                     if v || !*visible.borrow() {
