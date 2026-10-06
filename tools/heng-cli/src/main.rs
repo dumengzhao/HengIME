@@ -355,6 +355,24 @@ fn cmd_uitest(seq: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
     snap("12-scrolldown"); // 高亮超出可视区：Flickable 应跟随，药丸仍在视区内
     heng_core::ui::ui_select_hl();
     std::thread::sleep(Duration::from_secs(2));
+    // —— 中英切换瞬态气泡（独立形态：124x48 逻辑 px 深色胶囊，光标行顶上方）——
+    // 到期自动恢复/藏窗后依次演示中/英两个气泡帧
+    heng_core::ui::ui_mode_hint(false);
+    std::thread::sleep(Duration::from_millis(300));
+    let dst = tmp.join("heng-13-hint-zh.ppm");
+    match std::fs::copy(&dump, &dst) {
+        Ok(n) => println!("  帧 13-hint-zh: {n} 字节（气泡态）"),
+        Err(e) => println!("  帧 13-hint-zh: 拷贝失败 {e}"),
+    }
+    std::thread::sleep(Duration::from_millis(1200)); // 等到期恢复
+    heng_core::ui::ui_mode_hint(true);
+    std::thread::sleep(Duration::from_millis(300));
+    let dst = tmp.join("heng-14-hint-en.ppm");
+    match std::fs::copy(&dump, &dst) {
+        Ok(n) => println!("  帧 14-hint-en: {n} 字节（气泡态）"),
+        Err(e) => println!("  帧 14-hint-en: 拷贝失败 {e}"),
+    }
+    std::thread::sleep(Duration::from_millis(1200));
     println!("退出");
     Ok(())
 }

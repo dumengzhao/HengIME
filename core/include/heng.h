@@ -223,6 +223,12 @@ HENG_API int heng_ui_hide(void);
  * 约 1 秒后自动隐藏。ascii 非 0 = 英文。 */
 HENG_API int heng_ui_mode_hint(int ascii);
 
+/* 中英切换瞬态提示（v9 追加，带锚点坐标）：气泡显示在光标行顶上方。
+ * x = 光标底边左端，caret_bottom = 光标底边 y，caret_top = 光标行顶边 y
+ * （与 heng_ui_sync_ex 同坐标系、同语义）。x < 0 时回退到内部记忆锚点。 */
+HENG_API int heng_ui_mode_hint_ex(int ascii, int x, int caret_bottom,
+                                  int caret_top);
+
 /* 打开设置窗口（v9；page = 初始页索引 0-5：0=输入方案 1=候选窗样式 2=快捷键
  * 3=标点符号 4=词库 5=关于）。窗口运行于 core 内部 UI 线程（宿主进程内）。 */
 HENG_API int heng_settings_show(int page);

@@ -1,5 +1,5 @@
 diff --git a/RimeWithWeasel/RimeWithWeasel.cpp b/RimeWithWeasel/RimeWithWeasel.cpp
-index 709cd7e..71d2c72 100644
+index 709cd7e..cdf48b6 100644
 --- a/RimeWithWeasel/RimeWithWeasel.cpp
 +++ b/RimeWithWeasel/RimeWithWeasel.cpp
 @@ -5,14 +5,23 @@
@@ -62,7 +62,7 @@ index 709cd7e..71d2c72 100644
  }
  
  RimeWithWeaselHandler::~RimeWithWeaselHandler() {
-@@ -64,260 +73,759 @@ RimeWithWeaselHandler::~RimeWithWeaselHandler() {
+@@ -64,260 +73,782 @@ RimeWithWeaselHandler::~RimeWithWeaselHandler() {
  }
  
  bool add_session = false;
@@ -994,6 +994,17 @@ index 709cd7e..71d2c72 100644
 +  if (m_disabled)
 +    return FALSE;
 +  heng_session_t session_id = to_session_id(ipc_id);
++  // Shift 独按检测（按下→释放无其它按键，与 Linux addon 同款逻辑）：
++  // ascii_composer 在 Shift release 时切换中英，heng_process_key_ex 返回后
++  // 状态已是新值，此处直接查询并弹瞬态气泡（core 自绘窗同进程，可直调）
++  static KeyEvent prev_key{};
++  bool shift_alone = (keyEvent.keycode == ibus::Keycode::Shift_L ||
++                      keyEvent.keycode == ibus::Keycode::Shift_R) &&
++                     (keyEvent.mask & ibus::Modifier::RELEASE_MASK) &&
++                     (prev_key.keycode == ibus::Keycode::Shift_L ||
++                      prev_key.keycode == ibus::Keycode::Shift_R) &&
++                     !(prev_key.mask & ibus::Modifier::RELEASE_MASK);
++  prev_key = keyEvent;
 +  // v6 热路径合并接口（process_key 内含自绘候选窗键盘语义拦截：↓ 展开、
 +  // 面板内导航等）。out_commit/out_ctx 传 NULL，commit/context 仍走 _Respond
 +  // 统一取，行为与旧 heng_process_key 完全一致。
@@ -1015,6 +1026,18 @@ index 709cd7e..71d2c72 100644
 +  }
 +  _Respond(ipc_id, eat);
 +  _UpdateUI(ipc_id);
++  // 气泡必须在 _UpdateUI 之后发：Shift 切换清空组合串，_UpdateUI 走 Hide，
++  // 若先 hint 后 Hide，气泡刚入队就被藏窗命令秒杀（UI 线程按序消费命令）。
++  // 坐标用 m_last_caret_*（UpdateInputPos 持续上报，切换瞬间也准确）
++  if (shift_alone) {
++    HengStatus st;
++    if (heng_get_status(session_id, &st)) {
++      heng_ui_mode_hint_ex(st.is_ascii_mode ? HENG_TRUE : HENG_FALSE,
++                           (int)m_last_caret_x, (int)m_last_caret_y,
++                           (int)m_last_caret_top);
++      heng_free_status(&st);
++    }
++  }
 +  m_active_session = ipc_id;
 +  return (BOOL)handled;
 +}
@@ -1050,7 +1073,7 @@ index 709cd7e..71d2c72 100644
  
  bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
      size_t index,
-@@ -325,8 +833,8 @@ bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
+@@ -325,8 +856,8 @@ bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
      EatLine eat) {
    DLOG(INFO) << "highlight candidate on current page, ipc_id = " << ipc_id
               << ", index = " << index;
@@ -1061,7 +1084,7 @@ index 709cd7e..71d2c72 100644
    _Respond(ipc_id, eat);
    _UpdateUI(ipc_id);
    return res;
-@@ -337,7 +845,7 @@ bool RimeWithWeaselHandler::ChangePage(bool backward,
+@@ -337,7 +868,7 @@ bool RimeWithWeaselHandler::ChangePage(bool backward,
                                         EatLine eat) {
    DLOG(INFO) << "change page, ipc_id = " << ipc_id
               << (backward ? "backward" : "foreward");
@@ -1070,7 +1093,7 @@ index 709cd7e..71d2c72 100644
    _Respond(ipc_id, eat);
    _UpdateUI(ipc_id);
    return res;
-@@ -356,6 +864,8 @@ void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
+@@ -356,6 +887,8 @@ void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
    DLOG(INFO) << "Focus out: ipc_id = " << ipc_id;
    if (m_ui)
      m_ui->Hide();
@@ -1079,7 +1102,7 @@ index 709cd7e..71d2c72 100644
    m_active_session = 0;
  }
  
-@@ -364,6 +874,11 @@ void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
+@@ -364,6 +897,11 @@ void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
    DLOG(INFO) << "Update input position: (" << rc.left << ", " << rc.top
               << "), ipc_id = " << ipc_id
               << ", m_active_session = " << m_active_session;
@@ -1091,7 +1114,7 @@ index 709cd7e..71d2c72 100644
    if (m_ui)
      m_ui->UpdateInputPosition(rc);
    if (m_disabled)
-@@ -380,31 +895,6 @@ std::string RimeWithWeaselHandler::m_message_label;
+@@ -380,31 +918,6 @@ std::string RimeWithWeaselHandler::m_message_label;
  std::string RimeWithWeaselHandler::m_option_name;
  std::mutex RimeWithWeaselHandler::m_notifier_mutex;
  
@@ -1123,7 +1146,7 @@ index 709cd7e..71d2c72 100644
  void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
                                              LPWSTR buffer) {
    std::string app_name;
-@@ -426,50 +916,55 @@ void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
+@@ -426,50 +939,55 @@ void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
      }
    }
    SessionStatus& session_status = get_session_status(ipc_id);
@@ -1202,7 +1225,7 @@ index 709cd7e..71d2c72 100644
  }
  
  void RimeWithWeaselHandler::StartMaintenance() {
-@@ -493,12 +988,13 @@ void RimeWithWeaselHandler::SetOption(WeaselSessionId ipc_id,
+@@ -493,12 +1011,13 @@ void RimeWithWeaselHandler::SetOption(WeaselSessionId ipc_id,
    if (!ipc_id) {
      if (m_global_ascii_mode && opt == "ascii_mode") {
        for (auto& pair : m_session_status_map)
@@ -1219,7 +1242,7 @@ index 709cd7e..71d2c72 100644
    }
    // refresh UI (and tray icon) so the option change takes effect immediately,
    // e.g. when toggling ascii_mode from the TSF language bar
-@@ -526,26 +1022,41 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+@@ -526,26 +1045,41 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
    Status& weasel_status = m_ui->status();
    Context weasel_context;
  
@@ -1267,7 +1290,7 @@ index 709cd7e..71d2c72 100644
    {
      std::lock_guard<std::mutex> lock(m_notifier_mutex);
      m_message_type.clear();
-@@ -555,158 +1066,19 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+@@ -555,158 +1089,19 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
    }
  }
  
@@ -1431,7 +1454,7 @@ index 709cd7e..71d2c72 100644
        show_icon = true;
      } else
        tips = u8tow(m_message_label);
-@@ -730,13 +1102,6 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
+@@ -730,13 +1125,6 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
      return m_ui->IsCountingDown();
    }
  }
@@ -1445,7 +1468,7 @@ index 709cd7e..71d2c72 100644
  
  bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
    std::wstring body;
-@@ -745,770 +1110,328 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
+@@ -745,770 +1133,328 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
    actions.reserve(8);
  
    SessionStatus& session_status = get_session_status(ipc_id);
@@ -2860,10 +2883,10 @@ index ab20d8d..f3ebef1 100644
  };
 diff --git a/include/heng.h b/include/heng.h
 new file mode 100644
-index 0000000..f59fc88
+index 0000000..b22a6cb
 --- /dev/null
 +++ b/include/heng.h
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,339 @@
 +/*
 + * heng.h —— HengIME 统一能力模块 C ABI（M0）
 + *
@@ -3084,6 +3107,16 @@ index 0000000..f59fc88
 +
 +/* 隐藏候选窗（焦点离开时调用）。 */
 +HENG_API int heng_ui_hide(void);
++
++/* 中英切换瞬态提示（Shift 切换后由外壳调用）：候选窗显示大字「中」/「A」
++ * 约 1 秒后自动隐藏。ascii 非 0 = 英文。 */
++HENG_API int heng_ui_mode_hint(int ascii);
++
++/* 中英切换瞬态提示（v9 追加，带锚点坐标）：气泡显示在光标行顶上方。
++ * x = 光标底边左端，caret_bottom = 光标底边 y，caret_top = 光标行顶边 y
++ * （与 heng_ui_sync_ex 同坐标系、同语义）。x < 0 时回退到内部记忆锚点。 */
++HENG_API int heng_ui_mode_hint_ex(int ascii, int x, int caret_bottom,
++                                  int caret_top);
 +
 +/* 打开设置窗口（v9；page = 初始页索引 0-5：0=输入方案 1=候选窗样式 2=快捷键
 + * 3=标点符号 4=词库 5=关于）。窗口运行于 core 内部 UI 线程（宿主进程内）。 */

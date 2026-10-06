@@ -1135,6 +1135,27 @@ pub extern "C" fn heng_ui_mode_hint(ascii: c_int) -> c_int {
     })
 }
 
+/// 中英切换瞬态提示（v9 追加，带锚点坐标）：气泡显示在光标行顶上方。
+/// x < 0 时回退到内部记忆锚点（与 heng_ui_sync_ex 同坐标系）。
+#[no_mangle]
+pub extern "C" fn heng_ui_mode_hint_ex(
+    ascii: c_int,
+    x: c_int,
+    caret_bottom: c_int,
+    caret_top: c_int,
+) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        crate::ui::ui_mode_hint_ex(
+            ascii != 0,
+            if x < 0 { None } else { Some((x, caret_bottom, caret_top)) },
+        );
+        HENG_TRUE
+    })
+}
+
 /// 取走 UI 点击产生的待上屏文本（消费语义）。返回 HENG_TRUE 且 *out 非 NULL
 /// 表示有文本（heng_free_string 释放）；否则 *out 为 NULL。
 #[no_mangle]

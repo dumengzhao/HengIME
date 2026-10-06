@@ -67,8 +67,12 @@ enum UiCmd {
     MoveHL(i32),
     /// 面板内按行移动高亮（+1 下一行 / -1 上一行；-1 在首行 → 收起）
     RowMove(i32),
-    /// 中英切换瞬态提示（内部命令）
-    ModeHint { ascii: bool },
+    /// 中英切换瞬态提示（内部命令）；anchor = Some((x, bottom, top)) 时用
+    /// 外壳传入的光标坐标（server 端持续上报、始终最新），None 用内部记忆值
+    ModeHint {
+        ascii: bool,
+        anchor: Option<(i32, i32, i32)>,
+    },
     /// 键盘空格/回车：选中面板当前高亮项（内部命令）
     SelectHL,
     /// 收起横条：选中/取消选中 ☰ 图标（true=选中，词高亮隐藏）
@@ -154,9 +158,14 @@ pub fn ui_select_hl() {
     send_cmd(UiCmd::SelectHL);
 }
 
-/// 中英切换瞬态提示（capi：Shift 切换后调用）
+/// 中英切换瞬态提示（capi：Shift 切换后调用）。无坐标版本回退内部记忆锚点。
 pub fn ui_mode_hint(ascii: bool) {
-    send_cmd(UiCmd::ModeHint { ascii });
+    send_cmd(UiCmd::ModeHint { ascii, anchor: None });
+}
+
+/// 中英切换瞬态提示（capi ex）：气泡锚在光标行顶上方。
+pub fn ui_mode_hint_ex(ascii: bool, anchor: Option<(i32, i32, i32)>) {
+    send_cmd(UiCmd::ModeHint { ascii, anchor });
 }
 
 /// 收起横条：☰ 图标选中/取消（capi 拦截：→ 到词尾 / ← 返回）
@@ -239,19 +248,22 @@ slint::slint! {
         in property <int> hl-y;       // 高亮格 y（逻辑 px），变化时滚动跟随
         in property <bool> ascii;     // true = 英文模式（切换提示用）
         in property <int> hint;       // 中英切换瞬态提示：0=无 1=中 2=英
-        width: root.panel-width * 1px;
-        height: root.expanded ? root.panel-height * 1px : 40px;
+        in property <bool> hint-only; // hint 独占气泡形态：窗口临时缩成胶囊，候选内容全部隐藏
+        width: root.hint-only ? 124px : root.panel-width * 1px;
+        height: root.hint-only ? 48px : (root.expanded ? root.panel-height * 1px : 40px);
         background: transparent;
-        // 外层圆角容器：窗口本身透明，8px 圆角靠这层裁出（两态共用）
+        // 外层圆角容器：窗口本身透明，圆角靠这层裁出（三形态共用：候选/展开/气泡）
+        // 气泡态 = 深色半透明胶囊（白字大字，明暗背景均可读），与候选浅底区分开
         round := Rectangle {
         x: 0;
         y: 0;
         width: parent.width;
         height: parent.height;
-        background: #f7f8fa;
-        border-radius: 8px;
+        background: root.hint-only ? #404048E6 : #f7f8fa;
+        border-radius: root.hint-only ? 14px : 8px;
         // 候选词流式格子（两态共用；收起时 40px 窗口只露出第一行）
         flick := Flickable {
+            visible: !root.hint-only;
             x: 0;
             y: 0;
             width: parent.width;
@@ -302,7 +314,7 @@ slint::slint! {
         property <length> thumb-h: Math.min(track-h,
             Math.max(30px, track-h * flick.height
                 / Math.max(1px, root.content-height * 1px)));
-        if root.expanded: Rectangle {
+        if root.expanded && !root.hint-only: Rectangle {
             x: parent.width - 5px;
             y: 6px;
             width: 3px;
@@ -323,7 +335,7 @@ slint::slint! {
         // → 到词尾跳过 ▾ 直达 ☰，☰ 上再按 → 展开面板、按空格/回车打开菜单
         // 图标用 Path/色块矢量绘制而非字符 "▾"/"☰"：Windows 默认字体缺
         // 这两个码位的字形，软件渲染器不做逐字形回退，会渲染成空白
-        if !root.expanded: Rectangle {
+        if !root.expanded && !root.hint-only: Rectangle {
             x: parent.width - 58px;
             y: 6px;
             width: 26px;
@@ -345,7 +357,7 @@ slint::slint! {
                 clicked => { root.toggle_expand(); }
             }
         }
-        if !root.expanded: Rectangle {
+        if !root.expanded && !root.hint-only: Rectangle {
             x: parent.width - 30px;
             y: 6px;
             width: 26px;
@@ -367,7 +379,7 @@ slint::slint! {
             }
         }
         // ☰ 菜单覆盖层（占位：符号/常用语/设置，功能后续迭代）
-        if root.menu-open: Rectangle {
+        if root.menu-open && !root.hint-only: Rectangle {
             x: 0;
             y: 0;
             width: parent.width;
@@ -412,18 +424,18 @@ slint::slint! {
             }
         }
         }
-        // 中英切换瞬态提示：居中大字，z 序最上
+        // 中英切换瞬态提示：气泡态铺满全窗（大字居中），兼容旧横条内嵌形态
         if root.hint > 0: Rectangle {
-            x: (parent.width - 120px) / 2;
-            y: 4px;
-            width: 120px;
-            height: 32px;
-            border-radius: 8px;
-            background: root.hint == 1 ? #2164f1 : #9aa3ad;
+            x: root.hint-only ? 0 : (parent.width - 120px) / 2;
+            y: root.hint-only ? 0 : 4px;
+            width: root.hint-only ? parent.width : 120px;
+            height: root.hint-only ? parent.height : 32px;
+            border-radius: root.hint-only ? 14px : 8px;
+            background: root.hint-only ? transparent : (root.hint == 1 ? #2164f1 : #9aa3ad);
             Text {
                 text: root.hint == 1 ? "中" : "A";
                 color: #ffffff;
-                font-size: 20px;
+                font-size: root.hint-only ? 26px : 20px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -2137,6 +2149,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     let last_caret_top = Cell::new(0);
     let last_preedit: RefCell<String> = RefCell::new(String::new());
     let hint_mode = Cell::new(0i32);
+    // 气泡态自动恢复期限：到期后按输入上下文决定回横条还是藏窗（不误杀候选）
+    let hint_deadline: Cell<Option<std::time::Instant>> = Cell::new(None);
     // 渲染并上屏（Sync / 展开 / 收起共用）。w,h 物理像素；map=true 时确保已映射
     // （XWayland：未映射窗口的 PutImage 会被静默丢弃，必须先 map 再画）
     let paint = |backend: &mut Box<dyn UiBackend>,
@@ -2454,6 +2468,13 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
                 UiCmd::Sync { rime_id, x, y, top } => {
+                    // 气泡显示期间来了输入 → 立即退出气泡态，走正常候选渲染
+                    if hint_mode.get() != 0 {
+                        hint_mode.set(0);
+                        ui.set_hint(0);
+                        ui.set_hint_only(false);
+                        hint_deadline.set(None);
+                    }
                     *current.borrow_mut() = Some(rime_id);
                     let Ok(engine) = engine() else { continue };
                     let snapshot = {
@@ -2513,6 +2534,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     *visible.borrow_mut() = false;
                     hint_mode.set(0);
                     ui.set_hint(0);
+                    ui.set_hint_only(false);
+                    hint_deadline.set(None);
                 }
                 UiCmd::SettingsShow(page) => {
                     let Ok(engine) = engine() else { continue };
@@ -2945,16 +2968,28 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         }
                     }
                 }
-                UiCmd::ModeHint { ascii } => {
-                    // 中英切换瞬态提示：横条形态居中大字，900ms 后自动隐藏
-                    hint_mode.set(if ascii { 2 } else { 1 });
-                    ui.set_hint(if ascii { 2 } else { 1 });
-                    let w = (PANEL_WIDTH as f32 * scale).round() as u32;
-                    paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
-                    std::thread::spawn(|| {
-                        std::thread::sleep(std::time::Duration::from_millis(900));
-                        crate::ui::ui_hide();
-                    });
+                UiCmd::ModeHint { ascii, anchor } => {
+                    // 中英切换瞬态气泡：窗口独占切到胶囊形态（124x48 物理像素由
+                    // hint-only 驱动），锚在光标行顶上方；到期恢复，不动候选窗状态
+                    let hv = if ascii { 2 } else { 1 };
+                    hint_mode.set(hv);
+                    ui.set_hint(hv);
+                    ui.set_hint_only(true);
+                    if let Some((x, _bottom, top)) = anchor {
+                        // 外壳传入的坐标始终最新（UpdateInputPos 持续上报），
+                        // 顺带刷新记忆值，到期恢复/后续 fallback 也在正确位置
+                        last_x.set(x);
+                        last_y.set(_bottom);
+                        last_caret_top.set(top.clamp(_bottom - 400, _bottom));
+                    }
+                    let bw = (124.0 * scale).round() as u32;
+                    let bh = (48.0 * scale).round() as u32;
+                    let (sw, _sh) = screen_size();
+                    let hx = (last_x.get() + 16).max(8).min(sw - bw as i32 - 8);
+                    let hy = (last_caret_top.get() - bh as i32 - 8).max(8);
+                    paint(&mut backend, bw, bh, hx, hy, true);
+                    hint_deadline
+                        .set(Some(std::time::Instant::now() + Duration::from_millis(900)));
                 }
                 UiCmd::SetExpanded(v) => {
                     if v || !*visible.borrow() {
@@ -3039,6 +3074,41 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         });
         // 3b. 设置窗口渲染（dirty 时才实际绘制 + blit）
         draw_settings(&mut backend, &sbuf, &sui, &msw2, settings_visible.get());
+
+        // 3c. 气泡到期恢复：有输入上下文 → 重建横条；否则藏窗（不误杀打字中的候选）
+        if let Some(deadline) = hint_deadline.get() {
+            if std::time::Instant::now() >= deadline {
+                hint_deadline.set(None);
+                hint_mode.set(0);
+                ui.set_hint(0);
+                ui.set_hint_only(false);
+                let mut restore = false;
+                if let (Some(rime_id), Ok(engine)) = (*current.borrow(), engine()) {
+                    let _guard = OP_LOCK.lock().unwrap();
+                    if let Ok(snapshot) = engine.get_context(rime_id) {
+                        if !snapshot.candidates.is_empty() {
+                            restore = true;
+                            set_bar_cells(
+                                &ui,
+                                &engine,
+                                rime_id,
+                                &snapshot,
+                                &bar_base,
+                                &bar_items,
+                                &panel_hl,
+                            );
+                        }
+                    }
+                }
+                if restore {
+                    let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                    paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                } else {
+                    backend.set_mapped(0, false);
+                    *visible.borrow_mut() = false;
+                }
+            }
+        }
 
         std::thread::sleep(Duration::from_millis(8));
     }
