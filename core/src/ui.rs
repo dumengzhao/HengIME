@@ -2984,9 +2984,17 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     }
                     let bw = (124.0 * scale).round() as u32;
                     let bh = (48.0 * scale).round() as u32;
-                    let (sw, _sh) = screen_size();
-                    let hx = (last_x.get() + 16).max(8).min(sw - bw as i32 - 8);
-                    let hy = (last_caret_top.get() - bh as i32 - 8).max(8);
+                    let (sw, sh) = screen_size();
+                    // 从未获得过光标位置（last_caret_top 为 0 = 外壳未上报过）
+                    // → 兜底屏幕右下角（通知风格），否则锚光标行顶上方
+                    let (hx, hy) = if last_caret_top.get() <= 0 {
+                        (sw - bw as i32 - 24, (sh - bh as i32 - 96).max(8))
+                    } else {
+                        (
+                            (last_x.get() + 16).max(8).min(sw - bw as i32 - 8),
+                            (last_caret_top.get() - bh as i32 - 8).max(8),
+                        )
+                    };
                     paint(&mut backend, bw, bh, hx, hy, true);
                     hint_deadline
                         .set(Some(std::time::Instant::now() + Duration::from_millis(900)));

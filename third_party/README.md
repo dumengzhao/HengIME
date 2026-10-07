@@ -117,3 +117,32 @@ git add -u && git add <新文件>
 git diff --cached --binary > ../../../patches/weasel-0.17.4-heng-m1.patch
 git reset -q
 ```
+
+## lib64/heng.lib（core 导入库，ABI 变更后必须重导）
+
+`lib64/heng.lib` 是 `heng_core.dll` 的导入库，供 WeaselServer.exe 链接。**core 每新增
+C API（`heng_*` 导出）后它不会自动更新**——链接期报 `LNK2001: 无法解析的外部符号
+__imp_heng_*` 即此原因。重建步骤：
+
+```bash
+# 1. 重编 core 并部署
+cargo build --release -p heng-core
+cp target/release/heng_core.dll third_party/src/weasel/output/
+
+# 2. 从新 dll 导出表生成 heng.def（pefile 解析，脚本见下）
+python -c "
+import pefile
+pe = pefile.PE(r'third_party/src/weasel/output/heng_core.dll')
+names = [e.name.decode() for e in pe.DIRECTORY_ENTRY_EXPORT.symbols if e.name]
+with open(r'third_party/src/weasel/lib64/heng.def', 'w') as f:
+    f.write('LIBRARY heng_core\nEXPORTS\n')
+    for n in names: f.write('    ' + n + '\n')
+"
+
+# 3. VS 环境下重建导入库
+cd third_party/src/weasel/lib64
+lib /def:heng.def /machine:X64 /out:heng.lib
+```
+
+`patches/heng.def` 已入库留底（全部导出清单，82+ 条）；`lib64/heng.lib`/`heng.exp`
+为本地产物不入库。
