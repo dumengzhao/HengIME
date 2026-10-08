@@ -43,6 +43,13 @@ for lp in zh-Hans zh-Hant en; do
 done
 echo "strings ok"
 
+# dev icon (gray, distinct from prod blue; rm before cp to bypass file proxy)
+DEV_ICNS="${HENG_DEV_ICNS:-$(dirname "$0")/icons/HengDev.icns}"
+if [ -f "$DEV_ICNS" ]; then
+  rm -f "$STAGING/Contents/Resources/Rime.icns"
+  cp "$DEV_ICNS" "$STAGING/Contents/Resources/Rime.icns"
+fi
+
 codesign --force --deep -s - "$STAGING" 2>/dev/null
 echo "staging ok"
 
