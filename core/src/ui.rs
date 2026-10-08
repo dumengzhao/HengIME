@@ -249,8 +249,8 @@ slint::slint! {
         in property <bool> ascii;     // true = 英文模式（切换提示用）
         in property <int> hint;       // 中英切换瞬态提示：0=无 1=中 2=英
         in property <bool> hint-only; // hint 独占气泡形态：窗口临时缩成胶囊，候选内容全部隐藏
-        width: root.hint-only ? 124px : root.panel-width * 1px;
-        height: root.hint-only ? 48px : (root.expanded ? root.panel-height * 1px : 40px);
+        width: root.hint-only ? 36px : root.panel-width * 1px;
+        height: root.hint-only ? 36px : (root.expanded ? root.panel-height * 1px : 40px);
         background: transparent;
         // 外层圆角容器：窗口本身透明，圆角靠这层裁出（三形态共用：候选/展开/气泡）
         // 气泡态 = 深色半透明胶囊（白字大字，明暗背景均可读），与候选浅底区分开
@@ -260,7 +260,7 @@ slint::slint! {
         width: parent.width;
         height: parent.height;
         background: root.hint-only ? #404048E6 : #f7f8fa;
-        border-radius: root.hint-only ? 14px : 8px;
+        border-radius: root.hint-only ? 10px : 8px;
         // 候选词流式格子（两态共用；收起时 40px 窗口只露出第一行）
         flick := Flickable {
             visible: !root.hint-only;
@@ -430,12 +430,12 @@ slint::slint! {
             y: root.hint-only ? 0 : 4px;
             width: root.hint-only ? parent.width : 120px;
             height: root.hint-only ? parent.height : 32px;
-            border-radius: root.hint-only ? 14px : 8px;
+            border-radius: root.hint-only ? 10px : 8px;
             background: root.hint-only ? transparent : (root.hint == 1 ? #2164f1 : #9aa3ad);
             Text {
-                text: root.hint == 1 ? "中" : "A";
+                text: root.hint == 1 ? "中" : "英";
                 color: #ffffff;
-                font-size: root.hint-only ? 26px : 20px;
+                font-size: root.hint-only ? 24px : 20px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -2982,8 +2982,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         last_y.set(_bottom);
                         last_caret_top.set(top.clamp(_bottom - 400, _bottom));
                     }
-                    let bw = (124.0 * scale).round() as u32;
-                    let bh = (48.0 * scale).round() as u32;
+                    let bw = (36.0 * scale).round() as u32;
+                    let bh = (36.0 * scale).round() as u32;
                     let (sw, sh) = screen_size();
                     // 从未获得过光标位置（last_caret_top 为 0 = 外壳未上报过）
                     // → 兜底屏幕右下角（通知风格），否则锚光标行顶上方
