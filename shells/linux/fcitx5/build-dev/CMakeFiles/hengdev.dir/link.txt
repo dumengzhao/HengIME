@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -O3 -DNDEBUG -shared  -o libhengdev.so CMakeFiles/hengdev.dir/src/hengengine.cpp.o  -Wl,-rpath,/home/dmz/projects/HengIME/target/release: /usr/lib/x86_64-linux-gnu/libFcitx5Core.so.5.1.7 /usr/lib/x86_64-linux-gnu/libFcitx5Config.so.5.1.7 /usr/lib/x86_64-linux-gnu/libFcitx5Utils.so.5.1.7 /home/dmz/projects/HengIME/target/release/libheng_core.so 

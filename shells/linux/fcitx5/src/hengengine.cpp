@@ -86,7 +86,8 @@ private:
     // Shift 独按 → 中英切换：Shift 按下标记，期间无其它按键则释放时切换
     std::unordered_map<uint64_t, bool> shift_pending_;
     int last_x_ = 200;
-    int last_y_ = 500;
+    int last_y_ = 500;      // 光标底边 y（屏幕坐标）
+    int last_caret_top_ = 460; // 光标行顶边 y
 };
 
 HengEngine::HengEngine(Instance *instance) : instance_(instance) {
@@ -189,8 +190,15 @@ void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
                         int cur = heng_get_option(session, "ascii_mode");
                         int next = cur == HENG_TRUE ? HENG_FALSE : HENG_TRUE;
                         heng_set_option(session, "ascii_mode", next);
-                        // 切换瞬态提示（core 自绘：大字「中/A」约 1 秒）
-                        heng_ui_mode_hint(next);
+                        // 切换瞬态提示：气泡锚定光标行顶上方（ex 版）
+                        auto rect = ic->cursorRect();
+                        if (rect.left() != 0 || rect.top() != 0 || rect.right() != 0
+                            || rect.bottom() != 0) {
+                            last_x_ = rect.left();
+                            last_y_ = rect.bottom();
+                            last_caret_top_ = rect.top();
+                        }
+                        heng_ui_mode_hint_ex(next, last_x_, last_y_, last_caret_top_);
                         ic->updateUserInterface(UserInterfaceComponent::InputPanel);
                     }
                     keyEvent.filterAndAccept();
@@ -265,9 +273,11 @@ void HengEngine::updateUI(InputContext *ic, heng_session_t session) {
     auto rect = ic->cursorRect();
     if (rect.left() != 0 || rect.top() != 0 || rect.right() != 0 || rect.bottom() != 0) {
         last_x_ = rect.left();
-        last_y_ = rect.bottom() + 8;
+        last_y_ = rect.bottom();
+        last_caret_top_ = rect.top();
     }
-    heng_ui_sync(session, last_x_, last_y_);
+    // v8 ex 版：传光标行顶边，展开面板向上翻转不遮输入行
+    heng_ui_sync_ex(session, last_x_, last_y_, last_caret_top_);
 }
 
 } // namespace fcitx

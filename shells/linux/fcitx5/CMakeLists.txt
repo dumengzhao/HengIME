@@ -13,16 +13,28 @@ add_library(heng_core SHARED IMPORTED)
 set_target_properties(heng_core PROPERTIES
     IMPORTED_LOCATION "${REPO_ROOT}/target/release/libheng_core.so")
 
-add_library(heng MODULE src/hengengine.cpp)
-target_link_libraries(heng Fcitx5::Core Fcitx5::Config Fcitx5::Utils heng_core)
-target_include_directories(heng PRIVATE "${REPO_ROOT}/core/include")
-set_target_properties(heng PROPERTIES PREFIX "lib" SUFFIX ".so"
+# HENG_DEV=ON：dev 并行身份（hengdev），与已安装的正式版 heng 并存互不影响
+# —— 对齐 Windows HENG_DEV 五锚点：addon id / IM 名称 / 用户数据 / 库名 全换 dev 组
+option(HENG_DEV "构建 dev 并行身份（hengdev）" OFF)
+if(HENG_DEV)
+    set(HENG_TARGET hengdev)
+    set(HENG_USER_DIR_DEF "${REPO_ROOT}/runtime-dev/rime-user") # 用户数据隔离
+else()
+    set(HENG_TARGET heng)
+    set(HENG_USER_DIR_DEF "${REPO_ROOT}/runtime/rime-user")
+endif()
+
+add_library(${HENG_TARGET} MODULE src/hengengine.cpp)
+target_link_libraries(${HENG_TARGET} Fcitx5::Core Fcitx5::Config Fcitx5::Utils heng_core)
+target_include_directories(${HENG_TARGET} PRIVATE "${REPO_ROOT}/core/include")
+set_target_properties(${HENG_TARGET} PROPERTIES PREFIX "lib" SUFFIX ".so"
     INSTALL_RPATH "${REPO_ROOT}/target/release")
 
-# 试用版：运行时目录硬编码到仓库 runtime（生产版改读配置）
-target_compile_definitions(heng PRIVATE
+# 运行时目录：shared 共享（只读预设），user 按 dev/正式 隔离
+target_compile_definitions(${HENG_TARGET} PRIVATE
     HENG_SHARED_DIR="${REPO_ROOT}/runtime/rime-shared"
-    HENG_USER_DIR="${REPO_ROOT}/runtime/rime-user")
+    HENG_USER_DIR="${HENG_USER_DIR_DEF}"
+    $<$<BOOL:${HENG_DEV}>:HENG_DEV>)
 
 # 安装路径：fcitx5 插件库 + 元数据（需要 sudo 装到系统目录）
 include(GNUInstallDirs)
@@ -32,6 +44,6 @@ set(FCITX5_ADDON_LIBDIR "/usr/lib/x86_64-linux-gnu/fcitx5"
 set(FCITX5_ADDON_CONFDIR "/usr/share/fcitx5/addons" CACHE PATH "fcitx5 addon conf dir")
 set(FCITX5_IM_CONFDIR "/usr/share/fcitx5/inputmethod" CACHE PATH "fcitx5 inputmethod conf dir")
 
-install(TARGETS heng LIBRARY DESTINATION "${FCITX5_ADDON_LIBDIR}")
+install(TARGETS ${HENG_TARGET} LIBRARY DESTINATION "${FCITX5_ADDON_LIBDIR}")
 install(FILES conf/addon.conf RENAME heng.conf DESTINATION "${FCITX5_ADDON_CONFDIR}")
 install(FILES conf/im.conf RENAME heng.conf DESTINATION "${FCITX5_IM_CONFDIR}")

@@ -1,0 +1,9 @@
+/home/dmz/projects/HengIME/shells/linux/fcitx5/build-dev/CMakeFiles/generate-desktop-file.dir
+/home/dmz/projects/HengIME/shells/linux/fcitx5/build-dev/CMakeFiles/translation-file.dir
+/home/dmz/projects/HengIME/shells/linux/fcitx5/build-dev/CMakeFiles/hengdev.dir
+/home/dmz/projects/HengIME/shells/linux/fcitx5/build-dev/CMakeFiles/edit_cache.dir
+/home/dmz/projects/HengIME/shells/linux/fcitx5/build-dev/CMakeFiles/rebuild_cache.dir
+/home/dmz/projects/HengIME/shells/linux/fcitx5/build-dev/CMakeFiles/list_install_components.dir
+/home/dmz/projects/HengIME/shells/linux/fcitx5/build-dev/CMakeFiles/install.dir
+/home/dmz/projects/HengIME/shells/linux/fcitx5/build-dev/CMakeFiles/install/local.dir
+/home/dmz/projects/HengIME/shells/linux/fcitx5/build-dev/CMakeFiles/install/strip.dir
