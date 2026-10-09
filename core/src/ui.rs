@@ -1843,18 +1843,33 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
     let mut num = 0i32;
     for (i, t) in all.iter().enumerate() {
         let disp = t.clone();
-        // 宽度估算：emoji ≈ 20px（Windows 彩色 emoji 实渲染比 14px 字号宽，
-        // 估 14px 会被 Text elide 剪成省略号）；零宽字符（变体选择符/ZWJ）算 0；
-        // CJK 字 ≈ 14px（字号 14），ASCII ≈ 8px；序号 11px 字号 ≈ 7px/位
-        let text_w: i32 = disp
-            .chars()
-            .map(|c| {
+        // 宽度估算原则：宁可估宽（格子稍宽/换行），绝不估窄（Text elide 剪成省略号）。
+        // ① 0x1F000+ / 0x2600-0x27BF / 0x2B00-0x2BFF：原生 emoji 区 → 20px
+        //   （Windows 彩色 emoji 实渲染比 14px 字号宽）
+        // ② 后跟 FE0F 的符号强制 emoji 呈现（⬆️U+2B06、⏰U+23F0、⌚U+231A、
+        //   ▶️U+25B6 等散布各符号区）→ 20px（lookahead 兜住所有 emoji 呈现）
+        // ③ 0x2000 以上全部 → 14px：CJK/全角之外，还覆盖文本样式符号
+        //   （①▲●→℃「…」U+2000-0x2BFF 实渲染 ≈ 字号宽，按 ASCII 估 8px 会 elide）
+        // ④ 变体选择符 0xFE00-0xFE0F / ZWJ 0x200D → 0；ASCII → 8px
+        let chs: Vec<char> = disp.chars().collect();
+        let text_w: i32 = chs
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
                 let u = c as u32;
-                if u == 0xFE0F || u == 0x200D {
+                if (0xFE00..=0xFE0F).contains(&u) || u == 0x200D {
                     0
-                } else if u >= 0x1F000 || (0x2600..=0x27BF).contains(&u) {
+                } else if u >= 0x1F000
+                    || (0x2600..=0x27BF).contains(&u)
+                    || (0x2B00..=0x2BFF).contains(&u)
+                {
                     20
-                } else if u > 0x2E80 {
+                } else if chs
+                    .get(i + 1)
+                    .is_some_and(|&n| (0xFE00..=0xFE0F).contains(&(n as u32)) || n as u32 == 0x200D)
+                {
+                    20
+                } else if u >= 0x2000 {
                     14
                 } else {
                     8
