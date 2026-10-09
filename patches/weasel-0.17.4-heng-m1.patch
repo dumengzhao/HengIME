@@ -2500,6 +2500,128 @@ index 709cd7e..dcc9825 100644
 +  // 用户要求：候选窗 preedit 不显示软光标（U+2038），恒为关
 +  heng_set_option(session_id, "soft_cursor", 0);
  }
+diff --git a/RimeWithWeasel/RimeWithWeasel.vcxproj b/RimeWithWeasel/RimeWithWeasel.vcxproj
+index ac5b0bf..b7acb7e 100644
+--- a/RimeWithWeasel/RimeWithWeasel.vcxproj
++++ b/RimeWithWeasel/RimeWithWeasel.vcxproj
+@@ -114,19 +114,19 @@
+   </ImportGroup>
+   <PropertyGroup Label="UserMacros" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+diff --git a/RimeWithWeasel/WeaselUtility.cpp b/RimeWithWeasel/WeaselUtility.cpp
+index 9a07343..d09124f 100644
+--- a/RimeWithWeasel/WeaselUtility.cpp
++++ b/RimeWithWeasel/WeaselUtility.cpp
+@@ -4,6 +4,14 @@
+ #include <WeaselUtility.h>
+ 
+ fs::path WeaselUserDataPath() {
++#ifdef HENG_DEV
++  // dev 版用户目录与正式版隔离：exe 同级 runtime-user\（heng_create 自动创建）。
++  // 正式版走注册表 HKCU\Software\Rime\Weasel\RimeUserDir / %AppData%\Rime；
++  // dev 版绝不能共用，否则两边词库/用户配置互相污染。
++  WCHAR _path[MAX_PATH] = {0};
++  GetModuleFileNameW(NULL, _path, _countof(_path));
++  return fs::path(_path).remove_filename().append(L"runtime-user");
++#else
+   WCHAR _path[MAX_PATH] = {0};
+   const WCHAR KEY[] = L"Software\\Rime\\Weasel";
+   HKEY hKey;
+@@ -22,6 +30,7 @@ fs::path WeaselUserDataPath() {
+   // default location
+   ExpandEnvironmentStringsW(L"%AppData%\\Rime", _path, _countof(_path));
+   return fs::path(_path);
++#endif
+ }
+ 
+ fs::path WeaselSharedDataPath() {
+diff --git a/WeaselDeployer/WeaselDeployer.vcxproj b/WeaselDeployer/WeaselDeployer.vcxproj
+index 88fbaa2..aa9a42f 100644
+--- a/WeaselDeployer/WeaselDeployer.vcxproj
++++ b/WeaselDeployer/WeaselDeployer.vcxproj
+@@ -70,22 +70,22 @@
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+     <LinkIncremental>true</LinkIncremental>
+     <OutDir>$(SolutionDir)output\Win32\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+     <LinkIncremental>true</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+     <LinkIncremental>false</LinkIncremental>
+     <OutDir>$(SolutionDir)output\Win32\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+     <LinkIncremental>false</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+     <ClCompile>
+@@ -103,7 +103,7 @@
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <AdditionalDependencies>rime.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+-      <OutputFile>$(SolutionDir)output\Win32\$(ProjectName)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <LargeAddressAware>true</LargeAddressAware>
+     </Link>
+     <Manifest>
+@@ -126,7 +126,7 @@
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib64;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <AdditionalDependencies>rime.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+-      <OutputFile>$(SolutionDir)output\$(ProjectName)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+     </Link>
+     <Manifest>
+       <EnableDpiAwareness>PerMonitorHighDPIAware</EnableDpiAwareness>
+@@ -152,7 +152,7 @@
+       <OptimizeReferences>true</OptimizeReferences>
+       <AdditionalDependencies>rime.lib;%(AdditionalDependencies)</AdditionalDependencies>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+-      <OutputFile>$(SolutionDir)output\Win32\$(ProjectName)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <LargeAddressAware>true</LargeAddressAware>
+     </Link>
+     <Manifest>
+@@ -179,7 +179,7 @@
+       <OptimizeReferences>true</OptimizeReferences>
+       <AdditionalDependencies>rime.lib;%(AdditionalDependencies)</AdditionalDependencies>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib64;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+-      <OutputFile>$(SolutionDir)output\$(ProjectName)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+     </Link>
+     <Manifest>
+       <EnableDpiAwareness>PerMonitorHighDPIAware</EnableDpiAwareness>
 diff --git a/WeaselIPC/ContextUpdater.cpp b/WeaselIPC/ContextUpdater.cpp
 index 8d8c2f0..1f7b664 100644
 --- a/WeaselIPC/ContextUpdater.cpp
@@ -2522,15 +2644,221 @@ index 8d8c2f0..1f7b664 100644
        return;
      }
    }
+diff --git a/WeaselIPC/WeaselIPC.vcxproj b/WeaselIPC/WeaselIPC.vcxproj
+index 3a9d891..2ff2d03 100644
+--- a/WeaselIPC/WeaselIPC.vcxproj
++++ b/WeaselIPC/WeaselIPC.vcxproj
+@@ -114,35 +114,35 @@
+   </ImportGroup>
+   <PropertyGroup Label="UserMacros" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+diff --git a/WeaselIPCServer/WeaselIPCServer.vcxproj b/WeaselIPCServer/WeaselIPCServer.vcxproj
+index 539e6d0..1455c28 100644
+--- a/WeaselIPCServer/WeaselIPCServer.vcxproj
++++ b/WeaselIPCServer/WeaselIPCServer.vcxproj
+@@ -114,19 +114,19 @@
+   </ImportGroup>
+   <PropertyGroup Label="UserMacros" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+diff --git a/WeaselIPCServer/WeaselServerImpl.cpp b/WeaselIPCServer/WeaselServerImpl.cpp
+index 0c27644..73057de 100644
+--- a/WeaselIPCServer/WeaselServerImpl.cpp
++++ b/WeaselIPCServer/WeaselServerImpl.cpp
+@@ -153,7 +153,13 @@ DWORD ServerImpl::OnCommand(WEASEL_IPC_COMMAND uMsg,
+ }
+ 
+ HWND ServerImpl::Start() {
++  // 单实例互斥锁：与 IPC 管道名无关的第五个并行身份锚点。
++  // dev 版（HENG_DEV）必须用不同锁名，否则 dev 与正式版 server 抢同一把锁，
++  // 后启动的一方静默退出（Start() 返回 0 → Run() 返回 -1）。
+   std::wstring instanceName = L"(WEASEL)Furandōru-Sukāretto-";
++#ifdef HENG_DEV
++  instanceName += L"HengDev-";
++#endif
+   instanceName += getUsername();
+   HANDLE hMutexOneInstance = ::CreateMutex(NULL, FALSE, instanceName.c_str());
+   bool areYouOK = (::GetLastError() == ERROR_ALREADY_EXISTS ||
 diff --git a/WeaselServer/WeaselServer.rc b/WeaselServer/WeaselServer.rc
-index 53fcadd45ddf3bd25a067c053c65aefe67d366fe..50d04f936e0571ebac359c5e535ccd2be1e65175 100644
+index 53fcadd45ddf3bd25a067c053c65aefe67d366fe..58de8b04aaf11381073a1c5ab9335e01f0bef47d 100644
 GIT binary patch
-delta 38
-ucmbQRiE+Xv#tomCgl!ng88R927>XED8HyS77%~{_CO1kh-@Jx7B@_Vcp9|Fh
+delta 291
+zcmbQRiE+|a#*IuLn1pQ@${8{l@)(L3QW=UF^cXT2>?Su#F5kR{xkkKRpFy8Nfx&~p
+zmBEj}ogtpV1;`3xkounjR9ps<DT+wCQT8v4Jwt)P7RWCsm>S1p@UD#4ASs^XKcAlh
+zLoP!iLo$OuLonE!RG>xaKvO`v^?=qU1Np^38J-Zk?0ww}yLtZeGH?Oy1lh{xm+X|y
+zAMa6gw`FRaM)+^Pg+croWpNSF-%=U;Y|7sUvjuU2l`8`cN@D;yDGh81ieo1$OZUs`
+mf@NV=<})ZUfUHpl>c|0Fp9)knmm9>(1F8d>wRyL6s4W0(j7ORP
 
-delta 38
-ucmbQRiE+Xv#tomCgq0W)8PXUk7>XED8HyS77%~`?CO1kh-@Jx7B@_VX2Mdq@
+delta 54
+zcmV-60LlN7wE>W_0RsR2u<!yCA^>3kW&n5qasXuja{w*?XaFLUp;@W3tOI%%lk6Lc
+MlaL=8vrZjEJrYF{>i_@%
 
+diff --git a/WeaselServer/WeaselServer.vcxproj b/WeaselServer/WeaselServer.vcxproj
+index 8b6b571..0c962ee 100644
+--- a/WeaselServer/WeaselServer.vcxproj
++++ b/WeaselServer/WeaselServer.vcxproj
+@@ -112,7 +112,7 @@
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+     <LinkIncremental>true</LinkIncremental>
+     <OutDir>$(SolutionDir)output\Win32</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+     <LinkIncremental>true</LinkIncremental>
+@@ -120,18 +120,18 @@
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+     <LinkIncremental>true</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
+     <LinkIncremental>true</LinkIncremental>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+     <OutDir>$(SolutionDir)output\Win32\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+     <OutDir>$(SolutionDir)output\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+     <Midl>
+@@ -170,7 +170,7 @@
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+       <TargetMachine>MachineX86</TargetMachine>
+-      <OutputFile>$(SolutionDir)\output\Win32\$(ProjectName).exe</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <LargeAddressAware>true</LargeAddressAware>
+     </Link>
+     <PostBuildEvent>
+@@ -216,7 +216,7 @@
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+-      <OutputFile>$(SolutionDir)\output\$(ProjectName).exe</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+     </Link>
+     <PostBuildEvent>
+       <Command>
+@@ -260,7 +260,7 @@
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+       <TargetMachine>MachineX64</TargetMachine>
+-      <OutputFile>$(SolutionDir)\output\$(ProjectName).exe</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+     </Link>
+     <Manifest>
+       <EnableDpiAwareness>PerMonitorHighDPIAware</EnableDpiAwareness>
+@@ -301,7 +301,7 @@
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+-      <OutputFile>$(SolutionDir)\output\$(ProjectName).exe</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+     </Link>
+   </ItemDefinitionGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+@@ -334,7 +334,7 @@
+     </ResourceCompile>
+     <Link>
+       <AdditionalDependencies>imm32.lib;usp10.lib;rime.lib;%(AdditionalDependencies)</AdditionalDependencies>
+-      <OutputFile>$(SolutionDir)\output\Win32\$(ProjectName).exe</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <SubSystem>Windows</SubSystem>
+       <TargetMachine>MachineX86</TargetMachine>
+@@ -380,7 +380,7 @@
+     </ResourceCompile>
+     <Link>
+       <AdditionalDependencies>imm32.lib;usp10.lib;rime.lib;%(AdditionalDependencies)</AdditionalDependencies>
+-      <OutputFile>$(SolutionDir)\output\$(ProjectName).exe</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <SubSystem>Windows</SubSystem>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+@@ -425,7 +425,7 @@
+     </ResourceCompile>
+     <Link>
+       <AdditionalDependencies>imm32.lib;usp10.lib;rime.lib;%(AdditionalDependencies)</AdditionalDependencies>
+-      <OutputFile>$(SolutionDir)\output\$(ProjectName).exe</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib64;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+@@ -468,7 +468,7 @@
+     </ResourceCompile>
+     <Link>
+       <AdditionalDependencies>imm32.lib;usp10.lib;rime.lib;%(AdditionalDependencies)</AdditionalDependencies>
+-      <OutputFile>$(SolutionDir)\output\$(ProjectName).exe</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;$(SolutionDir)\librime\build\lib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>false</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
 diff --git a/WeaselServer/WeaselServerApp.cpp b/WeaselServer/WeaselServerApp.cpp
 index 6696b98..c3bf61b 100644
 --- a/WeaselServer/WeaselServerApp.cpp
@@ -2585,6 +2913,43 @@ index 3eaff9b..2426262 100644
    BOOL bRet =
        CSystemTray::Create(hModule, NULL, WM_WEASEL_TRAY_NOTIFY,
                            get_weasel_ime_name().c_str(), icon, IDR_MENU_POPUP);
+diff --git a/WeaselSetup/WeaselSetup.vcxproj b/WeaselSetup/WeaselSetup.vcxproj
+index f84dbee..20301b8 100644
+--- a/WeaselSetup/WeaselSetup.vcxproj
++++ b/WeaselSetup/WeaselSetup.vcxproj
+@@ -45,12 +45,12 @@
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+     <LinkIncremental>false</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+     <LinkIncremental>true</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+     <ClCompile>
+@@ -67,7 +67,7 @@
+     <Link>
+       <SubSystem>Windows</SubSystem>
+       <AdditionalDependencies>Kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+-      <OutputFile>$(SolutionDir)output\$(ProjectName)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <UACExecutionLevel>AsInvoker</UACExecutionLevel>
+       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
+     </Link>
+@@ -109,7 +109,7 @@
+       <SubSystem>Windows</SubSystem>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <AdditionalDependencies>Kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+-      <OutputFile>$(SolutionDir)output\$(ProjectName)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <UACExecutionLevel>AsInvoker</UACExecutionLevel>
+       <LinkTimeCodeGeneration>
+       </LinkTimeCodeGeneration>
 diff --git a/WeaselTSF/CandidateList.cpp b/WeaselTSF/CandidateList.cpp
 index a22a525..02be483 100644
 --- a/WeaselTSF/CandidateList.cpp
@@ -2606,6 +2971,60 @@ index a22a525..02be483 100644
    return S_OK;
  }
  
+diff --git a/WeaselTSF/Globals.cpp b/WeaselTSF/Globals.cpp
+index c5d28b9..a5fa30b 100644
+--- a/WeaselTSF/Globals.cpp
++++ b/WeaselTSF/Globals.cpp
+@@ -7,6 +7,40 @@ LONG g_cRefDll = -1;
+ 
+ CRITICAL_SECTION g_cs;
+ 
++// {A3F4CDED-B1E9-41EE-9CA6-7B4D0DE6CB0A}
++// HENG_DEV：全部身份 GUID 换 dev 组，与正式版在 TSF 注册表中完全隔离
++#ifdef HENG_DEV
++
++// {BB5EEBD5-81B7-4631-8631-0F948D77CBC2}
++static const GUID c_clsidTextService = {
++    0xbb5eebd5,
++    0x81b7,
++    0x4631,
++    {0x86, 0x31, 0x0f, 0x94, 0x8d, 0x77, 0xcb, 0xc2}};
++
++// {27A02EDE-3ADB-4708-BE06-C2A516532AD2}
++static const GUID c_guidProfile = {
++    0x27a02ede,
++    0x3adb,
++    0x4708,
++    {0xbe, 0x06, 0xc2, 0xa5, 0x16, 0x53, 0x2a, 0xd2}};
++
++// {359EA27C-9065-4987-8622-8CFD831B28A4}
++static const GUID c_guidLangBarItemButton = {
++    0x359ea27c,
++    0x9065,
++    0x4987,
++    {0x86, 0x22, 0x8c, 0xfd, 0x83, 0x1b, 0x28, 0xa4}};
++
++// {DA442060-458D-40AE-9D90-C326216E2AC7}
++static const GUID c_guidDisplayAttributeInput = {
++    0xda442060,
++    0x458d,
++    0x40ae,
++    {0x9d, 0x90, 0xc3, 0x26, 0x21, 0x6e, 0x2a, 0xc7}};
++
++#else
++
+ // {A3F4CDED-B1E9-41EE-9CA6-7B4D0DE6CB0A}
+ static const GUID c_clsidTextService = {
+     0xa3f4cded,
+@@ -35,6 +69,8 @@ static const GUID c_guidDisplayAttributeInput = {
+     0x4b32,
+     {0x9d, 0xea, 0xf8, 0x39, 0x09, 0x76, 0xc2, 0x0b}};
+ 
++#endif
++
+ #ifdef WEASEL_USING_OLDER_TSF_SDK
+ 
+ /* For Windows 8 */
 diff --git a/WeaselTSF/KeyEventSink.cpp b/WeaselTSF/KeyEventSink.cpp
 index 6a18c13..7623db9 100644
 --- a/WeaselTSF/KeyEventSink.cpp
@@ -2630,6 +3049,140 @@ scmdl~v#DkS2a~W3LpehxLmopBLn=ctgC0W$gWY6D+m)M-Fy&bT0LG6Bt^fc4
 delta 36
 scmdl~v#DkS2a~W8Ln1>OLj^+-Ln=ctgC0W$gVJP2+m)M-Fy&bT0KoSOX#fBK
 
+diff --git a/WeaselTSF/WeaselTSF.vcxproj b/WeaselTSF/WeaselTSF.vcxproj
+index 3257ea6..0220b45 100644
+--- a/WeaselTSF/WeaselTSF.vcxproj
++++ b/WeaselTSF/WeaselTSF.vcxproj
+@@ -117,49 +117,49 @@
+     <LinkIncremental>true</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+     <TargetName>weasel</TargetName>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+     <TargetName>weasel$(Platform)</TargetName>
+     <OutDir>$(SolutionDir)output\</OutDir>
+     <LinkIncremental>true</LinkIncremental>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+     <LinkIncremental>false</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+     <TargetName>weasel</TargetName>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+     <TargetName>weasel$(Platform)</TargetName>
+     <LinkIncremental>false</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+     <LinkIncremental>true</LinkIncremental>
+     <TargetName>weasel$(Platform)</TargetName>
+     <OutDir>$(SolutionDir)output\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
+     <LinkIncremental>true</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+     <TargetName>weasel$(Platform)</TargetName>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+     <LinkIncremental>false</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+     <TargetName>weasel$(Platform)</TargetName>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
+     <TargetName>weasel$(Platform)</TargetName>
+     <LinkIncremental>false</LinkIncremental>
+     <OutDir>$(SolutionDir)output\</OutDir>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+   </PropertyGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+     <ClCompile>
+@@ -176,7 +176,7 @@
+       <LanguageStandard>stdcpp17</LanguageStandard>
+     </ClCompile>
+     <Link>
+-      <OutputFile>$(SolutionDir)output\weasel$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+@@ -206,7 +206,7 @@
+       <LanguageStandard>stdcpp17</LanguageStandard>
+     </ClCompile>
+     <Link>
+-      <OutputFile>$(SolutionDir)output\weasel$(Platform)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+@@ -234,7 +234,7 @@
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+     </ClCompile>
+     <Link>
+-      <OutputFile>$(SolutionDir)output\weasel$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+@@ -268,7 +268,7 @@
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+     </ClCompile>
+     <Link>
+-      <OutputFile>$(SolutionDir)output\weasel$(Platform)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+@@ -303,7 +303,7 @@
+       <LanguageStandard>stdcpp17</LanguageStandard>
+     </ClCompile>
+     <Link>
+-      <OutputFile>$(SolutionDir)output\weasel$(Platform)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+@@ -336,7 +336,7 @@
+       <LanguageStandard>stdcpp17</LanguageStandard>
+     </ClCompile>
+     <Link>
+-      <OutputFile>$(SolutionDir)output\weasel$(Platform)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+@@ -371,7 +371,7 @@
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+     </ClCompile>
+     <Link>
+-      <OutputFile>$(SolutionDir)output\weasel$(Platform)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
+@@ -406,7 +406,7 @@
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+     </ClCompile>
+     <Link>
+-      <OutputFile>$(SolutionDir)output\weasel$(Platform)$(TargetExt)</OutputFile>
++      <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+       <AdditionalLibraryDirectories>$(SolutionDir)\lib;$(BOOST_ROOT)\stage\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <SubSystem>Windows</SubSystem>
 diff --git a/WeaselUI/HorizontalLayout.cpp b/WeaselUI/HorizontalLayout.cpp
 index 99d8e64..0ad9d36 100644
 --- a/WeaselUI/HorizontalLayout.cpp
@@ -2744,6 +3297,93 @@ index fee38f6..b8f0984 100644
  
      int w = real_margin_x + base_offset, max_height_curren_candidate = 0;
      int candidate_width = base_offset, comment_width = 0;
+diff --git a/WeaselUI/WeaselUI.vcxproj b/WeaselUI/WeaselUI.vcxproj
+index 7b3bafe..b5227c4 100644
+--- a/WeaselUI/WeaselUI.vcxproj
++++ b/WeaselUI/WeaselUI.vcxproj
+@@ -114,35 +114,35 @@
+   </ImportGroup>
+   <PropertyGroup Label="UserMacros" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+diff --git a/build-x64-dev.bat b/build-x64-dev.bat
+new file mode 100644
+index 0000000..df47ee0
+--- /dev/null
++++ b/build-x64-dev.bat
+@@ -0,0 +1,33 @@
++@echo off
++rem HengIME: build weasel x64 DEV identity, side-by-side with the release build.
++rem Differences from build-x64.bat:
++rem   1. CL=/DHENG_DEV - compile-time identity macro: dev GUID set (CLSID/Profile/
++rem      LangBar/DisplayAttr), IPC pipe name WeaselNamedPipeDev (both servers can
++rem      run at the same time), IME display name "HengDev".
++rem   2. Artifacts go to output-dev\ (does NOT touch the release output\ folder).
++rem   3. Intermediates go to msbuild-dev\Release\x64\<Project>\ (per-project
++rem      subdirectory, same layout as the release msbuild\ tree, so parallel
++rem      cl.exe processes never share one vc143.pdb - avoids error C1041).
++rem Register dev build (admin): regsvr32 third_party\src\weasel\output-dev\weaselx64.dll
++rem Unregister dev build (admin): regsvr32 /u with the same path.
++rem The release build is completely unaffected.
++
++setlocal
++set WEASEL_ROOT=%~dp0
++cd /d %WEASEL_ROOT%
++
++rem cl.exe appends the CL environment variable to its command line, so no
++rem vcxproj changes are needed for the HENG_DEV macro.
++set CL=/DHENG_DEV
++
++call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
++if errorlevel 1 exit /b 1
++
++msbuild weasel.sln /t:Build /p:Configuration=Release /p:Platform=x64 /m /nodeReuse:false /v:m /nologo ^
++  "/p:OutDir=%WEASEL_ROOT%output-dev\\" "/p:HENG_INTDIR_SUFFIX=-dev" ^
++  /fl2 "/flp2:logfile=msbuild-x64-dev.log;verbosity=normal"
++
++echo.
++echo ExitCode=%ERRORLEVEL%
++echo Log: %WEASEL_ROOT%msbuild-x64-dev.log
++pause
 diff --git a/build-x64.bat b/build-x64.bat
 new file mode 100644
 index 0000000..3b5604a
@@ -2883,6 +3523,53 @@ index ab20d8d..f3ebef1 100644
    int m_show_notifications_time;
    DWORD m_pid;
  };
+diff --git a/include/WeaselIPC.h b/include/WeaselIPC.h
+index 27bfd63..7757e09 100644
+--- a/include/WeaselIPC.h
++++ b/include/WeaselIPC.h
+@@ -7,7 +7,13 @@
+ #include <KeyEvent.h>
+ 
+ #define WEASEL_IPC_WINDOW L"WeaselIPCWindow_1.0"
++// HENG_DEV 编译期身份：管道名加 Dev 后缀，正式版与 dev 版服务进程
++// 依「连接管道成功即 Shutdown 旧实例」的机制自然并存、互不误杀
++#ifdef HENG_DEV
++#define WEASEL_IPC_PIPE_NAME L"WeaselNamedPipeDev"
++#else
+ #define WEASEL_IPC_PIPE_NAME L"WeaselNamedPipe"
++#endif
+ 
+ #define WEASEL_IPC_METADATA_SIZE 1024
+ #define WEASEL_IPC_BUFFER_SIZE (4 * 1024)
+diff --git a/include/WeaselUtility.h b/include/WeaselUtility.h
+index 742f157..7ee8937 100755
+--- a/include/WeaselUtility.h
++++ b/include/WeaselUtility.h
+@@ -187,6 +187,10 @@ inline std::basic_string<CharT> unescape_string(
+ std::string GetCustomResource(const char* name, const char* type);
+ 
+ inline std::wstring get_weasel_ime_name() {
++#ifdef HENG_DEV
++  // dev 版与正式版在输入法列表中并存，名字必须可区分（对齐 mac 端 衡Dev 品牌）
++  return L"衡Dev";
++#else
+   LANGID langId = GetUserDefaultUILanguage();
+ 
+   if (langId == MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL) ||
+@@ -194,10 +198,11 @@ inline std::wstring get_weasel_ime_name() {
+       langId == MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_HONGKONG) ||
+       langId == MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SINGAPORE) ||
+       langId == MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_MACAU)) {
+-    return L"小狼毫";
++    return L"衡";
+   } else {
+-    return L"Weasel";
++    return L"Heng";
+   }
++#endif
+ }
+ 
+ inline LONG RegGetStringValue(HKEY key,
 diff --git a/include/heng.h b/include/heng.h
 new file mode 100644
 index 0000000..b22a6cb
@@ -3993,6 +4680,467 @@ zLl|IN9S37948z~f#XG_}3B&mB&%y6~LK?!~!+^R;cy<&1MgZOs<{=Ej?~p!Fue0mW
 zZCt&uZg`h0p(D&g7=~%!JG9Y&;}x8Tp`WcECd`8i0~q025Qd>ATo=MHYy<o^{P*wp
 a7vzWUztVs3{6JX#Qo}Istl{9NU;htVP!FvD
 
+diff --git a/resource/weasel-dev.ico b/resource/weasel-dev.ico
+new file mode 100644
+index 0000000000000000000000000000000000000000..52bd5a7867cfc2471069b9c3f2f9eaa3f1ee5819
+GIT binary patch
+literal 24061
+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%0AjerX?``>E&Htwq9t0A8Z>@O
+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
+
+literal 0
+HcmV?d00001
+
 diff --git a/resource/weasel.ico b/resource/weasel.ico
 index 701c5ac006c75f048276908aa435a3f7166efc79..8958c9e355200c70beff333dfd44edcf4c87d52f 100644
 GIT binary patch
@@ -4493,3 +5641,47 @@ zK^CrU*-z@keV_-Muuf?4c}K#42Ge3)7>0Q;J<Shez_rDX@wEN)n2sNfmo{eO$2MYL
 z=rOkMW$=Scs9?J!`$@bc{g@Bth33aFOhfZy*<=g8LM35jA7tV+h;u=n7I>-cK<?rH
 E0GxvLE&u=k
 
+diff --git a/test/TestResponseParser/TestResponseParser.vcxproj b/test/TestResponseParser/TestResponseParser.vcxproj
+index 4439e57..e33d23b 100644
+--- a/test/TestResponseParser/TestResponseParser.vcxproj
++++ b/test/TestResponseParser/TestResponseParser.vcxproj
+@@ -115,7 +115,7 @@
+   <PropertyGroup Label="UserMacros" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+     <LinkIncremental>true</LinkIncremental>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+@@ -129,7 +129,7 @@
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+     <LinkIncremental>true</LinkIncremental>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
+diff --git a/test/TestWeaselIPC/TestWeaselIPC.vcxproj b/test/TestWeaselIPC/TestWeaselIPC.vcxproj
+index eb773d4..0f98744 100644
+--- a/test/TestWeaselIPC/TestWeaselIPC.vcxproj
++++ b/test/TestWeaselIPC/TestWeaselIPC.vcxproj
+@@ -119,7 +119,7 @@
+   <PropertyGroup Label="UserMacros" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+     <LinkIncremental>true</LinkIncremental>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
+@@ -133,7 +133,7 @@
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+     <LinkIncremental>true</LinkIncremental>
+-    <IntDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
++    <IntDir>$(SolutionDir)msbuild$(HENG_INTDIR_SUFFIX)\$(Configuration)\$(Platform)\$(ProjectName)\</IntDir>
+     <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">

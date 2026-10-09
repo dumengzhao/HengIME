@@ -8,6 +8,7 @@ third_party/*
 
 # 本地运行时数据（RIME 用户目录、部署产物、日志）
 runtime/
+runtime-dev/
 
 # Rust
 target/
