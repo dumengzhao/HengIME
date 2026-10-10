@@ -401,7 +401,8 @@ slint::slint! {
                         width: cell.nw * 1px;
                         height: parent.height;
                         text: cell.num;
-                        color: cell.hl ? #cfe0ff : #999999;
+                        // 与正文同色（原来浅灰/浅蓝在浅底上不显眼）
+                        color: cell.hl ? #ffffff : #1f2328;
                         font-size: root.font-scale * 11px;
                         vertical-alignment: center;
                     }
@@ -813,7 +814,8 @@ slint::slint! {
                 x: 10px; y: 0;
                 width: parent.width - 20px; height: parent.height;
                 text: root.text;
-                color: #888d95;
+                // 与候选词同色（原来浅灰 #888d95 不显眼）
+                color: #1f2328;
                 font-size: root.cand-font * 1px;
                 vertical-alignment: center;
                 overflow: elide;
