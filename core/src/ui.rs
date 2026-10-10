@@ -58,29 +58,34 @@ fn lay_k() -> f32 {
 fn lay_px(design: f32) -> i32 {
     (design * lay_k()).round() as i32
 }
-/// 候选格高（设计 28）
+/// 候选格高（设计 26：上下各留 6）
 fn lay_cell_h() -> i32 {
-    lay_px(28.0)
+    lay_px(26.0)
 }
-/// 流式/网格行距（设计 38）
+/// 流式/网格行距（设计 34 = 格高 26 + 行间 8）
 fn lay_row_h() -> i32 {
-    lay_px(38.0)
+    lay_px(34.0)
 }
-/// 收起条高（设计 40）
+/// 收起条高（设计 34 = 首行上边距 2 + 格高 26 + 下留白 6）
 fn lay_bar_h() -> i32 {
-    lay_px(40.0)
+    lay_px(34.0)
 }
-/// 顶部字母区窗高（设计 24）
+/// 候选窗/字母区窗宽（设计 460 × k）——宽度与高度同为等比缩放，
+/// 大字号下每行可容纳的候选数不减少
+fn lay_panel_w() -> i32 {
+    lay_px(PANEL_WIDTH as f32)
+}
+/// 顶部字母区窗高（设计 18 = 字号行高 16 + 上下各 1：紧贴候选行且不切字）
 fn lay_letters_h() -> i32 {
-    lay_px(24.0)
+    lay_px(18.0)
 }
-/// ☰ 菜单高（设计 = 上留白 6 + 3 行 × 38 + 下留白 8 = 128）
+/// ☰ 菜单高（设计 = 上留白 2 + 3 行 × 34 + 下留白 6 = 110）
 fn lay_menu_h() -> i32 {
-    lay_px(128.0)
+    lay_px(110.0)
 }
-/// 首行 y 基线（设计 6）
+/// 首行 y 基线（设计 2：与字母区一起收紧，避免文字间出现宽缝）
 fn lay_flow_top() -> i32 {
-    lay_px(6.0)
+    lay_px(2.0)
 }
 /// 序号字号（设计 11）
 fn lay_num_font() -> i32 {
@@ -310,7 +315,7 @@ slint::slint! {
         height: root.hint-only ? 36px
             : (root.menu-open ? root.menu-height * 1px
             : (root.expanded ? root.panel-height * 1px
-            : root.font-scale * 40px));
+            : root.font-scale * 34px));
         background: transparent;
         // 外层圆角容器：窗口本身透明，圆角靠这层裁出（三形态共用：候选/展开/气泡）
         // 气泡态 = 深色半透明胶囊（白字大字，明暗背景均可读），与候选浅底区分开
@@ -341,7 +346,7 @@ slint::slint! {
                     x: cell.x * 1px;
                     y: cell.y * 1px;
                     width: cell.w * 1px;
-                    height: root.font-scale * 28px;
+                    height: root.font-scale * 26px;
                     border-radius: root.font-scale * 8px;
                     // 只有选中项有背景药丸，其余纯文字不加底色区分边界
                     background: cell.hl ? #2164f1 : transparent;
@@ -387,15 +392,15 @@ slint::slint! {
             Math.max(30px, track-h * flick.height
                 / Math.max(1px, root.content-height * 1px)));
         if root.expanded && !root.hint-only: Rectangle {
-            x: parent.width - 5px;
-            y: 6px;
-            width: 3px;
+            x: parent.width - root.font-scale * 5px;
+            y: root.font-scale * 6px;
+            width: root.font-scale * 3px;
             height: track-h;
-            border-radius: 2px;
+            border-radius: root.font-scale * 2px;
             background: #d8dce2;
             Rectangle {
                 width: parent.width;
-                border-radius: 2px;
+                border-radius: root.font-scale * 2px;
                 background: #aeb4bd;
                 y: Math.min(track-h - thumb-h,
                     Math.max(0px, (track-h - thumb-h)
@@ -414,11 +419,12 @@ slint::slint! {
             height: root.font-scale * 28px;
             border-radius: root.font-scale * 8px;
             background: ta_arrow.has-hover ? #e8ebef : transparent;
+            // 图形本身也随字号等比缩放（此前固定 8×5，大字号下显得很小）
             Path {
-                width: 8px;
-                height: 5px;
-                x: (parent.width - 8px) / 2;
-                y: (parent.height - 5px) / 2;
+                width: root.font-scale * 8px;
+                height: root.font-scale * 5px;
+                x: (parent.width - root.font-scale * 8px) / 2;
+                y: (parent.height - root.font-scale * 5px) / 2;
                 viewbox-width: 8;
                 viewbox-height: 5;
                 commands: "M 0 0 L 8 0 L 4 5 Z";
@@ -437,13 +443,13 @@ slint::slint! {
             border-radius: root.font-scale * 8px;
             background: ta_menu.has-hover || root.icon-sel ? #2164f1 : transparent;
             Rectangle {
-                width: 12px;
-                height: 8px;
-                x: (parent.width - 12px) / 2;
-                y: (parent.height - 8px) / 2;
-                Rectangle { y: 0; width: parent.width; height: 1.5px; background: root.icon-sel ? #ffffff : #666666; }
-                Rectangle { y: 3.25px; width: parent.width; height: 1.5px; background: root.icon-sel ? #ffffff : #666666; }
-                Rectangle { y: 6.5px; width: parent.width; height: 1.5px; background: root.icon-sel ? #ffffff : #666666; }
+                width: root.font-scale * 12px;
+                height: root.font-scale * 8px;
+                x: (parent.width - root.font-scale * 12px) / 2;
+                y: (parent.height - root.font-scale * 8px) / 2;
+                Rectangle { y: 0; width: parent.width; height: root.font-scale * 1.5px; background: root.icon-sel ? #ffffff : #666666; }
+                Rectangle { y: root.font-scale * 3.25px; width: parent.width; height: root.font-scale * 1.5px; background: root.icon-sel ? #ffffff : #666666; }
+                Rectangle { y: root.font-scale * 6.5px; width: parent.width; height: root.font-scale * 1.5px; background: root.icon-sel ? #ffffff : #666666; }
             }
             ta_menu := TouchArea {
                 mouse-cursor: pointer;
@@ -752,8 +758,8 @@ slint::slint! {
         in property <string> text;
         in property <int> cand-font;  // 与候选格同字号
         in property <float> font-scale;
-        width: 460px;
-        height: root.font-scale * 24px;
+        width: root.font-scale * 460px;
+        height: root.font-scale * 18px;
         background: transparent;
         // 独立浮窗：与候选窗同色系、同圆角，悬浮于候选窗正上方。
         // 底部两角取消圆角（与下方候选窗顶部方角连成一体）
@@ -904,19 +910,26 @@ fn ui_scale() -> f32 {
     1.0
 }
 
+/// HENG_UI_WORK="top,bottom" 覆盖工作区（测试钩子，优先于平台实现）
+fn work_area_env() -> Option<(i32, i32)> {
+    let env = std::env::var("HENG_UI_WORK").ok()?;
+    let parts: Vec<&str> = env.splitn(2, ',').collect();
+    if parts.len() == 2 {
+        if let (Ok(top), Ok(bottom)) = (parts[0].trim().parse(), parts[1].trim().parse()) {
+            return Some((top, bottom));
+        }
+    }
+    None
+}
+
 /// 查询指定点所在显示器的工作区（任务栏除外）的上下边界（设备 px）。
 /// 用于展开面板的向上翻转判断：光标下方放不下时朝上展开。
 /// 返回 (top, bottom)；查不到返回 None（此时不翻转，维持向下展开）。
 /// 测试钩子：HENG_UI_WORK="top,bottom" 可覆盖（沙箱无真实显示器）。
 #[cfg(target_os = "windows")]
 fn work_area_at(x: i32, y: i32) -> Option<(i32, i32)> {
-    if let Ok(env) = std::env::var("HENG_UI_WORK") {
-        let parts: Vec<&str> = env.splitn(2, ',').collect();
-        if parts.len() == 2 {
-            if let (Ok(top), Ok(bottom)) = (parts[0].trim().parse(), parts[1].trim().parse()) {
-                return Some((top, bottom));
-            }
-        }
+    if let Some(v) = work_area_env() {
+        return Some(v);
     }
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::Graphics::Gdi::{
@@ -937,10 +950,59 @@ fn work_area_at(x: i32, y: i32) -> Option<(i32, i32)> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Linux：经 x11rb randr 查所在显示器的 CRTC 工作区（对标 Windows 的
+/// MonitorFromPoint + GetMonitorInfo）。展开面板放不下时据此向上翻转。
+#[cfg(target_os = "linux")]
+fn work_area_at(x: i32, y: i32) -> Option<(i32, i32)> {
+    if let Some(v) = work_area_env() {
+        return Some(v);
+    }
+    use x11rb::connection::Connection;
+    use x11rb::protocol::randr::ConnectionExt as _;
+    let conn = X_CONN.with(|c| c.borrow().clone())?;
+    let root = conn.setup().roots.first()?.root;
+    if let Some(res) = conn
+        .randr_get_screen_resources(root)
+        .ok()
+        .and_then(|c| c.reply().ok())
+    {
+        for crtc in res.crtcs {
+            let Some(info) = res
+                .outputs
+                .iter()
+                .find_map(|&out| {
+                    conn.randr_get_crtc_info(out, crtc)
+                        .ok()
+                        .and_then(|c| c.reply().ok())
+                })
+            else {
+                continue;
+            };
+            if info.mode == 0 {
+                continue; // 该输出未启用
+            }
+            let (rx, ry) = (info.x as i32, info.y as i32);
+            let (cw, ch) = (info.width as i32, info.height as i32);
+            if cw > 0 && ch > 0 && x >= rx && x < rx + cw && y >= ry && y < ry + ch {
+                return Some((ry, ry + ch));
+            }
+        }
+    }
+    // 回退：整个屏幕范围（无 randr / 单屏异常时仍能防止溢出屏幕）
+    let screen = conn.setup().roots.first()?;
+    Some((0, screen.height_in_pixels as i32))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn work_area_at(_x: i32, _y: i32) -> Option<(i32, i32)> {
-    // TODO(linux): 经 x11rb randr 查显示器工作区；当前不翻转
     None
+}
+
+/// UI 线程持有的 X 连接：供 work_area_at 查显示器工作区（避免另开连接）
+#[cfg(target_os = "linux")]
+thread_local! {
+    static X_CONN: RefCell<Option<Rc<x11rb::rust_connection::RustConnection>>> =
+        const { RefCell::new(None) };
 }
 
 // =====================================================================
@@ -948,7 +1010,7 @@ fn work_area_at(_x: i32, _y: i32) -> Option<(i32, i32)> {
 // =====================================================================
 #[cfg(target_os = "linux")]
 mod x11_backend {
-    use super::{Argb, UiBackend, BAR_HEIGHT};
+    use super::{Argb, UiBackend, BAR_HEIGHT, X_CONN};
     use slint::platform::WindowEvent;
     use slint::LogicalPosition;
     use std::rc::Rc;
@@ -997,6 +1059,9 @@ mod x11_backend {
     impl XWindow {
         pub fn new() -> Option<Self> {
             let (conn, screen_num) = x11rb::connect(None).ok()?;
+            let conn = Rc::new(conn);
+            // 登记给 work_area_at（屏幕工作区查询）
+            X_CONN.with(|c| *c.borrow_mut() = Some(conn.clone()));
             let screen = conn.setup().roots[screen_num].clone();
             // 找 32 位 TrueColor 视觉（ARGB，支持透明圆角）
             let mut visual = None;
@@ -1060,7 +1125,7 @@ mod x11_backend {
             )?;
             check_void!(conn.create_gc(gc, win, &CreateGCAux::new()), "create_gc")?;
             conn.flush().ok()?;
-            Some(Self { conn: Rc::new(conn), win, gc, mapped: false, win2: None, gc2: None, mapped2: false, win3: None, gc3: None, mapped3: false, drag2: None, win2_w: 0 })
+            Some(Self { conn, win, gc, mapped: false, win2: None, gc2: None, mapped2: false, win3: None, gc3: None, mapped3: false, drag2: None, win2_w: 0 })
         }
 
         /// 惰性创建顶部字母区窗口（override-redirect、不接收输入，纯展示）
@@ -1116,7 +1181,7 @@ mod x11_backend {
                     screen.root,
                     200,
                     500,
-                    (460.0 * super::ui_scale()).round() as u16,
+                    (super::lay_panel_w() as f32 * super::ui_scale()).round() as u16,
                     (24.0 * super::ui_scale()).round() as u16,
                     0,
                     WindowClass::INPUT_OUTPUT,
@@ -2158,7 +2223,7 @@ fn set_bar_cells(
     *bar_items.borrow_mut() = texts.clone();
     let (cells, _rows) = build_flow_cells(&texts, panel_hl.get());
     ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
-    ui.set_panel_width(PANEL_WIDTH as i32);
+    ui.set_panel_width(lay_panel_w());
     // 中英角标：状态来自 get_status（ContextSnapshot 已不含 ascii 位）
     if let Ok(st) = engine.get_status(rime_id) {
         ui.set_ascii(st.is_ascii_mode);
@@ -2266,7 +2331,7 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
     let num_font = lay_num_font();
     // 格内水平留白等比且左右对称（与 slint HorizontalLayout 的 padding/spacing 一致）
     let (pad_l, pad_s, pad_r) = (lay_px(6.0), lay_px(3.0), lay_px(6.0));
-    let panel_w = PANEL_WIDTH as i32;
+    let panel_w = lay_panel_w();
     // 首行右侧给 ▾/☰ 两个按钮留位（按钮带设计 58）；展开行给滚动条留位
     let first_row_right = panel_w - margin - lay_px(58.0);
     let row_right = panel_w - margin - lay_px(8.0);
@@ -2330,10 +2395,10 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
 fn build_grid_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
     let margin = lay_px(6.0);
     let gap = lay_px(4.0);
-    let panel_w = PANEL_WIDTH as i32;
-    // 每行槽数随字号自适应：槽宽维持设计尺寸（≈74px），字号越大槽数越少，
-    // 否则「序号 + 3 字」放不进固定 460px 宽的 6 槽 → 正文被 elide 成省略号
-    let slots_per_row = ((6.0 / lay_k()).round() as i32).clamp(3, 6);
+    let panel_w = lay_panel_w();
+    // 每行 6 槽（宽度随字号等比放大 → 槽宽自然等比放大，"序号 + 3 字"始终放得下）
+    const SLOTS_PER_ROW: i32 = 6;
+    let slots_per_row = SLOTS_PER_ROW;
     let slot_w = (panel_w - margin * 2) / slots_per_row;
     let font = current_cand_font();
     let num_font = lay_num_font();
@@ -2590,7 +2655,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     msw3.window()
         .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
     msw3.set_size(PhysicalSize {
-        width: (460.0 * scale).round() as u32,
+        width: (lay_panel_w() as f32 * scale).round() as u32,
         height: input_row_h,
     });
     // 设置窗口：尺寸/DPI 一次性登记（show 推迟到打开时）
@@ -2672,7 +2737,11 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         // 顶部专用字母区：独立窗口悬浮于本窗口正上方（原窗口布局零改动）。
         // hint 气泡态不显示（与气泡形态互斥）
         let has_input = !ui.get_input_text().is_empty() && hint_mode.get() == 0;
-        if has_input {
+        // 字母区贴在主窗/面板顶边之上（用已夹紧的 y_eff，翻转态与面板一致）
+        let ly = y_eff - input_row_h as i32;
+        // 翻转态面板已贴到工作区顶边 → 上方没有空间，隐藏字母区（否则与面板重叠）
+        let letters_ok = has_input && !(flip.get() && ly <= flip_top.get());
+        if letters_ok {
             lsw.set_text(ui.get_input_text());
             if lsbuf.borrow().len() != (w * input_row_h) as usize {
                 *lsbuf.borrow_mut() = vec![Argb::default(); (w * input_row_h) as usize];
@@ -2687,12 +2756,6 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     });
                 }));
             }
-            // 位置：贴本窗口顶边之上；翻转态贴面板顶边之上
-            let ly = if flip.get() {
-                (last_caret_top.get() - h as i32 - input_row_h as i32).max(flip_top.get())
-            } else {
-                y_eff - input_row_h as i32
-            };
             backend.configure(2, x, ly, w, input_row_h);
             backend.set_mapped(2, true);
             let lb = lsbuf.borrow();
@@ -2919,13 +2982,13 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 let sc = ui_scale();
                 MSW.with(|w| {
                     w.set_size(PhysicalSize {
-                        width: (PANEL_WIDTH as f32 * sc).round() as u32,
+                        width: (lay_panel_w() as f32 * sc).round() as u32,
                         height: ((lay_bar_h() as f32) * sc).round() as u32,
                     })
                 });
                 MSW3.with(|w| {
                     w.set_size(PhysicalSize {
-                        width: (PANEL_WIDTH as f32 * sc).round() as u32,
+                        width: (lay_panel_w() as f32 * sc).round() as u32,
                         height: ((lay_letters_h() as f32) * sc).round() as u32,
                     })
                 });
@@ -3043,7 +3106,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                 &bar_items,
                                 &panel_hl,
                             );
-                            let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                            let w = (lay_panel_w() as f32 * scale).round() as u32;
                             ui.set_expanded(false);
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
@@ -3162,10 +3225,10 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         // flick.content-y 归零），再写入真实高亮 y
                         ui.set_hl_y(-1);
                         ui.set_hl_y(hl_y);
-                        ui.set_panel_width(PANEL_WIDTH as i32);
-                        let content_h = lay_flow_top() + (rows - 1) * lay_row_h() + lay_cell_h() + lay_px(8.0);
+                        ui.set_panel_width(lay_panel_w());
+                        let content_h = lay_flow_top() + (rows - 1) * lay_row_h() + lay_cell_h() + lay_px(4.0);
                         let h_logical =
-                            (lay_px(8.0) + PANEL_VISIBLE_ROWS * lay_row_h() + lay_px(8.0)).max(lay_bar_h());
+                            (lay_px(4.0) + PANEL_VISIBLE_ROWS * lay_row_h() + lay_px(4.0)).max(lay_bar_h());
                         ui.set_content_height(content_h);
                         ui.set_panel_height(h_logical);
                         last_panel_h.set((h_logical as f32 * scale).round() as u32);
@@ -3184,10 +3247,11 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             _ => flip.set(false),
                         }
                         ui_log(&format!(
-                            "expand: flip={} panel_bottom_y={} panel_h={}",
+                            "expand: flip={} panel_bottom_y={} panel_h={} work_area={:?}",
                             flip.get(),
                             last_y.get(),
-                            panel_h_phys
+                            panel_h_phys,
+                            work_area_at(last_x.get(), last_y.get())
                         ));
                         ui.set_expanded(true);
                         UI_EXPANDED.store(true, Ordering::Relaxed);
@@ -3199,7 +3263,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         ui.set_menu_open(false);
                         UI_HL.store(hl_global, Ordering::Relaxed);
                         UI_TOTAL.store(total, Ordering::Relaxed);
-                        let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                        let w = (lay_panel_w() as f32 * scale).round() as u32;
                         paint(&mut backend, w, last_panel_h.get(), last_x.get(), last_y.get(), true);
                         expanded.set(true);
                     } else {
@@ -3223,7 +3287,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                 }
                             }
                         }
-                        let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                        let w = (lay_panel_w() as f32 * scale).round() as u32;
                         paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                         expanded.set(false);
                     }
@@ -3262,7 +3326,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     let h = if in_panel { last_panel_h.get() } else { bar_h_now() };
                     paint(
                         &mut backend,
-                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        (lay_panel_w() as f32 * scale).round() as u32,
                         h,
                         last_x.get(),
                         last_y.get(),
@@ -3309,7 +3373,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                     }
                                 }
                             }
-                            let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                            let w = (lay_panel_w() as f32 * scale).round() as u32;
                             paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                             continue;
                         }
@@ -3346,7 +3410,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     ui.set_hl_y(hl_y);
                     paint(
                         &mut backend,
-                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        (lay_panel_w() as f32 * scale).round() as u32,
                         last_panel_h.get(),
                         last_x.get(),
                         last_y.get(),
@@ -3365,7 +3429,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
                     paint(
                         &mut backend,
-                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        (lay_panel_w() as f32 * scale).round() as u32,
                         bar_h_now(),
                         last_x.get(),
                         last_y.get(),
@@ -3411,7 +3475,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                 &bar_items,
                                 &panel_hl,
                             );
-                            let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                            let w = (lay_panel_w() as f32 * scale).round() as u32;
                             paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                         }
                     }
@@ -3425,7 +3489,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     let h = (lay_menu_h() as f32 * scale).round() as u32;
                     paint(
                         &mut backend,
-                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        (lay_panel_w() as f32 * scale).round() as u32,
                         h,
                         last_x.get(),
                         last_y.get(),
@@ -3438,7 +3502,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     ui.set_menu_open(false);
                     paint(
                         &mut backend,
-                        (PANEL_WIDTH as f32 * scale).round() as u32,
+                        (lay_panel_w() as f32 * scale).round() as u32,
                         bar_h_now(),
                         last_x.get(),
                         last_y.get(),
@@ -3521,7 +3585,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                     &bar_items,
                                     &panel_hl,
                                 );
-                                let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                                let w = (lay_panel_w() as f32 * scale).round() as u32;
                                 paint(
                                     &mut backend,
                                     w,
@@ -3594,7 +3658,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             }
                         }
                     }
-                    let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                    let w = (lay_panel_w() as f32 * scale).round() as u32;
                     paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                 }
             }
@@ -3675,7 +3739,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     }
                 }
                 if restore {
-                    let w = (PANEL_WIDTH as f32 * scale).round() as u32;
+                    let w = (lay_panel_w() as f32 * scale).round() as u32;
                     paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                 } else {
                     backend.set_mapped(0, false);
