@@ -39,18 +39,53 @@ use crate::settings::{
 };
 use crate::Engine;
 
-/// 横排候选栏尺寸：宽度按内容估算（上限截断），高度固定单条
+/// 横排候选栏尺寸：宽度按内容估算（上限截断），高度随字号
 const BAR_HEIGHT: u32 = 40;
 /// 横条与展开面板统一固定宽度（微信同款：宽度不随内容变化，超长词显示省略号）
 const PANEL_WIDTH: u32 = 460;
-/// 展开面板行高与最大行数
-const FLOW_ROW_H: i32 = 38;
+/// 展开面板最大行数
 const FLOW_MAX_ROWS: i32 = 40; // 可滚动，上限放宽
 const PANEL_VISIBLE_ROWS: i32 = 5; // 展开态可视行数
-/// ☰ 菜单高度（占位）：上留白 4 + 3 行 × 38 + 下留白 8
-const MENU_HEIGHT: i32 = FLOW_TOP + 3 * FLOW_ROW_H + 8;
-/// 首行 y 基线：40px 横条内 28px 格子上下各留 6px（留白要明显）
-const FLOW_TOP: i32 = 6;
+
+// ---- 布局 = 14px 设计稿 × 字号缩放 k（DPI 式等比缩放）----
+// k = 字号/14：12→0.857、14→1.0（与历史常量严格一致）、18→1.286。
+// 所有尺寸（高/留白/圆角/按钮/行距）统一 设计值×k，比例恒定不跑形；
+// 与屏幕 DPI 系数（ui_scale）相乘得到物理像素。宽度按规格保持固定。
+fn lay_k() -> f32 {
+    current_cand_font() as f32 / 14.0
+}
+/// 设计稿尺寸 → 当前字号下的逻辑px
+fn lay_px(design: f32) -> i32 {
+    (design * lay_k()).round() as i32
+}
+/// 候选格高（设计 28）
+fn lay_cell_h() -> i32 {
+    lay_px(28.0)
+}
+/// 流式/网格行距（设计 38）
+fn lay_row_h() -> i32 {
+    lay_px(38.0)
+}
+/// 收起条高（设计 40）
+fn lay_bar_h() -> i32 {
+    lay_px(40.0)
+}
+/// 顶部字母区窗高（设计 24）
+fn lay_letters_h() -> i32 {
+    lay_px(24.0)
+}
+/// ☰ 菜单高（设计 = 上留白 6 + 3 行 × 38 + 下留白 8 = 128）
+fn lay_menu_h() -> i32 {
+    lay_px(128.0)
+}
+/// 首行 y 基线（设计 6）
+fn lay_flow_top() -> i32 {
+    lay_px(6.0)
+}
+/// 序号列宽（按最宽两位数实测，序号字号设计 11）
+fn lay_num_w() -> i32 {
+    measure_w("12", lay_px(11.0))
+}
 
 // ---- 对外接口（capi 调用） ----
 
@@ -255,10 +290,27 @@ slint::slint! {
         in property <int> hint;       // 中英切换瞬态提示：0=无 1=中 2=英
         in property <bool> hint-only; // hint 独占气泡形态：窗口临时缩成胶囊，候选内容全部隐藏
         in property <string> input-text; // 内嵌关时有值（独立字母窗口显示用）
+        in property <int> cand-font;  // 候选字号（7 档刻度：14-20，默认 16 = 第 3 档）
+        in property <int> num-w;      // 序号列宽（实测，随字号）
+        in property <float> font-scale; // 字号缩放系数 k = 字号/14（DPI 式等比）
+        // —— 文本测宽探针 ——
+        // 候选格宽度必须用"真实排版宽度"而不是估算表：估算系数随字号漂移，
+        // 字号一改就全员省略号（历史事故）。探针 Text 与候选格同字号、
+        // 置于窗口外不参与渲染；preferred-width 即该文本在此字号下的精确宽。
+        in property <string> probe-text;
+        in property <int> probe-font;
+        out property <length> probe-width: ptx.preferred-width;
+        ptx := Text {
+            x: 0;
+            y: -100px;
+            text: root.probe-text;
+            font-size: root.probe-font * 1px;
+        }
         width: root.hint-only ? 36px : root.panel-width * 1px;
         height: root.hint-only ? 36px
             : (root.menu-open ? root.menu-height * 1px
-            : (root.expanded ? root.panel-height * 1px : 40px));
+            : (root.expanded ? root.panel-height * 1px
+            : root.font-scale * 40px));
         background: transparent;
         // 外层圆角容器：窗口本身透明，圆角靠这层裁出（三形态共用：候选/展开/气泡）
         // 气泡态 = 深色半透明胶囊（白字大字，明暗背景均可读），与候选浅底区分开
@@ -270,10 +322,10 @@ slint::slint! {
         background: root.hint-only ? #404048E6 : #f7f8fa;
         // 字母区显示时取消顶部两角圆角（与上方字母窗连成一体）；内嵌态恢复
         property <bool> letters-above: root.input-text != "" && !root.hint-only;
-        border-top-left-radius: letters-above ? 0px : (root.hint-only ? 10px : 8px);
-        border-top-right-radius: letters-above ? 0px : (root.hint-only ? 10px : 8px);
-        border-bottom-left-radius: root.hint-only ? 10px : 8px;
-        border-bottom-right-radius: root.hint-only ? 10px : 8px;
+        border-top-left-radius: letters-above ? 0px : (root.hint-only ? 10px : root.font-scale * 8px);
+        border-top-right-radius: letters-above ? 0px : (root.hint-only ? 10px : root.font-scale * 8px);
+        border-bottom-left-radius: root.hint-only ? 10px : root.font-scale * 8px;
+        border-bottom-right-radius: root.hint-only ? 10px : root.font-scale * 8px;
         // 候选词流式格子（两态共用；收起时 40px 窗口只露出第一行）
         flick := Flickable {
             visible: !root.hint-only;
@@ -289,27 +341,27 @@ slint::slint! {
                     x: cell.x * 1px;
                     y: cell.y * 1px;
                     width: cell.w * 1px;
-                    height: 28px;
-                    border-radius: 8px;
+                    height: root.font-scale * 28px;
+                    border-radius: root.font-scale * 8px;
                     // 只有选中项有背景药丸，其余纯文字不加底色区分边界
                     background: cell.hl ? #2164f1 : transparent;
                     HorizontalLayout {
-                        padding-left: 8px;
-                        padding-right: 4px;
-                        spacing: 4px;
+                        padding-left: root.font-scale * 8px;
+                        padding-right: root.font-scale * 4px;
+                        spacing: root.font-scale * 4px;
                         alignment: center;
                         Text {
                             text: cell.num;
-                            // 序号固定占宽：空串时也占 7px，序号出现/隐藏不引起正文横移
-                            width: 7px;
+                            // 序号列宽随字号实测（空串也占位，出现/隐藏不引起正文横移）
+                            width: root.num-w * 1px;
                             color: cell.hl ? #cfe0ff : #999999;
-                            font-size: 11px;
+                            font-size: root.font-scale * 11px;
                             vertical-alignment: center;
                         }
                         Text {
                             text: cell.text;
                             color: cell.hl ? #ffffff : #1f2328;
-                            font-size: 14px;
+                            font-size: root.cand-font * 1px;
                             vertical-alignment: center;
                             overflow: elide;
                         }
@@ -349,11 +401,11 @@ slint::slint! {
         // 图标用 Path/色块矢量绘制而非字符 "▾"/"☰"：Windows 默认字体缺
         // 这两个码位的字形，软件渲染器不做逐字形回退，会渲染成空白
         if !root.expanded && !root.hint-only: Rectangle {
-            x: parent.width - 58px;
-            y: 6px;
-            width: 26px;
-            height: 28px;
-            border-radius: 8px;
+            x: parent.width - root.font-scale * 58px;
+            y: (parent.height - root.font-scale * 28px) / 2;
+            width: root.font-scale * 26px;
+            height: root.font-scale * 28px;
+            border-radius: root.font-scale * 8px;
             background: ta_arrow.has-hover ? #e8ebef : transparent;
             Path {
                 width: 8px;
@@ -371,11 +423,11 @@ slint::slint! {
             }
         }
         if !root.expanded && !root.hint-only: Rectangle {
-            x: parent.width - 30px;
-            y: 6px;
-            width: 26px;
-            height: 28px;
-            border-radius: 8px;
+            x: parent.width - root.font-scale * 30px;
+            y: (parent.height - root.font-scale * 28px) / 2;
+            width: root.font-scale * 26px;
+            height: root.font-scale * 28px;
+            border-radius: root.font-scale * 8px;
             background: ta_menu.has-hover || root.icon-sel ? #2164f1 : transparent;
             Rectangle {
                 width: 12px;
@@ -509,7 +561,7 @@ slint::slint! {
         callback nav_clicked(int);
         callback row_clicked(int);
         callback toggle_clicked(string);
-        callback step_clicked(string, int);
+        callback scale_clicked(float); // 参数 = 点击位置占轨道比例 0-1
         callback action_clicked(string);
         callback close_clicked();
 
@@ -581,30 +633,35 @@ slint::slint! {
                     ita := TouchArea { clicked => { root.toggle_clicked("inline"); } }
                 }
                 if root.page == 1: Rectangle {
-                    height: 44px; border-radius: 8px; background: #ffffff;
-                    HorizontalLayout {
-                        padding-left: 12px; padding-right: 12px; spacing: 8px;
-                        Text { text: "候选字号"; font-size: 14px; color: #1f2328; vertical-alignment: center; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Rectangle {
-                            width: 110px; height: 30px; y: 7px; border-radius: 6px; background: #e9ebef;
-                            HorizontalLayout {
-                                padding-left: 4px; padding-right: 4px; spacing: 4px;
-                                Rectangle {
-                                    width: 28px; border-radius: 6px; background: fta.has-hover ? #d8dce2 : transparent;
-                                    Text { text: "-"; font-size: 16px; color: #1f2328; }
-                                    fta := TouchArea { clicked => { root.step_clicked("font", -1); } }
-                                }
-                                Rectangle {
-                                    border-radius: 6px; background: #ffffff;
-                                    Text { text: root.font-size; font-size: 14px; color: #1f2328; }
-                                }
-                                Rectangle {
-                                    width: 28px; border-radius: 6px; background: fta2.has-hover ? #d8dce2 : transparent;
-                                    Text { text: "+"; font-size: 16px; color: #1f2328; }
-                                    fta2 := TouchArea { clicked => { root.step_clicked("font", 1); } }
-                                }
-                            }
+                    height: 68px; border-radius: 8px; background: #ffffff;
+                    Text {
+                        x: 12px; y: 0; width: 76px; height: parent.height;
+                        text: "候选字号"; font-size: 14px; color: #1f2328;
+                        vertical-alignment: center;
+                    }
+                    // 7 档刻度（14-20px），最小/默认/最大标签在 1/3/7 刻度下
+                    Rectangle {
+                        x: 104px; y: 8px;
+                        width: parent.width - 124px; height: 52px;
+                        Rectangle { // 轨道
+                            y: 12px; width: parent.width; height: 2px;
+                            background: #e0e3e8;
+                        }
+                        for t[i] in 7: Rectangle { // 刻度
+                            x: parent.width * i / 6 - 3px;
+                            y: 9px; width: 6px; height: 8px; border-radius: 1px;
+                            background: #c9ced6;
+                        }
+                        Rectangle { // 滑块
+                            x: parent.width * (root.font-size - 14) / 6 - 8px;
+                            y: 5px; width: 16px; height: 16px; border-radius: 8px;
+                            background: #2164f1;
+                        }
+                        Text { x: 0; y: 30px; width: 40px; text: "最小"; font-size: 11px; color: #999999; horizontal-alignment: center; }
+                        Text { x: parent.width * 2 / 6 - 20px; y: 30px; width: 40px; text: "默认"; font-size: 11px; color: #999999; horizontal-alignment: center; }
+                        Text { x: parent.width - 40px; y: 30px; width: 40px; text: "最大"; font-size: 11px; color: #999999; horizontal-alignment: center; }
+                        sta := TouchArea {
+                            clicked => { root.scale_clicked(self.mouse-x / self.width); }
                         }
                     }
                 }
@@ -686,8 +743,10 @@ slint::slint! {
 
     export component LettersWindow inherits Window {
         in property <string> text;
+        in property <int> cand-font;  // 与候选格同字号
+        in property <float> font-scale;
         width: 460px;
-        height: 24px;
+        height: root.font-scale * 24px;
         background: transparent;
         // 独立浮窗：与候选窗同色系、同圆角，悬浮于候选窗正上方。
         // 底部两角取消圆角（与下方候选窗顶部方角连成一体）
@@ -703,7 +762,7 @@ slint::slint! {
                 width: parent.width - 20px; height: parent.height;
                 text: root.text;
                 color: #888d95;
-                font-size: 14px;
+                font-size: root.cand-font * 1px;
                 vertical-alignment: center;
                 overflow: elide;
             }
@@ -2029,7 +2088,7 @@ fn set_bar_cells(
     // 只保留首行可见词：40px 横条只显示一行，放不下的词不显示也不参与
     // 键盘导航（否则 → 要穿过一堆看不见的词才能到图标）
     let (cells0, _) = build_flow_cells(&texts, hl);
-    let visible = cells0.iter().filter(|c| c.y == FLOW_TOP).count().max(1);
+    let visible = cells0.iter().filter(|c| c.y == lay_flow_top()).count().max(1);
     let visible = visible.min(texts.len());
     texts.truncate(visible);
     panel_hl.set(hl.min(visible as i32 - 1).max(0));
@@ -2039,6 +2098,7 @@ fn set_bar_cells(
     let (cells, _rows) = build_flow_cells(&texts, panel_hl.get());
     ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
     ui.set_panel_width(PANEL_WIDTH as i32);
+    ui.set_num_w(lay_num_w());
     // 中英角标：状态来自 get_status（ContextSnapshot 已不含 ascii 位）
     if let Ok(st) = engine.get_status(rime_id) {
         ui.set_ascii(st.is_ascii_mode);
@@ -2101,43 +2161,88 @@ fn estimate_w(text: &str) -> i32 {
         .sum()
 }
 
+/// 候选窗探针句柄：UI 线程创建组件后登记，供 measure_w 实测文本宽。
+thread_local! {
+    static PROBE: RefCell<Option<Rc<CandWindow>>> = const { RefCell::new(None) };
+}
+
+/// 实测文本排版宽（逻辑px，含 1px 防舍入余量）：用候选窗里的隐藏探针 Text
+/// 按指定字号测量，任何字号/字符集（CJK/ASCII/emoji）都精确——取代随字号
+/// 漂移的估算系数表（估算偏窄 = slint elide = 全员省略号事故）。
+/// 探针未登记（UI 线程外/启动早期）时退回估算表。
+fn measure_w(text: &str, font: i32) -> i32 {
+    if text.is_empty() {
+        return 0;
+    }
+    PROBE.with(|p| {
+        if let Some(ui) = p.borrow().as_ref() {
+            ui.set_probe_text(text.into());
+            ui.set_probe_font(font);
+            ui.get_probe_width().ceil() as i32 + 1
+        } else {
+            estimate_w(text)
+        }
+    })
+}
+
+/// 当前候选字号（探针未登记时回默认 16）
+fn current_cand_font() -> i32 {
+    PROBE.with(|p| {
+        p.borrow()
+            .as_ref()
+            .map(|u| u.get_cand_font())
+            .unwrap_or(16)
+    })
+}
+
 /// 内容自适应流式排布（收起单行同款）：格子宽度随词长走，一行能塞几个塞几个，
-/// 不限个数；超长词封顶 150px 并中间省略。序号每行从 1 开始。
+/// 不限个数；超长词封顶整行宽并中间省略。序号每行从 1 开始。
 /// 返回 (cells, 行数)。hl_global 为当前选中候选的全局序号。
+/// 宽度一律实测（measure_w），估算表仅作探针未就绪的兜底。
 fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
-    let margin = 6i32;
-    let gap = 3i32;
+    let margin = lay_px(6.0);
+    let gap = lay_px(3.0);
+    let font = current_cand_font();
+    let num_w = lay_num_w();
+    // 格内水平留白也等比（与 slint HorizontalLayout 的 padding/spacing 绑定一致）
+    let (pad_l, pad_s, pad_r) = (lay_px(8.0), lay_px(4.0), lay_px(6.0));
     let panel_w = PANEL_WIDTH as i32;
-    // 首行右侧给 ▾/☰ 两个按钮留位；展开行给滚动条留位
-    let first_row_right = panel_w - margin - 58;
-    let row_right = panel_w - margin - 8;
+    // 首行右侧给 ▾/☰ 两个按钮留位（按钮带设计 58）；展开行给滚动条留位
+    let first_row_right = panel_w - margin - lay_px(58.0);
+    let row_right = panel_w - margin - lay_px(8.0);
     let mut cells: Vec<CandCell> = Vec::new();
-    let (mut x, mut y) = (margin, FLOW_TOP);
+    let (mut x, mut y) = (margin, lay_flow_top());
     let mut num = 0i32;
     for (i, t) in all.iter().enumerate() {
         let disp = t.clone();
-        let text_w = estimate_w(&disp);
-        let num_w0 = if num < 9 { 7 } else { 14 };
-        let full_w = 8 + num_w0 + 4 + text_w + 6;
+        let text_w = measure_w(&disp, font);
+        let full_w = pad_l + num_w + pad_s + text_w + pad_r;
         // 当前装不下完整一词 → 换行（每词完整显示，绝不截断塞边角）
-        let right = if y == FLOW_TOP { first_row_right } else { row_right };
+        let top = lay_flow_top();
+        let right = if y == top { first_row_right } else { row_right };
         if x + full_w > right && num > 0 {
-            y += FLOW_ROW_H;
+            y += lay_row_h();
             x = margin;
             num = 0;
         }
         // 只有当一个词连一整行可填宽度都放不下（超长句）才中间省略
-        let right = if y == FLOW_TOP { first_row_right } else { row_right };
+        let right = if y == top { first_row_right } else { row_right };
         let max_w = right - margin;
-        let num_w = if num < 9 { 7 } else { 14 };
-        let full_w = 8 + num_w + 4 + text_w + 6;
+        let full_w = pad_l + num_w + pad_s + text_w + pad_r;
         let (w, disp) = if full_w > max_w {
-            let cap = ((max_w - 8 - num_w - 4 - 6).max(0) / 14) as usize;
-            (max_w, mid_ellipsis(t, cap))
+            // 真正放不下一整行才省略；截断后实测收敛，保证任何字号都装得下
+            let avail = (max_w - pad_l - num_w - pad_s - pad_r).max(0) as usize;
+            let mut cap = (avail / 12).max(1);
+            let mut d = mid_ellipsis(t, cap);
+            while cap > 1 && measure_w(&d, font) > avail as i32 {
+                cap -= 1;
+                d = mid_ellipsis(t, cap);
+            }
+            (max_w, d)
         } else {
             (full_w, disp)
         };
-        if y > FLOW_TOP + FLOW_MAX_ROWS * FLOW_ROW_H {
+        if y > lay_flow_top() + FLOW_MAX_ROWS * lay_row_h() {
             break; // 行数封顶，超出部分后续做滚动
         }
         cells.push(CandCell {
@@ -2151,7 +2256,7 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
         x += w + gap;
         num += 1;
     }
-    let rows = ((y - FLOW_TOP) / FLOW_ROW_H) + 1;
+    let rows = ((y - lay_flow_top()) / lay_row_h()) + 1;
     (cells, rows)
 }
 
@@ -2159,13 +2264,13 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
 /// 词的槽位跨度 = ceil(字数/3)（4 字占 2 格、7 字占 3 格），占满 6 槽换行；
 /// 槽内容纳不下时中间省略。序号每行从 1 开始。返回 (cells, 行数)。
 fn build_grid_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
-    let margin = 6i32;
-    let gap = 4i32;
+    let margin = lay_px(6.0);
+    let gap = lay_px(4.0);
     const SLOTS_PER_ROW: i32 = 6;
     let panel_w = PANEL_WIDTH as i32;
     let slot_w = (panel_w - margin * 2) / SLOTS_PER_ROW;
     let mut cells: Vec<CandCell> = Vec::new();
-    let (mut x, mut y) = (margin, FLOW_TOP);
+    let (mut x, mut y) = (margin, lay_flow_top());
     let mut used_slots = 0i32;
     let mut num = 0i32;
     let mut hl_row: Option<i32> = None;
@@ -2174,12 +2279,12 @@ fn build_grid_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
         let spans = (((chars + 2) / 3).max(1)).min(SLOTS_PER_ROW);
         if used_slots + spans > SLOTS_PER_ROW {
             // 换行：序号从 1 重新开始
-            y += FLOW_ROW_H;
+            y += lay_row_h();
             x = margin;
             used_slots = 0;
             num = 0;
         }
-        if y > FLOW_TOP + FLOW_MAX_ROWS * FLOW_ROW_H {
+        if y > lay_flow_top() + FLOW_MAX_ROWS * lay_row_h() {
             break; // 行数封顶，超出部分后续做滚动
         }
         let disp = mid_ellipsis(t, (spans * 3) as usize);
@@ -2206,7 +2311,7 @@ fn build_grid_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
             }
         }
     }
-    let rows = ((y - FLOW_TOP) / FLOW_ROW_H) + 1;
+    let rows = ((y - lay_flow_top()) / lay_row_h()) + 1;
     (cells, rows)
 }
 
@@ -2368,6 +2473,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     };
     let msw = MSW.with(|w| w.clone());
     let ui = Rc::new(CandWindow::new().expect("heng-ui: 组件创建失败"));
+    // 登记测宽探针（measure_w 用）；此后所有候选格宽度走实测
+    PROBE.with(|p| *p.borrow_mut() = Some(ui.clone()));
     // 第 2 个组件实例 → MSW2（XPlatform 计数路由）
     let msw2 = MSW2.with(|w| w.clone());
     let sui = Rc::new(SettingsWindow::new().expect("heng-ui: 设置组件创建失败"));
@@ -2375,11 +2482,25 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // 原候选窗布局零改动）
     let msw3 = MSW3.with(|w| w.clone());
     let lsw = Rc::new(LettersWindow::new().expect("heng-ui: 字母区组件创建失败"));
+    // 启动时先应用候选字号（7 档刻度 14-20，默认 16 = 第 3 档）——
+    // 布局尺寸全部由此推导，必须在算高度之前
+    if let Ok(eng) = engine() {
+        let f = Settings::new(eng)
+            .get_path(crate::settings::PATCH_WEASEL, "style/font_point_size")
+            .and_then(|v| v.as_i64())
+            .map(|v| v.clamp(14, 20) as i32)
+            .unwrap_or(16);
+        ui.set_cand_font(f);
+        lsw.set_cand_font(f);
+        let k = f as f32 / 14.0;
+        ui.set_font_scale(k);
+        lsw.set_font_scale(k);
+    }
     // DPI 缩放：布局用逻辑像素，渲染/窗口尺寸放大到物理像素
     let scale = ui_scale();
-    let bar_h = (BAR_HEIGHT as f32 * scale).round() as u32;
+    let bar_h = (lay_bar_h() as f32 * scale).round() as u32;
     // 顶部字母区高度（物理px）：独立窗口，paint 时贴候选窗正上方
-    let input_row_h = (24.0_f32 * scale).round() as u32;
+    let input_row_h = (lay_letters_h() as f32 * scale).round() as u32;
     msw.window()
         .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
     msw.set_size(PhysicalSize { width: (160.0 * scale) as u32, height: bar_h });
@@ -2412,6 +2533,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // 顶部字母区独立窗口的帧缓冲
     let lsbuf: RefCell<Vec<Argb>> = RefCell::new(Vec::new());
     let visible = RefCell::new(false);
+    // 收起条物理高：随当前字号实时推导（设置页改字号后立即生效）
+    let bar_h_now = || (lay_bar_h() as f32 * scale).round() as u32;
     let cur_h = Cell::new(bar_h); // 当前物理高度（展开态会变）
     // 向上展开状态：光标下方放不下时翻转，窗口底边锚定输入行顶边、面板向上长。
     // flip_top = 所在显示器工作区顶（防向上越出屏幕）
@@ -2691,33 +2814,47 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
             }
         }
     });
-    sui.on_step_clicked({
+    sui.on_scale_clicked({
         let sui = sui.clone();
         let sstate = sstate.clone();
-        let tx = tx.clone();
-        move |tag, d| {
+        let ui_c = ui.clone();
+        let lsw_c = lsw.clone();
+        let tx_c = tx.clone();
+        move |ratio: f32| {
             let Ok(engine) = engine() else { return };
             let _guard = OP_LOCK.lock().unwrap();
             let settings = Settings::new(&engine);
             let Some(st) = sstate.borrow().as_ref().map(|s| s.clone()) else { return };
-            let mut changed = false;
-            match tag.as_str() {
-                "font" => {
-                    let n = (st.font + d).clamp(10, 32);
-                    if n != st.font {
-                        changed = settings.set_font_point_size(n as i64).is_ok();
-                        // 样式改动不走 redeploy（会作废活动会话）；字号目前
-                        // 仅设置页展示，用已知新值直接刷新
-                        if changed {
-                            let mut ns = st.clone();
-                            ns.font = n;
-                            *sstate.borrow_mut() = Some(ns.clone());
-                            settings_apply_page(&sui, &ns, sui.get_page());
-                            let _ = tx.send(UiCmd::Hide);
-                        }
-                    }
-                }
-                _ => {}
+            // 点击位置 → 7 档刻度（0-6），字号 = 14 + 档位（默认 16 = 第 3 档）
+            let level = ((ratio * 6.0) + 0.5).floor().clamp(0.0, 6.0) as i32;
+            let n = 14 + level;
+            if n != st.font && settings.set_font_point_size(n as i64).is_ok() {
+                // 样式改动不走 redeploy（会作废活动会话）；字号实时应用到
+                // 候选窗与字母区，容器尺寸（格高/条高/字母区高）一起缩放
+                ui_c.set_cand_font(n);
+                lsw_c.set_cand_font(n);
+                let k = n as f32 / 14.0;
+                ui_c.set_font_scale(k);
+                lsw_c.set_font_scale(k);
+                let sc = ui_scale();
+                MSW.with(|w| {
+                    w.set_size(PhysicalSize {
+                        width: (PANEL_WIDTH as f32 * sc).round() as u32,
+                        height: ((lay_bar_h() as f32) * sc).round() as u32,
+                    })
+                });
+                MSW3.with(|w| {
+                    w.set_size(PhysicalSize {
+                        width: (PANEL_WIDTH as f32 * sc).round() as u32,
+                        height: ((lay_letters_h() as f32) * sc).round() as u32,
+                    })
+                });
+                let mut ns = st.clone();
+                ns.font = n;
+                *sstate.borrow_mut() = Some(ns.clone());
+                settings_apply_page(&sui, &ns, sui.get_page());
+                // 收起当前条：下一次按键以新尺寸重新布局绘制
+                let _ = tx_c.send(UiCmd::Hide);
             }
         }
     });
@@ -2832,7 +2969,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             UI_EXPANDED.store(false, Ordering::Relaxed);
                             flip.set(false);
                             *panel.borrow_mut() = None;
-                            paint(&mut backend, w, bar_h, x, y, true);
+                            paint(&mut backend, w, bar_h_now(), x, y, true);
                         }
                     }
                 }
@@ -2946,9 +3083,9 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         ui.set_hl_y(-1);
                         ui.set_hl_y(hl_y);
                         ui.set_panel_width(PANEL_WIDTH as i32);
-                        let content_h = FLOW_TOP + (rows - 1) * FLOW_ROW_H + 28 + 8;
+                        let content_h = lay_flow_top() + (rows - 1) * lay_row_h() + lay_cell_h() + lay_px(8.0);
                         let h_logical =
-                            (8 + PANEL_VISIBLE_ROWS * FLOW_ROW_H + 8).max(bar_h as i32);
+                            (lay_px(8.0) + PANEL_VISIBLE_ROWS * lay_row_h() + lay_px(8.0)).max(lay_bar_h());
                         ui.set_content_height(content_h);
                         ui.set_panel_height(h_logical);
                         last_panel_h.set((h_logical as f32 * scale).round() as u32);
@@ -3007,7 +3144,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             }
                         }
                         let w = (PANEL_WIDTH as f32 * scale).round() as u32;
-                        paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                        paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                         expanded.set(false);
                     }
                 }
@@ -3042,7 +3179,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     let hl_y = cells.iter().find(|c| c.hl).map(|c| c.y).unwrap_or(0);
                     ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
                     ui.set_hl_y(hl_y);
-                    let h = if in_panel { last_panel_h.get() } else { bar_h };
+                    let h = if in_panel { last_panel_h.get() } else { bar_h_now() };
                     paint(
                         &mut backend,
                         (PANEL_WIDTH as f32 * scale).round() as u32,
@@ -3093,7 +3230,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                 }
                             }
                             let w = (PANEL_WIDTH as f32 * scale).round() as u32;
-                            paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                            paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                             continue;
                         }
                         geo.iter().map(|g| g.1).filter(|&y| y < cy).max()
@@ -3149,7 +3286,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     paint(
                         &mut backend,
                         (PANEL_WIDTH as f32 * scale).round() as u32,
-                        bar_h,
+                        bar_h_now(),
                         last_x.get(),
                         last_y.get(),
                         true,
@@ -3195,7 +3332,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                 &panel_hl,
                             );
                             let w = (PANEL_WIDTH as f32 * scale).round() as u32;
-                            paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                            paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                         }
                     }
                 }
@@ -3204,8 +3341,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     menu_open.set(true);
                     UI_MENU_OPEN.store(true, Ordering::Relaxed);
                     ui.set_menu_open(true);
-                    ui.set_menu_height(MENU_HEIGHT);
-                    let h = (MENU_HEIGHT as f32 * scale).round() as u32;
+                    ui.set_menu_height(lay_menu_h());
+                    let h = (lay_menu_h() as f32 * scale).round() as u32;
                     paint(
                         &mut backend,
                         (PANEL_WIDTH as f32 * scale).round() as u32,
@@ -3222,7 +3359,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     paint(
                         &mut backend,
                         (PANEL_WIDTH as f32 * scale).round() as u32,
-                        bar_h,
+                        bar_h_now(),
                         last_x.get(),
                         last_y.get(),
                         true,
@@ -3308,7 +3445,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                 paint(
                                     &mut backend,
                                     w,
-                                    bar_h,
+                                    bar_h_now(),
                                     last_x.get(),
                                     last_y.get(),
                                     true,
@@ -3378,7 +3515,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         }
                     }
                     let w = (PANEL_WIDTH as f32 * scale).round() as u32;
-                    paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                    paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                 }
             }
         }
@@ -3459,7 +3596,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 }
                 if restore {
                     let w = (PANEL_WIDTH as f32 * scale).round() as u32;
-                    paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
+                    paint(&mut backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
                 } else {
                     backend.set_mapped(0, false);
                     backend.set_mapped(2, false);
@@ -3566,7 +3703,8 @@ fn load_settings_state(
             .unwrap_or(false); // Linux 默认关
         st.font = engine
             .config_get_int(&cfg, "style/font_point_size")
-            .unwrap_or(14);
+            .unwrap_or(16)
+            .clamp(14, 20);
         // 样式开关读源补丁覆盖：config_open 读的是部署产物（user/build/），
         // 直接写 weasel.custom.yaml 后未重部署时仍是旧值；样式不参与
         // librime 部署语义，源补丁即真相（避免为显示而 redeploy 杀会话）
