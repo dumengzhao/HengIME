@@ -81,11 +81,6 @@ impl Settings {
         self.set_path(PATCH_WEASEL, "style/color_scheme", Value::from(id))
     }
 
-    /// 横排(true)/竖排(false)
-    pub fn set_horizontal(&self, on: bool) -> std::io::Result<()> {
-        self.set_path(PATCH_WEASEL, "style/horizontal", Value::from(on))
-    }
-
     /// 内嵌编码（inline preedit）
     pub fn set_inline_preedit(&self, on: bool) -> std::io::Result<()> {
         self.set_path(PATCH_WEASEL, "style/inline_preedit", Value::from(on))

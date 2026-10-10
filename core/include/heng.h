@@ -141,6 +141,11 @@ HENG_API int heng_set_option(heng_session_t session, const char* option, int val
 /* 读取会话选项。返回 0/1；-1 表示失败（会话不存在）。 */
 HENG_API int heng_get_option(heng_session_t session, const char* option);
 
+/* 读样式布尔（weasel.custom.yaml style/<key>，源补丁直读，无部署缓存）。
+ * 返回 0/1；键不存在或读取失败返回 default_value。外壳用它决定是否
+ * 内联推送 preedit（如 "inline_preedit"）。 */
+HENG_API int heng_style_flag(const char* key, int default_value);
+
 /* 取会话状态快照。返回 HENG_TRUE 后必须用 heng_free_status 释放。 */
 HENG_API int heng_get_status(heng_session_t session, HengStatus* out);
 

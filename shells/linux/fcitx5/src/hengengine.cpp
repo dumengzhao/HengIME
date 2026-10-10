@@ -81,6 +81,9 @@ private:
     void updateUI(InputContext *ic, heng_session_t session);
 
     Instance *instance_;
+    // UI 点击/键盘选词的提交靠这个周期 timer 从 core 取出——必须持有引用，
+    // 否则 addTimeEvent 返回的 unique_ptr 被丢弃、定时器即刻析构（历史 bug）
+    std::unique_ptr<fcitx::EventSourceTime> drain_timer_;
     std::unordered_map<uint64_t, heng_session_t> sessions_;
     std::unordered_map<heng_session_t, InputContext *> ics_;
     // Shift 独按 → 中英切换：Shift 按下标记，期间无其它按键则释放时切换
@@ -106,13 +109,17 @@ HengEngine::HengEngine(Instance *instance) : instance_(instance) {
         EventType::InputContextFocusOut, EventWatcherPhase::PreInputMethod,
         [](Event &) { heng_ui_hide(); });
     // 周期取走 UI 点击产生的提交（点击发生在引擎内部，无按键事件伴随）
-    instance_->eventLoop().addTimeEvent(
+    // fcitx5 的 TimeEvent 构造即 one-shot（libuv 后端触发后 setEnabled(false)）：
+    // 回调须重新启用 + setNextInterval 排下一次，否则周期 drain 只跑一次
+    drain_timer_ = instance_->eventLoop().addTimeEvent(
         CLOCK_MONOTONIC, now(CLOCK_MONOTONIC) + 100000, 90000,
-        [this](EventSourceTime *, uint64_t) {
+        [this](EventSourceTime *event, uint64_t) {
+            event->setEnabled(true);
+            event->setNextInterval(90000);
             for (auto &[session, ic] : ics_) {
                 drainUiCommit(ic, session);
             }
-            return true; // 周期重复
+            return true;
         });
 }
 
@@ -161,6 +168,7 @@ void HengEngine::deactivate(const InputMethodEntry &, InputContextEvent &event) 
     }
     heng_ui_hide();
     ic->inputPanel().reset();
+    ic->updatePreedit();
     ic->updateUserInterface(UserInterfaceComponent::InputPanel);
 }
 
@@ -171,6 +179,7 @@ void HengEngine::reset(const InputMethodEntry &, InputContextEvent &event) {
     }
     heng_ui_hide();
     ic->inputPanel().reset();
+    ic->updatePreedit();
     ic->updateUserInterface(UserInterfaceComponent::InputPanel);
 }
 
@@ -249,6 +258,7 @@ void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
 void HengEngine::drainUiCommit(InputContext *ic, heng_session_t session) {
     char *text = nullptr;
     if (heng_take_ui_commit(session, &text) == HENG_TRUE && text) {
+        std::fprintf(stderr, "[heng] drain commit: %s\n", text);
         ic->commitString(text);
         heng_free_string(text);
         ic->updateUserInterface(UserInterfaceComponent::InputPanel);
@@ -256,17 +266,26 @@ void HengEngine::drainUiCommit(InputContext *ic, heng_session_t session) {
 }
 
 void HengEngine::updateUI(InputContext *ic, heng_session_t session) {
-    // 只喂 client preedit（应用内联显示）；不再设置 panel preedit / 候选列表，
-    // classicui 就没有任何要画的内容（候选窗由 core 自绘接管）
+    // preedit 显示语义（对齐 weasel inline_preedit）：
+    // - 开（默认）：client preedit 内嵌到应用光标处，候选条只放候选
+    // - 关：不推 client preedit，字母由 core 画在候选条最左侧
+    //   （终端等不支持内联的应用靠此开关也能看到字母）
+    const bool inline_on = heng_style_flag("inline_preedit", HENG_FALSE) == HENG_TRUE;
+
     auto &panel = ic->inputPanel();
     panel.reset();
 
     HengContext ctx = {0};
     ctx.data_size = sizeof(HengContext);
-    if (heng_get_context(session, &ctx) == HENG_TRUE && ctx.preedit) {
+    if (inline_on && heng_get_context(session, &ctx) == HENG_TRUE && ctx.preedit) {
         panel.setClientPreedit(preeditText(ctx));
     }
     heng_free_context(&ctx);
+    // updateUserInterface 只刷新 UI 管理器；client preedit 必须显式
+    // updatePreedit() 才会推送 UpdateFormattedPreedit 给前端（参照
+    // fcitx5-chinese-addons pinyin.cpp 的用法）。关态也要调：把空 preedit
+    // 推给应用以清除残留组合串。
+    ic->updatePreedit();
     ic->updateUserInterface(UserInterfaceComponent::InputPanel);
 
     // 自绘候选窗跟随光标（fcitx5 上报光标区域；无有效区域用上次位置）

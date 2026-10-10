@@ -721,6 +721,33 @@ pub extern "C" fn heng_get_option(session: HengSession, option: *const c_char) -
     })
 }
 
+/// 读样式布尔（weasel.custom.yaml style/<key>，源补丁直读）。
+/// 返回 0/1；键不存在或读取失败返回 default_value。
+/// 外壳用它决定是否内联推送 preedit（如 "inline_preedit"）——
+/// 不读部署产物缓存，避免"改了开关但不重部署就读到旧值"。
+#[no_mangle]
+pub extern "C" fn heng_style_flag(key: *const c_char, default_value: c_int) -> c_int {
+    ffi_guard!(default_value, {
+        let Some(key) = (unsafe { cstr_to_string(key) }) else {
+            return default_value;
+        };
+        let Ok(engine) = engine() else {
+            return default_value;
+        };
+        let settings = crate::settings::Settings::new(engine);
+        match settings.get_path(crate::settings::PATCH_WEASEL, &format!("style/{key}")) {
+            Some(serde_yaml::Value::Bool(b)) => {
+                if b {
+                    1
+                } else {
+                    0
+                }
+            }
+            _ => default_value,
+        }
+    })
+}
+
 /// 取会话状态快照。返回 TRUE 后调用方必须用 `heng_free_status` 释放。
 #[no_mangle]
 pub extern "C" fn heng_get_status(session: HengSession, out: *mut HengStatus) -> c_int {
@@ -1093,7 +1120,7 @@ pub extern "C" fn heng_ui_sync_ex(
 }
 
 /// 打开设置窗口（v9；运行于 core 内部 UI 线程，窗口属于宿主进程）。
-/// page = 初始页索引 0-5（0=输入方案 1=候选窗样式 2=快捷键 3=标点 4=词库 5=关于）。
+/// page = 初始页索引 0-5（0=输入方案 1=外观 2=快捷键 3=标点 4=词库 5=关于）。
 #[no_mangle]
 pub extern "C" fn heng_settings_show(page: c_int) -> c_int {
     ffi_guard!(HENG_FALSE, {
@@ -1165,7 +1192,9 @@ pub extern "C" fn heng_take_ui_commit(session: HengSession, out: *mut *mut c_cha
             return HENG_FALSE;
         }
         unsafe { *out = ptr::null_mut() };
-        if let Some(text) = crate::ui::PENDING_UI_COMMITS.lock().unwrap().remove(&session) {
+        let mut pend = crate::ui::PENDING_UI_COMMITS.lock().unwrap();
+        if let Some(text) = pend.remove(&session) {
+            drop(pend);
             if let Ok(c) = CString::new(text) {
                 unsafe { *out = c.into_raw() };
                 return HENG_TRUE;

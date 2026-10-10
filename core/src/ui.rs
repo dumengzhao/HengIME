@@ -35,7 +35,7 @@ use crate::engine::{RimeConfig, RimeConfigIterator};
 use crate::global::{engine, SESSIONS, OP_LOCK};
 use crate::settings::{
     build_bindings, parse_bindings, Settings, FULL_PRESETS, LR_PRESETS, PAGING_PRESETS,
-    PUNCT_PRESETS, SIMP_PRESETS,
+    PATCH_WEASEL, PUNCT_PRESETS, SIMP_PRESETS,
 };
 use crate::Engine;
 
@@ -81,6 +81,10 @@ enum UiCmd {
     BarSelect(usize),
     /// 打开 ☰ 菜单（占位：符号/常用语/设置）
     MenuOpen,
+    /// ☰ 菜单项点击（0=符号 1=常用语 2=设置，内部命令）
+    MenuItem(i32),
+    /// ☰ 菜单空白处点击 / 其它 dismissal：整窗关闭（不回横条，打字才回）
+    MenuDismiss,
     /// 关闭菜单回到横条
     MenuClose,
     /// 打开设置窗口（参数 = 初始页索引）
@@ -241,6 +245,7 @@ slint::slint! {
         in property <bool> expanded;
         in property <int> panel-width;
         in property <int> panel-height;   // 展开态可视高度
+        in property <int> menu-height;    // ☰ 菜单态窗口高度
         in property <int> content-height; // 展开态内容总高（滚动范围）
         in property <[CandCell]> all-cells;
         in property <bool> icon-sel;  // ☰ 被键盘选中（单行 → 到词尾跳过 ▾）
@@ -249,8 +254,11 @@ slint::slint! {
         in property <bool> ascii;     // true = 英文模式（切换提示用）
         in property <int> hint;       // 中英切换瞬态提示：0=无 1=中 2=英
         in property <bool> hint-only; // hint 独占气泡形态：窗口临时缩成胶囊，候选内容全部隐藏
+        in property <string> input-text; // 内嵌关时有值（独立字母窗口显示用）
         width: root.hint-only ? 36px : root.panel-width * 1px;
-        height: root.hint-only ? 36px : (root.expanded ? root.panel-height * 1px : 40px);
+        height: root.hint-only ? 36px
+            : (root.menu-open ? root.menu-height * 1px
+            : (root.expanded ? root.panel-height * 1px : 40px));
         background: transparent;
         // 外层圆角容器：窗口本身透明，圆角靠这层裁出（三形态共用：候选/展开/气泡）
         // 气泡态 = 深色半透明胶囊（白字大字，明暗背景均可读），与候选浅底区分开
@@ -260,7 +268,12 @@ slint::slint! {
         width: parent.width;
         height: parent.height;
         background: root.hint-only ? #404048E6 : #f7f8fa;
-        border-radius: root.hint-only ? 10px : 8px;
+        // 字母区显示时取消顶部两角圆角（与上方字母窗连成一体）；内嵌态恢复
+        property <bool> letters-above: root.input-text != "" && !root.hint-only;
+        border-top-left-radius: letters-above ? 0px : (root.hint-only ? 10px : 8px);
+        border-top-right-radius: letters-above ? 0px : (root.hint-only ? 10px : 8px);
+        border-bottom-left-radius: root.hint-only ? 10px : 8px;
+        border-bottom-right-radius: root.hint-only ? 10px : 8px;
         // 候选词流式格子（两态共用；收起时 40px 窗口只露出第一行）
         flick := Flickable {
             visible: !root.hint-only;
@@ -386,12 +399,18 @@ slint::slint! {
             height: parent.height;
             background: #f7f8fa;
             border-radius: 8px;
+            // 空白处点击 → 整窗关闭；垫底（后声明的元素在上层，放在菜单项
+            // 之后会把整窗点击吞掉、菜单项永远点不到）
+            TouchArea {
+                clicked => { root.menu_dismissed(); }
+            }
             VerticalLayout {
                 padding: 4px;
                 spacing: 2px;
-                for name in ["符号", "常用语", "设置"]: Rectangle {
+                for name[mi] in ["符号", "常用语", "设置"]: Rectangle {
                     height: 34px;
                     border-radius: 6px;
+                    background: ta-mi.has-hover ? #e8ebef : transparent;
                     HorizontalLayout {
                         padding-left: 12px;
                         alignment: center;
@@ -402,10 +421,12 @@ slint::slint! {
                             vertical-alignment: center;
                         }
                     }
+                    ta-mi := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.menu_item_clicked(mi); }
+                    }
                 }
             }
-            // 吞掉点击，避免穿透到下层按钮
-            TouchArea { }
         }
         // ↓/↑ 移动高亮后把高亮行滚进可视区（自绘滚动条由 flick.content-y
         // 驱动，自动跟随）。28px = 格子高，6px = 视区上下呼吸边距。
@@ -441,6 +462,8 @@ slint::slint! {
             }
         }
         callback candidate_clicked(int);
+        callback menu_item_clicked(int);
+        callback menu_dismissed();
         callback toggle_expand();
         callback expanded_clicked(int);
         callback menu_clicked();
@@ -480,7 +503,6 @@ slint::slint! {
         in property <string> head-text;
         in property <[SetRow]> page-rows;
         in property <int> font-size;
-        in property <bool> horizontal;
         in property <bool> inline-preedit;
         in property <bool> ascii-punct;
         in property <string> about-lines;
@@ -535,32 +557,16 @@ slint::slint! {
             width: parent.width - 182px;
             height: parent.height - 62px;
             VerticalLayout {
+                // 钉死 = 视口宽：否则内容宽度被最宽子行的 preferred 撑宽，
+                // 所有行跟着变宽，右侧胶囊被视口裁掉
+                width: parent.width;
                 spacing: 6px;
-                // —— 页2 样式：拨杆与步进（固定行在前，配色列表在后） ——
+                // —— 页2 外观：拨杆与步进（固定行在前，配色列表在后） ——
                 if root.page == 1: Rectangle {
                     height: 44px; border-radius: 8px; background: #ffffff;
                     HorizontalLayout {
                         padding-left: 12px; padding-right: 12px; spacing: 8px;
-                        Text { text: "横排候选"; font-size: 14px; color: #1f2328; vertical-alignment: center; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Rectangle {
-                            width: 40px; height: 22px; border-radius: 11px; y: 11px;
-                            background: root.horizontal ? #2164f1 : #c9ced6;
-                            Rectangle {
-                                x: root.horizontal ? 20px : 2px; y: 2px;
-                                width: 18px; height: 18px; border-radius: 9px;
-                                background: #ffffff;
-                                animate x { duration: 120ms; }
-                            }
-                        }
-                    }
-                    hta := TouchArea { clicked => { root.toggle_clicked("horizontal"); } }
-                }
-                if root.page == 1: Rectangle {
-                    height: 44px; border-radius: 8px; background: #ffffff;
-                    HorizontalLayout {
-                        padding-left: 12px; padding-right: 12px; spacing: 8px;
-                        Text { text: "拼音内嵌（编码上屏前显示在输入行）"; font-size: 14px; color: #1f2328; vertical-alignment: center; }
+                        Text { text: "拼音内嵌（编码上屏前显示在输入行）"; font-size: 14px; color: #1f2328; vertical-alignment: center; overflow: elide; }
                         Rectangle { horizontal-stretch: 1; }
                         Rectangle {
                             width: 40px; height: 22px; border-radius: 11px; y: 11px;
@@ -569,7 +575,6 @@ slint::slint! {
                                 x: root.inline-preedit ? 20px : 2px; y: 2px;
                                 width: 18px; height: 18px; border-radius: 9px;
                                 background: #ffffff;
-                                animate x { duration: 120ms; }
                             }
                         }
                     }
@@ -625,9 +630,9 @@ slint::slint! {
                             alignment: center;
                             Rectangle { height: 16px; border-radius: 4px; background: row.sw3; border-width: 1px; border-color: #d8dce2; }
                         }
-                        Text { text: row.title; font-size: 14px; color: #1f2328; vertical-alignment: center; }
+                        Text { text: row.title; font-size: 14px; color: #1f2328; vertical-alignment: center; overflow: elide; }
                         Rectangle { horizontal-stretch: 1; }
-                        Text { text: row.sub; font-size: 12px; color: #999999; vertical-alignment: center; }
+                        Text { text: row.sub; font-size: 12px; color: #999999; vertical-alignment: center; overflow: elide; }
                     }
                     rta := TouchArea { mouse-cursor: pointer; clicked => { root.row_clicked(r); } }
                 }
@@ -645,7 +650,6 @@ slint::slint! {
                                 x: root.ascii-punct ? 20px : 2px; y: 2px;
                                 width: 18px; height: 18px; border-radius: 9px;
                                 background: #ffffff;
-                                animate x { duration: 120ms; }
                             }
                         }
                     }
@@ -676,6 +680,32 @@ slint::slint! {
                     SetBtn { text: "打开日志目录"; clicked => { root.action_clicked("open-log"); } }
                     SetBtn { text: "打开用户目录"; clicked => { root.action_clicked("open-user"); } }
                 }
+            }
+        }
+    }
+
+    export component LettersWindow inherits Window {
+        in property <string> text;
+        width: 460px;
+        height: 24px;
+        background: transparent;
+        // 独立浮窗：与候选窗同色系、同圆角，悬浮于候选窗正上方。
+        // 底部两角取消圆角（与下方候选窗顶部方角连成一体）
+        Rectangle {
+            x: 0; y: 0; width: parent.width; height: parent.height;
+            background: #f7f8fa;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            border-bottom-left-radius: 0px;
+            border-bottom-right-radius: 0px;
+            Text {
+                x: 10px; y: 0;
+                width: parent.width - 20px; height: parent.height;
+                text: root.text;
+                color: #888d95;
+                font-size: 14px;
+                vertical-alignment: center;
+                overflow: elide;
             }
         }
     }
@@ -720,7 +750,8 @@ impl TargetPixel for Argb {
 }
 
 struct XPlatform {
-    /// 窗口创建计数：第 1 个组件 = 候选窗（MSW），第 2 个 = 设置窗口（MSW2）
+    /// 窗口创建计数：第 1 个组件 = 候选窗（MSW），第 2 个 = 设置窗口（MSW2），
+    /// 第 3 个 = 顶部字母区（MSW3）
     n: std::cell::Cell<u32>,
 }
 impl Platform for XPlatform {
@@ -731,8 +762,10 @@ impl Platform for XPlatform {
         self.n.set(n + 1);
         if n == 0 {
             Ok(MSW.with(|w| w.clone()))
-        } else {
+        } else if n == 1 {
             Ok(MSW2.with(|w| w.clone()))
+        } else {
+            Ok(MSW3.with(|w| w.clone()))
         }
     }
     fn run_event_loop(&self) -> Result<(), slint::PlatformError> {
@@ -748,6 +781,9 @@ thread_local! {
         MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     /// 设置窗口（第 2 个组件实例经 XPlatform 计数路由到这里）
     static MSW2: Rc<MinimalSoftwareWindow> =
+        MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    /// 顶部字母区（第 3 个组件实例；内嵌关时悬浮于候选窗正上方）
+    static MSW3: Rc<MinimalSoftwareWindow> =
         MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
 }
 
@@ -859,10 +895,18 @@ mod x11_backend {
         win: u32,
         gc: u32,
         mapped: bool,
-        // 设置窗口（惰性创建；带 WM 管理、可激活）
+        // 设置窗口（惰性创建；override-redirect 不参与焦点管理）
         win2: Option<u32>,
         gc2: Option<u32>,
         mapped2: bool,
+        // 设置窗拖拽状态：(起始root_x, 起始root_y, 窗口x, 窗口y)
+        drag2: Option<(i32, i32, i32, i32)>,
+        // 设置窗当前宽度（拖动带 × 排除区计算用）
+        win2_w: u32,
+        // 顶部字母区窗口（惰性创建；无输入事件需求）
+        win3: Option<u32>,
+        gc3: Option<u32>,
+        mapped3: bool,
     }
 
     // void 请求统一校验：失败打印并返回 None（XWindow::new 用 ? 传导）
@@ -950,10 +994,85 @@ mod x11_backend {
             )?;
             check_void!(conn.create_gc(gc, win, &CreateGCAux::new()), "create_gc")?;
             conn.flush().ok()?;
-            Some(Self { conn: Rc::new(conn), win, gc, mapped: false, win2: None, gc2: None, mapped2: false })
+            Some(Self { conn: Rc::new(conn), win, gc, mapped: false, win2: None, gc2: None, mapped2: false, win3: None, gc3: None, mapped3: false, drag2: None, win2_w: 0 })
         }
 
-        /// 惰性创建设置窗口（受窗口管理器管理、可激活；同为 32 位视觉）
+        /// 惰性创建顶部字母区窗口（override-redirect、不接收输入，纯展示）
+        fn ensure_letters(&mut self) -> u32 {
+            if let Some(w3) = self.win3 {
+                return w3;
+            }
+            let conn = &self.conn;
+            let screen = conn.setup().roots.first().unwrap().clone();
+            let mut visual = None;
+            for d in &screen.allowed_depths {
+                if d.depth == 32 {
+                    for v in &d.visuals {
+                        if v.class == VisualClass::TRUE_COLOR {
+                            visual = Some(*v);
+                            break;
+                        }
+                    }
+                }
+            }
+            let Some(visual) = visual else {
+                eprintln!("heng-ui: 字母区未找到 32 位视觉");
+                return self.win;
+            };
+            let Ok(win3) = conn.generate_id() else {
+                return self.win;
+            };
+            let Ok(gc3) = conn.generate_id() else {
+                return self.win;
+            };
+            let cmap = match conn.generate_id() {
+                Ok(v) => v,
+                Err(_) => return self.win,
+            };
+            if check_void!(
+                conn.create_colormap(ColormapAlloc::NONE, cmap, screen.root, visual.visual_id),
+                "create_colormap3"
+            )
+            .is_none()
+            {
+                return self.win;
+            }
+            // 无输入需求：仅 EXPOSURE；override-redirect 同候选窗
+            let aux = CreateWindowAux::new()
+                .override_redirect(1)
+                .colormap(cmap)
+                .border_pixel(0)
+                .event_mask(EventMask::EXPOSURE);
+            if check_void!(
+                conn.create_window(
+                    32,
+                    win3,
+                    screen.root,
+                    200,
+                    500,
+                    (460.0 * super::ui_scale()).round() as u16,
+                    (24.0 * super::ui_scale()).round() as u16,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    visual.visual_id,
+                    &aux,
+                ),
+                "create_window3"
+            )
+            .is_none()
+            {
+                return self.win;
+            }
+            if check_void!(conn.create_gc(gc3, win3, &CreateGCAux::new()), "create_gc3").is_none() {
+                return self.win;
+            }
+            conn.flush().ok();
+            self.win3 = Some(win3);
+            self.gc3 = Some(gc3);
+            win3
+        }
+
+        /// 惰性创建设置窗口（override-redirect，不参与焦点管理；同为 32 位视觉）
         fn ensure_set(&mut self) -> u32 {
             if let Some(w2) = self.win2 {
                 return w2;
@@ -1001,6 +1120,10 @@ mod x11_backend {
             let aux = CreateWindowAux::new()
                 .colormap(cmap)
                 .border_pixel(0)
+                // 必须与候选窗一致：override-redirect 不参与焦点管理——
+                // 否则点击设置窗会夺走 X 焦点，关闭后焦点落空（编辑器失焦
+                // 打字无反应，且与哪套 IM 无关）
+                .override_redirect(1)
                 .event_mask(
                     EventMask::EXPOSURE
                         | EventMask::BUTTON_PRESS
@@ -1038,6 +1161,9 @@ mod x11_backend {
         }
 
         fn configure(&mut self, win: u32, x: i32, y: i32, w: u32, h: u32) {
+            if Some(win) == self.win2 {
+                self.win2_w = w;
+            }
             let aux = ConfigureWindowAux::new().x(x).y(y).width(w as u32).height(h as u32);
             let _ = match self.conn.configure_window(win, &aux) {
                 Ok(c) => c.check(),
@@ -1050,7 +1176,14 @@ mod x11_backend {
 
         fn set_mapped(&mut self, win: u32, mapped: bool) {
             let is_set_win = self.win2 == Some(win);
-            let cur = if is_set_win { self.mapped2 } else { self.mapped };
+            let is_letters = self.win3 == Some(win);
+            let cur = if is_set_win {
+                self.mapped2
+            } else if is_letters {
+                self.mapped3
+            } else {
+                self.mapped
+            };
             if cur == mapped {
                 return;
             }
@@ -1062,6 +1195,8 @@ mod x11_backend {
             if result.is_ok() {
                 if is_set_win {
                     self.mapped2 = mapped;
+                } else if is_letters {
+                    self.mapped3 = mapped;
                 } else {
                     self.mapped = mapped;
                 }
@@ -1072,6 +1207,8 @@ mod x11_backend {
         fn blit(&mut self, win: u32, buf: &[Argb], w: u32, h: u32) {
             let gc = if self.win2 == Some(win) {
                 self.gc2.unwrap_or(self.gc)
+            } else if self.win3 == Some(win) {
+                self.gc3.unwrap_or(self.gc)
             } else {
                 self.gc
             };
@@ -1102,7 +1239,7 @@ mod x11_backend {
                 eprintln!("heng-ui: put_image 失败: {e:?}");
             }
             // 调试：回读服务器端窗口首行像素，验证 put_image 是否生效（仅候选窗）
-            if self.win2 != Some(win) {
+            if Some(win) == Some(self.win) {
                 match self.conn.get_image(
                     ImageFormat::Z_PIXMAP,
                     win,
@@ -1144,17 +1281,92 @@ mod x11_backend {
                 };
                 match event {
                     Event::MotionNotify(m) => {
+                        // 拖拽中：指针事件只用于移动窗口，不透传给 UI
+                        if let Some((sx, sy, wx, wy)) = self.drag2 {
+                            let nx = wx + (m.root_x as i32 - sx);
+                            let ny = wy + (m.root_y as i32 - sy);
+                            let aux = ConfigureWindowAux::new().x(nx).y(ny);
+                            let _ = self.conn.configure_window(
+                                self.win2.unwrap_or(self.win),
+                                &aux,
+                            );
+                            self.conn.flush().ok();
+                            continue;
+                        }
                         sink(tag, WindowEvent::PointerMoved {
                             position: LogicalPosition::new(m.event_x as f32, m.event_y as f32),
                         });
                     }
-                    Event::ButtonPress(b) if b.detail == 1 => {
-                        sink(tag, WindowEvent::PointerPressed {
-                            position: LogicalPosition::new(b.event_x as f32, b.event_y as f32),
-                            button: slint::platform::PointerEventButton::Left,
-                        });
+                    Event::ButtonPress(b) => {
+                        // 滚轮：4/5 垂直（上/下），6/7 水平（左/右），每 notch 50 逻辑px
+                        if (4..=7).contains(&b.detail) {
+                            let (dx, dy) = match b.detail {
+                                4 => (0.0, 50.0),
+                                5 => (0.0, -50.0),
+                                6 => (-50.0, 0.0),
+                                _ => (50.0, 0.0),
+                            };
+                            sink(tag, WindowEvent::PointerScrolled {
+                                position: LogicalPosition::new(
+                                    b.event_x as f32,
+                                    b.event_y as f32,
+                                ),
+                                delta_x: dx,
+                                delta_y: dy,
+                            });
+                            continue;
+                        }
+                        // 设置窗顶部拖动带（镜像 Windows WM_NCHITTEST 语义：
+                        // 顶部 48 逻辑px，左导航列与 × 按钮区除外）
+                        if b.detail == 1 && tag == 1 && self.drag2.is_none() {
+                            let scale = super::ui_scale();
+                            let top = (48.0 * scale).round() as i32;
+                            let nav_w = (148.0 * scale).round() as i32;
+                            let excl_x = self.win2_w as i32 - (40.0 * scale).round() as i32;
+                            let (ex, ey) = (b.event_x as i32, b.event_y as i32);
+                            if ey < top && ex > nav_w && ex < excl_x {
+                                // 抓住指针：拖动期间即使指针移出窗口也持续收到事件
+                                let grab = self.conn.grab_pointer(
+                                    true,
+                                    b.event,
+                                    EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                                    GrabMode::ASYNC,
+                                    GrabMode::ASYNC,
+                                    x11rb::NONE,
+                                    x11rb::NONE,
+                                    x11rb::CURRENT_TIME,
+                                );
+                                if let Ok(cookie) = grab {
+                                    if let Ok(reply) = cookie.reply() {
+                                        if reply.status != GrabStatus::SUCCESS {
+                                            eprintln!("heng-ui: 拖动 grab 失败: {:?}", reply.status);
+                                        }
+                                    }
+                                }
+                                // 窗口当前位置 = root 指针坐标 - 窗口内坐标
+                                self.drag2 = Some((
+                                    b.root_x as i32,
+                                    b.root_y as i32,
+                                    b.root_x as i32 - b.event_x as i32,
+                                    b.root_y as i32 - b.event_y as i32,
+                                ));
+                                continue;
+                            }
+                        }
+                        if b.detail == 1 {
+                            sink(tag, WindowEvent::PointerPressed {
+                                position: LogicalPosition::new(b.event_x as f32, b.event_y as f32),
+                                button: slint::platform::PointerEventButton::Left,
+                            });
+                        }
                     }
                     Event::ButtonRelease(b) if b.detail == 1 => {
+                        if self.drag2.is_some() {
+                            self.drag2 = None;
+                            let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
+                            self.conn.flush().ok();
+                            continue;
+                        }
                         sink(tag, WindowEvent::PointerReleased {
                             position: LogicalPosition::new(b.event_x as f32, b.event_y as f32),
                             button: slint::platform::PointerEventButton::Left,
@@ -1171,6 +1383,10 @@ mod x11_backend {
 
     impl UiBackend for XWindow {
         fn configure(&mut self, win: u8, x: i32, y: i32, w: u32, h: u32) {
+            if win == 2 {
+                let win_id = self.ensure_letters();
+                return XWindow::configure(self, win_id, x, y, w, h);
+            }
             let w = if win == 1 {
                 self.ensure_set();
                 (640.0 * super::ui_scale()).round() as u32
@@ -1190,18 +1406,18 @@ mod x11_backend {
             XWindow::configure(self, win_id, x, y, w, h)
         }
         fn set_mapped(&mut self, win: u8, mapped: bool) {
-            let win_id = if win == 1 {
-                self.ensure_set()
-            } else {
-                self.win
+            let win_id = match win {
+                1 => self.ensure_set(),
+                2 => self.ensure_letters(),
+                _ => self.win,
             };
             XWindow::set_mapped(self, win_id, mapped)
         }
         fn blit(&mut self, win: u8, buf: &[Argb], w: u32, h: u32) {
-            let win_id = if win == 1 {
-                self.ensure_set()
-            } else {
-                self.win
+            let win_id = match win {
+                1 => self.ensure_set(),
+                2 => self.ensure_letters(),
+                _ => self.win,
             };
             XWindow::blit(self, win_id, buf, w, h)
         }
@@ -1629,6 +1845,9 @@ use std::cell::RefCell;
 
     impl UiBackend for WinWindow {
         fn configure(&mut self, win: u8, x: i32, y: i32, w: u32, h: u32) {
+            if win >= 2 {
+                return; // 顶部字母区（Linux 专用）：Windows 端暂不实现
+            }
             let s = if win == 0 {
                 &mut self.cand
             } else {
@@ -1650,6 +1869,9 @@ use std::cell::RefCell;
         }
 
         fn set_mapped(&mut self, win: u8, mapped: bool) {
+            if win >= 2 {
+                return; // 顶部字母区（Linux 专用）：Windows 端暂不实现
+            }
             let s = if win == 0 {
                 &mut self.cand
             } else {
@@ -1674,6 +1896,9 @@ use std::cell::RefCell;
         }
 
         fn blit(&mut self, win: u8, buf: &[Argb], w: u32, h: u32) {
+            if win >= 2 {
+                return; // 顶部字母区（Linux 专用）：Windows 端暂不实现
+            }
             let s = if win == 0 {
                 &mut self.cand
             } else {
@@ -1789,6 +2014,18 @@ fn set_bar_cells(
         ),
     };
     bar_base.set(base);
+    // 内嵌关时字母显示在条上方（对齐 weasel inline_preedit 语义）；
+    // 开时字母由 client preedit 内嵌到应用，条内不显示
+    let inline_on = crate::settings::Settings::new(engine)
+        .get_path(crate::settings::PATCH_WEASEL, "style/inline_preedit")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false); // Linux 默认关（字母显示在候选窗上方）
+    let input_text = if !inline_on {
+        snapshot.preedit.clone()
+    } else {
+        String::new()
+    };
+    ui.set_input_text(input_text.into());
     // 只保留首行可见词：40px 横条只显示一行，放不下的词不显示也不参与
     // 键盘导航（否则 → 要穿过一堆看不见的词才能到图标）
     let (cells0, _) = build_flow_cells(&texts, hl);
@@ -1828,6 +2065,42 @@ fn mid_ellipsis(t: &str, cap: usize) -> String {
     s
 }
 
+/// 字符宽度估算（宁可估宽绝不估窄）——候选格与条内字母区共用。
+/// 基准：14px DejaVu Sans 实测（PIL getlength），系数含 ~15% 余量。
+/// 估算偏小的后果：slint Text 在格内 elide 出省略号（用户红线：只有
+/// 单词挤满整行才允许省略号）。
+/// ① 0x1F000+ / 0x2600-0x27BF / 0x2B00-0x2BFF：原生 emoji 区 → 22px
+/// ② 后跟 FE0F 的符号强制 emoji 呈现（⬆️⏰⌚▶️ 等散布各符号区）→ 22px
+/// ③ 0x2000 以上全部 → 15px：CJK 实渲染 ≈ 字号宽（14），留 1px 余量
+/// ④ 变体选择符 0xFE00-0xFE0F / ZWJ 0x200D → 0；ASCII → 10px
+///   （"windows" 实测 60.4px/7 字 ≈ 8.6px/字，10px 覆盖大写与宽字母）
+fn estimate_w(text: &str) -> i32 {
+    let chs: Vec<char> = text.chars().collect();
+    chs.iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let u = c as u32;
+            if (0xFE00..=0xFE0F).contains(&u) || u == 0x200D {
+                0
+            } else if u >= 0x1F000
+                || (0x2600..=0x27BF).contains(&u)
+                || (0x2B00..=0x2BFF).contains(&u)
+            {
+                22
+            } else if chs
+                .get(i + 1)
+                .is_some_and(|&n| (0xFE00..=0xFE0F).contains(&(n as u32)) || n as u32 == 0x200D)
+            {
+                22
+            } else if u >= 0x2000 {
+                15
+            } else {
+                10
+            }
+        })
+        .sum()
+}
+
 /// 内容自适应流式排布（收起单行同款）：格子宽度随词长走，一行能塞几个塞几个，
 /// 不限个数；超长词封顶 150px 并中间省略。序号每行从 1 开始。
 /// 返回 (cells, 行数)。hl_global 为当前选中候选的全局序号。
@@ -1843,39 +2116,7 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
     let mut num = 0i32;
     for (i, t) in all.iter().enumerate() {
         let disp = t.clone();
-        // 宽度估算原则：宁可估宽（格子稍宽/换行），绝不估窄（Text elide 剪成省略号）。
-        // ① 0x1F000+ / 0x2600-0x27BF / 0x2B00-0x2BFF：原生 emoji 区 → 20px
-        //   （Windows 彩色 emoji 实渲染比 14px 字号宽）
-        // ② 后跟 FE0F 的符号强制 emoji 呈现（⬆️U+2B06、⏰U+23F0、⌚U+231A、
-        //   ▶️U+25B6 等散布各符号区）→ 20px（lookahead 兜住所有 emoji 呈现）
-        // ③ 0x2000 以上全部 → 14px：CJK/全角之外，还覆盖文本样式符号
-        //   （①▲●→℃「…」U+2000-0x2BFF 实渲染 ≈ 字号宽，按 ASCII 估 8px 会 elide）
-        // ④ 变体选择符 0xFE00-0xFE0F / ZWJ 0x200D → 0；ASCII → 8px
-        let chs: Vec<char> = disp.chars().collect();
-        let text_w: i32 = chs
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| {
-                let u = c as u32;
-                if (0xFE00..=0xFE0F).contains(&u) || u == 0x200D {
-                    0
-                } else if u >= 0x1F000
-                    || (0x2600..=0x27BF).contains(&u)
-                    || (0x2B00..=0x2BFF).contains(&u)
-                {
-                    20
-                } else if chs
-                    .get(i + 1)
-                    .is_some_and(|&n| (0xFE00..=0xFE0F).contains(&(n as u32)) || n as u32 == 0x200D)
-                {
-                    20
-                } else if u >= 0x2000 {
-                    14
-                } else {
-                    8
-                }
-            })
-            .sum();
+        let text_w = estimate_w(&disp);
         let num_w0 = if num < 9 { 7 } else { 14 };
         let full_w = 8 + num_w0 + 4 + text_w + 6;
         // 当前装不下完整一词 → 换行（每词完整显示，绝不截断塞边角）
@@ -2130,13 +2371,27 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // 第 2 个组件实例 → MSW2（XPlatform 计数路由）
     let msw2 = MSW2.with(|w| w.clone());
     let sui = Rc::new(SettingsWindow::new().expect("heng-ui: 设置组件创建失败"));
+    // 第 3 个组件实例 → MSW3：顶部专用字母区（独立窗口悬浮于候选窗正上方，
+    // 原候选窗布局零改动）
+    let msw3 = MSW3.with(|w| w.clone());
+    let lsw = Rc::new(LettersWindow::new().expect("heng-ui: 字母区组件创建失败"));
     // DPI 缩放：布局用逻辑像素，渲染/窗口尺寸放大到物理像素
     let scale = ui_scale();
     let bar_h = (BAR_HEIGHT as f32 * scale).round() as u32;
+    // 顶部字母区高度（物理px）：独立窗口，paint 时贴候选窗正上方
+    let input_row_h = (24.0_f32 * scale).round() as u32;
     msw.window()
         .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
     msw.set_size(PhysicalSize { width: (160.0 * scale) as u32, height: bar_h });
     ui.show().unwrap(); // 不调用则 Slint 认为窗口不可见，永远不渲染
+    // 字母区：尺寸/DPI 登记（show 推迟到首次显示时）
+    lsw.show().unwrap();
+    msw3.window()
+        .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+    msw3.set_size(PhysicalSize {
+        width: (460.0 * scale).round() as u32,
+        height: input_row_h,
+    });
     // 设置窗口：尺寸/DPI 一次性登记（show 推迟到打开时）
     msw2.window()
         .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
@@ -2154,6 +2409,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // 当前展示的会话（Sync 时登记；点击选词用）
     let current: Rc<RefCell<Option<RimeSessionId>>> = Rc::new(RefCell::new(None));
     let render_buf: RefCell<Vec<Argb>> = RefCell::new(Vec::new());
+    // 顶部字母区独立窗口的帧缓冲
+    let lsbuf: RefCell<Vec<Argb>> = RefCell::new(Vec::new());
     let visible = RefCell::new(false);
     let cur_h = Cell::new(bar_h); // 当前物理高度（展开态会变）
     // 向上展开状态：光标下方放不下时翻转，窗口底边锚定输入行顶边、面板向上长。
@@ -2209,6 +2466,37 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
             }
             backend.blit(0, &buf, w, h);
         }
+        // 顶部专用字母区：独立窗口悬浮于本窗口正上方（原窗口布局零改动）。
+        // hint 气泡态不显示（与气泡形态互斥）
+        let has_input = !ui.get_input_text().is_empty() && hint_mode.get() == 0;
+        if has_input {
+            lsw.set_text(ui.get_input_text());
+            if lsbuf.borrow().len() != (w * input_row_h) as usize {
+                *lsbuf.borrow_mut() = vec![Argb::default(); (w * input_row_h) as usize];
+            }
+            msw3.set_size(PhysicalSize { width: w, height: input_row_h });
+            msw3.window().request_redraw();
+            {
+                let mut lb = lsbuf.borrow_mut();
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    msw3.draw_if_needed(|r: &SoftwareRenderer| {
+                        let _ = r.render(&mut lb, w as usize);
+                    });
+                }));
+            }
+            // 位置：贴本窗口顶边之上；翻转态贴面板顶边之上
+            let ly = if flip.get() {
+                (last_caret_top.get() - h as i32 - input_row_h as i32).max(flip_top.get())
+            } else {
+                y_eff - input_row_h as i32
+            };
+            backend.configure(2, x, ly, w, input_row_h);
+            backend.set_mapped(2, true);
+            let lb = lsbuf.borrow();
+            backend.blit(2, &lb, w, input_row_h);
+        } else {
+            backend.set_mapped(2, false);
+        }
         *visible.borrow_mut() = map || *visible.borrow();
     };
 
@@ -2259,6 +2547,18 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         let tx = tx.clone();
         move || {
             let _ = tx.send(UiCmd::MenuOpen); // ☰ 菜单（占位：符号/常用语/设置）
+        }
+    });
+    ui.on_menu_item_clicked({
+        let tx = tx.clone();
+        move |idx| {
+            let _ = tx.send(UiCmd::MenuItem(idx as i32));
+        }
+    });
+    ui.on_menu_dismissed({
+        let tx = tx.clone();
+        move || {
+            let _ = tx.send(UiCmd::MenuDismiss);
         }
     });
     ui.on_expanded_clicked({
@@ -2363,25 +2663,13 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
             let settings = Settings::new(&engine);
             let Some(st) = sstate.borrow().as_ref().map(|s| s.clone()) else { return };
             match tag.as_str() {
-                "horizontal" => {
-                    if settings.set_horizontal(!st.horizontal).is_ok() {
-                        engine.redeploy();
-                        let ns = load_settings_state(&engine, &settings, None);
-                        *sstate.borrow_mut() = Some(ns);
-                        if let Some(ns) = sstate.borrow().as_ref() {
-                            settings_apply_page(&sui, ns, sui.get_page());
-                        }
-                        let _ = tx.send(UiCmd::Hide);
-                    }
-                }
                 "inline" => {
                     if settings.set_inline_preedit(!st.inline).is_ok() {
-                        engine.redeploy();
-                        let ns = load_settings_state(&engine, &settings, None);
-                        *sstate.borrow_mut() = Some(ns);
-                        if let Some(ns) = sstate.borrow().as_ref() {
-                            settings_apply_page(&sui, ns, sui.get_page());
-                        }
+                        // 同上：样式开关不走 redeploy、不重读部署缓存
+                        let mut ns = st.clone();
+                        ns.inline = !st.inline;
+                        *sstate.borrow_mut() = Some(ns.clone());
+                        settings_apply_page(&sui, &ns, sui.get_page());
                         let _ = tx.send(UiCmd::Hide);
                     }
                 }
@@ -2418,18 +2706,18 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     let n = (st.font + d).clamp(10, 32);
                     if n != st.font {
                         changed = settings.set_font_point_size(n as i64).is_ok();
+                        // 样式改动不走 redeploy（会作废活动会话）；字号目前
+                        // 仅设置页展示，用已知新值直接刷新
+                        if changed {
+                            let mut ns = st.clone();
+                            ns.font = n;
+                            *sstate.borrow_mut() = Some(ns.clone());
+                            settings_apply_page(&sui, &ns, sui.get_page());
+                            let _ = tx.send(UiCmd::Hide);
+                        }
                     }
                 }
                 _ => {}
-            }
-            if changed {
-                engine.redeploy();
-                let ns = load_settings_state(&engine, &settings, None);
-                *sstate.borrow_mut() = Some(ns);
-                if let Some(ns) = sstate.borrow().as_ref() {
-                    settings_apply_page(&sui, ns, sui.get_page());
-                }
-                let _ = tx.send(UiCmd::Hide);
             }
         }
     });
@@ -2479,6 +2767,9 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     });
 
     loop {
+        // 0. 动画/定时器心跳：自定义平台必须显式驱动，否则所有 animate
+        //    （设置页开关白点等）永远停在初始值
+        slint::platform::update_timers_and_animations();
         // 1. 命令
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
@@ -2506,6 +2797,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         *last_preedit.borrow_mut() = snapshot.preedit.clone();
                         if snapshot.candidates.is_empty() {
                             backend.set_mapped(0, false);
+                            backend.set_mapped(2, false);
                             *visible.borrow_mut() = false;
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
@@ -2546,11 +2838,34 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 }
                 UiCmd::Hide => {
                     backend.set_mapped(0, false);
+                    backend.set_mapped(2, false);
                     *visible.borrow_mut() = false;
                     hint_mode.set(0);
                     ui.set_hint(0);
                     ui.set_hint_only(false);
                     hint_deadline.set(None);
+                }
+                UiCmd::MenuItem(index) => {
+                    // ☰ 菜单项：点击后整个预览窗关闭（不回横条，打字才回）
+                    menu_open.set(false);
+                    UI_MENU_OPEN.store(false, Ordering::Relaxed);
+                    ui.set_menu_open(false);
+                    backend.set_mapped(0, false);
+                    backend.set_mapped(2, false);
+                    *visible.borrow_mut() = false;
+                    if index == 2 {
+                        // 设置：弹出设置窗口（独立窗）
+                        let _ = tx.send(UiCmd::SettingsShow(1));
+                    }
+                }
+                UiCmd::MenuDismiss => {
+                    // 菜单空白处点击：整个预览窗关闭
+                    menu_open.set(false);
+                    UI_MENU_OPEN.store(false, Ordering::Relaxed);
+                    ui.set_menu_open(false);
+                    backend.set_mapped(0, false);
+                    backend.set_mapped(2, false);
+                    *visible.borrow_mut() = false;
                 }
                 UiCmd::SettingsShow(page) => {
                     let Ok(engine) = engine() else { continue };
@@ -2864,6 +3179,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     if let Ok(snapshot) = engine.get_context(rime_id) {
                         if snapshot.candidates.is_empty() {
                             backend.set_mapped(0, false);
+                            backend.set_mapped(2, false);
                             *visible.borrow_mut() = false;
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
@@ -2888,6 +3204,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     menu_open.set(true);
                     UI_MENU_OPEN.store(true, Ordering::Relaxed);
                     ui.set_menu_open(true);
+                    ui.set_menu_height(MENU_HEIGHT);
                     let h = (MENU_HEIGHT as f32 * scale).round() as u32;
                     paint(
                         &mut backend,
@@ -2924,7 +3241,22 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     {
                         let _guard = OP_LOCK.lock().unwrap();
                         let ok = if is_real {
-                            engine.select_candidate_global(rime_id, idx).unwrap_or(false)
+                            let sel_ok =
+                                engine.select_candidate_global(rime_id, idx).unwrap_or(false);
+                            if sel_ok {
+                                // select 产生的上屏文本在 librime 的 commit 队列里，
+                                // 必须显式取出交给外壳（否则应用收不到——正常按键
+                                // 路径由 heng_process_key_ex 返回值携带，此路径没有）
+                                match engine.get_commit(rime_id) {
+                                    Ok(t) if !t.is_empty() => {
+                                        if let Some(h) = SESSIONS.handle_of(rime_id) {
+                                            PENDING_UI_COMMITS.lock().unwrap().insert(h, t);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            sel_ok
                         } else {
                             // 同音词：清组合串 + 文本直接上屏
                             let _ = engine.clear_composition(rime_id);
@@ -2941,6 +3273,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             flip.set(false);
                             *panel.borrow_mut() = None;
                             backend.set_mapped(0, false);
+                            backend.set_mapped(2, false);
                             *visible.borrow_mut() = false;
                         }
                     }
@@ -2958,6 +3291,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         if let Ok(snapshot) = snapshot {
                             if snapshot.candidates.is_empty() {
                                 backend.set_mapped(0, false);
+                                backend.set_mapped(2, false);
                                 *visible.borrow_mut() = false;
                             } else {
                                 let _guard = OP_LOCK.lock().unwrap();
@@ -3128,6 +3462,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     paint(&mut backend, w, bar_h, last_x.get(), last_y.get(), true);
                 } else {
                     backend.set_mapped(0, false);
+                    backend.set_mapped(2, false);
                     *visible.borrow_mut() = false;
                 }
             }
@@ -3166,14 +3501,13 @@ fn scale_pointer_event(event: WindowEvent, scale: f32) -> WindowEvent {
 
 // ============================ 设置窗口（S0-S3） ============================
 
-const SET_NAV: [&str; 6] = ["输入方案", "候选窗样式", "快捷键", "标点符号", "词库", "关于"];
+const SET_NAV: [&str; 6] = ["输入方案", "外观", "快捷键", "标点符号", "词库", "关于"];
 
 /// 设置页运行态（打开时从 staging + patch 加载一次，改动后重载）
 #[derive(Clone)]
 struct SettingsState {
     schemes: Vec<(String, String, [String; 3])>, // id, name, 预览色×3
     scheme_idx: usize,
-    horizontal: bool,
     inline: bool,
     font: i32,
     schemas: Vec<(String, String)>, // id, name（顺序 = 启用序，首个 = 默认）
@@ -3214,7 +3548,6 @@ fn load_settings_state(
     let mut st = SettingsState {
         schemes: vec![],
         scheme_idx: 0,
-        horizontal: true,
         inline: true,
         font: 14,
         schemas: vec![],
@@ -3228,15 +3561,27 @@ fn load_settings_state(
         user_files: vec![],
     };
     if let Ok(mut cfg) = engine.config_open("weasel") {
-        st.horizontal = engine
-            .config_get_bool(&cfg, "style/horizontal")
-            .unwrap_or(true);
         st.inline = engine
             .config_get_bool(&cfg, "style/inline_preedit")
-            .unwrap_or(true);
+            .unwrap_or(false); // Linux 默认关
         st.font = engine
             .config_get_int(&cfg, "style/font_point_size")
             .unwrap_or(14);
+        // 样式开关读源补丁覆盖：config_open 读的是部署产物（user/build/），
+        // 直接写 weasel.custom.yaml 后未重部署时仍是旧值；样式不参与
+        // librime 部署语义，源补丁即真相（避免为显示而 redeploy 杀会话）
+        if let Some(v) = settings
+            .get_path(PATCH_WEASEL, "style/inline_preedit")
+            .and_then(|v| v.as_bool())
+        {
+            st.inline = v;
+        }
+        if let Some(v) = settings
+            .get_path(PATCH_WEASEL, "style/font_point_size")
+            .and_then(|v| v.as_i64())
+        {
+            st.font = v.clamp(10, 32) as i32;
+        }
         let cur = cfg_str(engine, &cfg, "style/color_scheme").unwrap_or_default();
         unsafe {
             let mut it: RimeConfigIterator = std::mem::zeroed();
@@ -3341,7 +3686,7 @@ fn settings_apply_page(sui: &SettingsWindow, st: &SettingsState, page: i32) {
             }
         }
         1 => {
-            head = "候选窗样式 · 点击行切换配色（自动重新部署）".into();
+            head = "外观 · 点击行切换配色（自动重新部署）".into();
             for (i, (id, name, sw)) in st.schemes.iter().enumerate() {
                 rows.push(SetRow {
                     title: name.clone().into(),
@@ -3388,7 +3733,6 @@ fn settings_apply_page(sui: &SettingsWindow, st: &SettingsState, page: i32) {
     sui.set_head_text(head.into());
     sui.set_page_rows(Rc::new(VecModel::from(rows)).into());
     sui.set_font_size(st.font);
-    sui.set_horizontal(st.horizontal);
     sui.set_inline_preedit(st.inline);
     sui.set_ascii_punct(st.ascii_punct);
     sui.set_about_lines(st.about.clone().into());

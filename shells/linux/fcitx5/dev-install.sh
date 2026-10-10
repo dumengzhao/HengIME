@@ -5,8 +5,9 @@
 # 用法：./dev-install.sh   （改完 core/插件代码后重新跑一遍即可）
 set -e
 cd "$(dirname "$0")"
+REPO_ROOT="$(cd ../../../ && pwd)"
 
-if [ ! -f ../../target/release/libheng_core.so ]; then
+if [ ! -f "$REPO_ROOT/target/release/libheng_core.so" ]; then
     echo "错误：先在仓库根执行 cargo build --release -p heng-core" >&2
     exit 1
 fi
