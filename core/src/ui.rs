@@ -1527,11 +1527,13 @@ use std::cell::RefCell;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, LoadCursorW,
         PeekMessageW, RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow,
-        TranslateMessage, UpdateLayeredWindow, HTCAPTION, HTCLIENT, IDC_ARROW, MSG, PM_REMOVE,
+        TranslateMessage, UpdateLayeredWindow, HTCAPTION, HTCLIENT, HTTRANSPARENT, IDC_ARROW, MSG,
+        PM_REMOVE,
         SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOZORDER,
         ULW_ALPHA, WM_CLOSE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
         WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT,
         WNDCLASSW, WHEEL_DELTA, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_EX_TRANSPARENT,
         WS_POPUP,
     };
 
@@ -1733,6 +1735,23 @@ use std::cell::RefCell;
     const SET_EX: u32 = 0;
     const SET_STYLE: u32 = WS_POPUP;
 
+    /// 字母区 WndProc：纯显示窗口，不处理指针事件（避免误路由到候选窗的
+    /// EVENTS 队列）。WM_NCHITTEST → HTTRANSPARENT 让命中穿透到下层应用，
+    /// 该区域覆盖的是用户正在输入的一行文字，点击本应落到应用上。
+    /// 注意：这只是命中穿透，与「未响应」无关——系统仍须先派发 WM_NCHITTEST
+    /// 才能判定穿透（见 poll_events：漏泵本窗口消息才是未响应的真因）。
+    unsafe extern "system" fn letters_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_NCHITTEST => HTTRANSPARENT as isize,
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+
     fn create_subwin(
         class: &str,
         title: &str,
@@ -1745,10 +1764,13 @@ use std::cell::RefCell;
             let hinstance = GetModuleHandleW(std::ptr::null());
             let classw = utf16z(class);
             let is_set_win = class == "heng_ui_set_win";
+            let is_letters_win = class == "heng_ui_letters_win";
             let wc = WNDCLASSW {
                 style: 0,
                 lpfnWndProc: if is_set_win {
                     Some(set_wnd_proc)
+                } else if is_letters_win {
+                    Some(letters_wnd_proc)
                 } else {
                     Some(wnd_proc)
                 },
@@ -1804,6 +1826,7 @@ use std::cell::RefCell;
     pub struct WinWindow {
         cand: SubWin,
         set: Option<SubWin>,
+        letters: Option<SubWin>,
     }
 
     impl WinWindow {
@@ -1818,6 +1841,7 @@ use std::cell::RefCell;
                     BAR_HEIGHT as i32,
                 )?,
                 set: None,
+                letters: None,
             })
         }
 
@@ -1842,6 +1866,24 @@ use std::cell::RefCell;
                 self.set = Some(s);
             }
             self.set.as_mut().unwrap()
+        }
+
+        /// 惰性创建顶部字母区窗口（分层 + 置顶 + 不激活 + 鼠标穿透，同候选窗；
+        /// 纯显示无交互，WndProc 事件直通 DefWindowProc 防误路由到候选窗）
+        fn ensure_letters(&mut self) -> &mut SubWin {
+            if self.letters.is_none() {
+                let s = create_subwin(
+                    "heng_ui_letters_win",
+                    "",
+                    CAND_EX | WS_EX_TRANSPARENT,
+                    CAND_STYLE,
+                    160,
+                    40,
+                )
+                .expect("heng-ui: 字母区窗口创建失败");
+                self.letters = Some(s);
+            }
+            self.letters.as_mut().unwrap()
         }
     }
 
@@ -1899,6 +1941,9 @@ use std::cell::RefCell;
                 if let Some(s) = self.set.as_mut() {
                     subs.push(s);
                 }
+                if let Some(s) = self.letters.as_mut() {
+                    subs.push(s);
+                }
                 for s in subs {
                     if !s.hbmp.is_null() {
                         DeleteObject(s.hbmp);
@@ -1911,14 +1956,16 @@ use std::cell::RefCell;
 
     impl UiBackend for WinWindow {
         fn configure(&mut self, win: u8, x: i32, y: i32, w: u32, h: u32) {
-            if win >= 2 {
-                return; // 顶部字母区（Linux 专用）：Windows 端暂不实现
+            if win > 2 {
+                return;
             }
-            let s = if win == 0 {
-                &mut self.cand
-            } else {
-                self.ensure_set();
-                self.set.as_mut().unwrap()
+            let s = match win {
+                0 => &mut self.cand,
+                1 => {
+                    self.ensure_set();
+                    self.set.as_mut().unwrap()
+                }
+                _ => self.ensure_letters(),
             };
             s.pos = (x, y);
             unsafe {
@@ -1935,41 +1982,45 @@ use std::cell::RefCell;
         }
 
         fn set_mapped(&mut self, win: u8, mapped: bool) {
-            if win >= 2 {
-                return; // 顶部字母区（Linux 专用）：Windows 端暂不实现
+            if win > 2 {
+                return;
             }
-            let s = if win == 0 {
-                &mut self.cand
-            } else {
-                self.ensure_set();
-                self.set.as_mut().unwrap()
+            let s = match win {
+                0 => &mut self.cand,
+                1 => {
+                    self.ensure_set();
+                    self.set.as_mut().unwrap()
+                }
+                _ => self.ensure_letters(),
             };
             if s.mapped == mapped {
                 return;
             }
             unsafe {
-                if win == 0 {
-                    // SW_SHOWNA：显示但不激活（不夺前台焦点，输入焦点留在宿主应用）
-                    ShowWindow(s.hwnd, if mapped { SW_SHOWNA } else { SW_HIDE });
-                } else {
+                if win == 1 {
                     // 设置窗口：激活显示 + 置前台 + 设键盘焦点（滚轮立即生效）
                     ShowWindow(s.hwnd, if mapped { SW_SHOW } else { SW_HIDE });
                     SetForegroundWindow(s.hwnd);
                     SetFocus(s.hwnd);
+                } else {
+                    // 候选窗/字母区：SW_SHOWNA 显示但不激活（不夺前台焦点）
+                    ShowWindow(s.hwnd, if mapped { SW_SHOWNA } else { SW_HIDE });
                 }
             }
             s.mapped = mapped;
         }
 
         fn blit(&mut self, win: u8, buf: &[Argb], w: u32, h: u32) {
-            if win >= 2 {
-                return; // 顶部字母区（Linux 专用）：Windows 端暂不实现
+            if win > 2 {
+                return;
             }
-            let s = if win == 0 {
-                &mut self.cand
-            } else {
-                self.ensure_set();
-                self.set.as_mut().unwrap()
+            let s = match win {
+                0 => &mut self.cand,
+                1 => {
+                    self.ensure_set();
+                    self.set.as_mut().unwrap()
+                }
+                _ => self.ensure_letters(),
             };
             if !s.ensure_bitmap(w, h) {
                 return;
@@ -1994,6 +2045,7 @@ use std::cell::RefCell;
                     InvalidateRect(s.hwnd, std::ptr::null(), 0);
                     return;
                 }
+                // 候选窗/字母区：分层窗口 UpdateLayeredWindow
                 let screen_dc = GetDC(std::ptr::null_mut());
                 let pt_dst = POINT { x: s.pos.0, y: s.pos.1 };
                 let size = SIZE { cx: w as i32, cy: h as i32 };
@@ -2028,15 +2080,17 @@ use std::cell::RefCell;
         fn poll_events(&mut self, sink: &mut dyn FnMut(u8, WindowEvent)) {
             unsafe {
                 let mut msg: MSG = std::mem::zeroed();
-                while PeekMessageW(&mut msg, self.cand.hwnd, 0, 0, PM_REMOVE) != 0 {
+                // 泵整个 UI 线程的消息队列（hwnd 传 null = 不按窗口过滤）。
+                //
+                // 为什么必须整线程排空：Windows 挂起检测靠 SendMessageTimeout 发
+                // WM_NCHITTEST—— 指针移到本线程任一窗口上就会发，若接收线程不
+                // 派发，系统判定线程挂起并弹「未响应」。按 hwnd 过滤的 PeekMessage
+                // 很容易漏掉某个窗口（原先只有候选窗 + 设置窗，新增的字母区就被
+                // 漏掉 → 指针悬停到字母区必现「未响应」）。本线程只拥有这三个
+                // 窗口，整线程排空既彻底又不会误吞别人的窗口消息。
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
-                }
-                if let Some(s) = self.set.as_ref() {
-                    while PeekMessageW(&mut msg, s.hwnd, 0, 0, PM_REMOVE) != 0 {
-                        let _ = TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
-                    }
                 }
             }
             EVENTS.with(|q| {

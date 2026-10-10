@@ -1,5 +1,5 @@
 diff --git a/RimeWithWeasel/RimeWithWeasel.cpp b/RimeWithWeasel/RimeWithWeasel.cpp
-index 709cd7e..dcc9825 100644
+index 709cd7e..1f010b1 100644
 --- a/RimeWithWeasel/RimeWithWeasel.cpp
 +++ b/RimeWithWeasel/RimeWithWeasel.cpp
 @@ -5,14 +5,23 @@
@@ -1244,7 +1244,7 @@ index 709cd7e..dcc9825 100644
    }
    // refresh UI (and tray icon) so the option change takes effect immediately,
    // e.g. when toggling ascii_mode from the TSF language bar
-@@ -526,26 +1047,41 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+@@ -526,26 +1047,51 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
    Status& weasel_status = m_ui->status();
    Context weasel_context;
  
@@ -1257,6 +1257,16 @@ index 709cd7e..dcc9825 100644
  
    SessionStatus& session_status = get_session_status(ipc_id);
 -  if (rime_api->get_option(session_id, "inline_preedit"))
++  // inline 开关即时同步（每键一次直读源补丁，仅在值变化时重设会话选项）：
++  // 现存会话不经 AddSession，靠这里让设置窗口的开关对下一个键生效
++  if (ipc_id != 0) {
++    int inline_flag = heng_style_flag("inline_preedit", -1);
++    if (inline_flag >= 0 &&
++        (inline_flag != 0) != session_status.style.inline_preedit) {
++      session_status.style.inline_preedit = inline_flag != 0;
++      heng_set_option(to_session_id(ipc_id), "inline_preedit", inline_flag);
++    }
++  }
 +  if (ipc_id != 0 &&
 +      heng_get_option(to_session_id(ipc_id), "inline_preedit") > 0)
      session_status.style.client_caps |= INLINE_PREEDIT_CAPABLE;
@@ -1292,7 +1302,7 @@ index 709cd7e..dcc9825 100644
    {
      std::lock_guard<std::mutex> lock(m_notifier_mutex);
      m_message_type.clear();
-@@ -555,158 +1091,19 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+@@ -555,158 +1101,19 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
    }
  }
  
@@ -1456,7 +1466,7 @@ index 709cd7e..dcc9825 100644
        show_icon = true;
      } else
        tips = u8tow(m_message_label);
-@@ -730,13 +1127,6 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
+@@ -730,13 +1137,6 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
      return m_ui->IsCountingDown();
    }
  }
@@ -1470,7 +1480,7 @@ index 709cd7e..dcc9825 100644
  
  bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
    std::wstring body;
-@@ -745,770 +1135,328 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
+@@ -745,770 +1145,334 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
    actions.reserve(8);
  
    SessionStatus& session_status = get_session_status(ipc_id);
@@ -2491,6 +2501,12 @@ index 709cd7e..dcc9825 100644
    SessionStatus& session_status = get_session_status(ipc_id);
 -  RimeSessionId session_id = session_status.session_id;
 +  heng_session_t session_id = session_status.session_id;
++  // inline 开关源补丁直读：设置窗口改的是源 weasel.custom.yaml（无部署环节），
++  // 部署产物里的 style 快照滞后。读到有效值（>=0）时覆盖会话样式，
++  // 会话建立/维护结束/方案切换都会经过这里 → 开关随新会话即改即生效。
++  int flag = heng_style_flag("inline_preedit", -1);
++  if (flag >= 0)
++    session_status.style.inline_preedit = flag != 0;
    // set inline_preedit option
    bool inline_preedit = session_status.style.inline_preedit;
 -  rime_api->set_option(session_id, "inline_preedit", Bool(inline_preedit));
@@ -3572,10 +3588,10 @@ index 742f157..7ee8937 100755
  inline LONG RegGetStringValue(HKEY key,
 diff --git a/include/heng.h b/include/heng.h
 new file mode 100644
-index 0000000..b22a6cb
+index 0000000..7cd0480
 --- /dev/null
 +++ b/include/heng.h
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,344 @@
 +/*
 + * heng.h —— HengIME 统一能力模块 C ABI（M0）
 + *
@@ -3718,6 +3734,11 @@ index 0000000..b22a6cb
 +
 +/* 读取会话选项。返回 0/1；-1 表示失败（会话不存在）。 */
 +HENG_API int heng_get_option(heng_session_t session, const char* option);
++
++/* 读样式布尔（weasel.custom.yaml style/<key>，源补丁直读，无部署缓存）。
++ * 返回 0/1；键不存在或读取失败返回 default_value。外壳用它决定是否
++ * 内联推送 preedit（如 "inline_preedit"）。 */
++HENG_API int heng_style_flag(const char* key, int default_value);
 +
 +/* 取会话状态快照。返回 HENG_TRUE 后必须用 heng_free_status 释放。 */
 +HENG_API int heng_get_status(heng_session_t session, HengStatus* out);

@@ -73,6 +73,7 @@ EXPORTS
     heng_settings_show
     heng_simulate_key_sequence
     heng_start_session
+    heng_style_flag
     heng_sync_user_data
     heng_take_ui_commit
     heng_ui_hide
