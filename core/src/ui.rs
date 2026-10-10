@@ -82,9 +82,9 @@ fn lay_menu_h() -> i32 {
 fn lay_flow_top() -> i32 {
     lay_px(6.0)
 }
-/// 序号列宽（按最宽两位数实测，序号字号设计 11）
-fn lay_num_w() -> i32 {
-    measure_w("12", lay_px(11.0))
+/// 序号字号（设计 11）
+fn lay_num_font() -> i32 {
+    lay_px(11.0)
 }
 
 // ---- 对外接口（capi 调用） ----
@@ -266,6 +266,7 @@ pub fn ensure_started() -> bool {
 slint::slint! {
     export struct CandCell {
         num: string,
+        nw: int,        // 序号实际宽度（实测，避免固定列宽把正文推远）
         text: string,
         hl: bool,
         x: int,
@@ -291,7 +292,6 @@ slint::slint! {
         in property <bool> hint-only; // hint 独占气泡形态：窗口临时缩成胶囊，候选内容全部隐藏
         in property <string> input-text; // 内嵌关时有值（独立字母窗口显示用）
         in property <int> cand-font;  // 候选字号（7 档刻度：14-20，默认 16 = 第 3 档）
-        in property <int> num-w;      // 序号列宽（实测，随字号）
         in property <float> font-scale; // 字号缩放系数 k = 字号/14（DPI 式等比）
         // —— 文本测宽探针 ——
         // 候选格宽度必须用"真实排版宽度"而不是估算表：估算系数随字号漂移，
@@ -345,26 +345,33 @@ slint::slint! {
                     border-radius: root.font-scale * 8px;
                     // 只有选中项有背景药丸，其余纯文字不加底色区分边界
                     background: cell.hl ? #2164f1 : transparent;
-                    HorizontalLayout {
-                        padding-left: root.font-scale * 8px;
-                        padding-right: root.font-scale * 4px;
-                        spacing: root.font-scale * 4px;
-                        alignment: center;
-                        Text {
-                            text: cell.num;
-                            // 序号列宽随字号实测（空串也占位，出现/隐藏不引起正文横移）
-                            width: root.num-w * 1px;
-                            color: cell.hl ? #cfe0ff : #999999;
-                            font-size: root.font-scale * 11px;
-                            vertical-alignment: center;
-                        }
-                        Text {
-                            text: cell.text;
-                            color: cell.hl ? #ffffff : #1f2328;
-                            font-size: root.cand-font * 1px;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
+                    // 绝对定位（不用 HorizontalLayout：其对齐语义不好控）。
+                    // 序号与正文各自占满格高、垂直居中；间距由实测序号宽 + gap 控制
+                    property <length> pad-l: root.font-scale * 6px;
+                    property <length> pad-r: root.font-scale * 6px;
+                    property <length> gap-in: root.font-scale * 3px;
+                    Text {
+                        // 序号：宽度按本格实际数字实测，空串即不占宽（正文不被推远）
+                        x: pad-l;
+                        y: 0;
+                        width: cell.nw * 1px;
+                        height: parent.height;
+                        text: cell.num;
+                        color: cell.hl ? #cfe0ff : #999999;
+                        font-size: root.font-scale * 11px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        // 正文：右边界对称留白
+                        x: pad-l + cell.nw * 1px + gap-in;
+                        y: 0;
+                        width: parent.width - pad-l - pad-r - cell.nw * 1px - gap-in;
+                        height: parent.height;
+                        text: cell.text;
+                        color: cell.hl ? #ffffff : #1f2328;
+                        font-size: root.cand-font * 1px;
+                        vertical-alignment: center;
+                        overflow: elide;
                     }
                     TouchArea {
                         mouse-cursor: pointer;
@@ -2098,7 +2105,6 @@ fn set_bar_cells(
     let (cells, _rows) = build_flow_cells(&texts, panel_hl.get());
     ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
     ui.set_panel_width(PANEL_WIDTH as i32);
-    ui.set_num_w(lay_num_w());
     // 中英角标：状态来自 get_status（ContextSnapshot 已不含 ascii 位）
     if let Ok(st) = engine.get_status(rime_id) {
         ui.set_ascii(st.is_ascii_mode);
@@ -2203,9 +2209,9 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
     let margin = lay_px(6.0);
     let gap = lay_px(3.0);
     let font = current_cand_font();
-    let num_w = lay_num_w();
-    // 格内水平留白也等比（与 slint HorizontalLayout 的 padding/spacing 绑定一致）
-    let (pad_l, pad_s, pad_r) = (lay_px(8.0), lay_px(4.0), lay_px(6.0));
+    let num_font = lay_num_font();
+    // 格内水平留白等比且左右对称（与 slint HorizontalLayout 的 padding/spacing 一致）
+    let (pad_l, pad_s, pad_r) = (lay_px(6.0), lay_px(3.0), lay_px(6.0));
     let panel_w = PANEL_WIDTH as i32;
     // 首行右侧给 ▾/☰ 两个按钮留位（按钮带设计 58）；展开行给滚动条留位
     let first_row_right = panel_w - margin - lay_px(58.0);
@@ -2216,7 +2222,10 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
     for (i, t) in all.iter().enumerate() {
         let disp = t.clone();
         let text_w = measure_w(&disp, font);
-        let full_w = pad_l + num_w + pad_s + text_w + pad_r;
+        // 序号按实际数字实测宽度（两位数自然更宽，序号与正文不再离太远）
+        let num_str = (num + 1).to_string();
+        let nw = measure_w(&num_str, num_font);
+        let full_w = pad_l + nw + pad_s + text_w + pad_r;
         // 当前装不下完整一词 → 换行（每词完整显示，绝不截断塞边角）
         let top = lay_flow_top();
         let right = if y == top { first_row_right } else { row_right };
@@ -2228,10 +2237,10 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
         // 只有当一个词连一整行可填宽度都放不下（超长句）才中间省略
         let right = if y == top { first_row_right } else { row_right };
         let max_w = right - margin;
-        let full_w = pad_l + num_w + pad_s + text_w + pad_r;
+        let full_w = pad_l + nw + pad_s + text_w + pad_r;
         let (w, disp) = if full_w > max_w {
             // 真正放不下一整行才省略；截断后实测收敛，保证任何字号都装得下
-            let avail = (max_w - pad_l - num_w - pad_s - pad_r).max(0) as usize;
+            let avail = (max_w - pad_l - nw - pad_s - pad_r).max(0) as usize;
             let mut cap = (avail / 12).max(1);
             let mut d = mid_ellipsis(t, cap);
             while cap > 1 && measure_w(&d, font) > avail as i32 {
@@ -2246,7 +2255,8 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
             break; // 行数封顶，超出部分后续做滚动
         }
         cells.push(CandCell {
-            num: SharedString::from((num + 1).to_string()),
+            num: SharedString::from(num_str),
+            nw,
             text: SharedString::from(disp),
             hl: (i as i32) == hl_global,
             x,
@@ -2266,9 +2276,14 @@ fn build_flow_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
 fn build_grid_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
     let margin = lay_px(6.0);
     let gap = lay_px(4.0);
-    const SLOTS_PER_ROW: i32 = 6;
     let panel_w = PANEL_WIDTH as i32;
-    let slot_w = (panel_w - margin * 2) / SLOTS_PER_ROW;
+    // 每行槽数随字号自适应：槽宽维持设计尺寸（≈74px），字号越大槽数越少，
+    // 否则「序号 + 3 字」放不进固定 460px 宽的 6 槽 → 正文被 elide 成省略号
+    let slots_per_row = ((6.0 / lay_k()).round() as i32).clamp(3, 6);
+    let slot_w = (panel_w - margin * 2) / slots_per_row;
+    let font = current_cand_font();
+    let num_font = lay_num_font();
+    let (pad_l, pad_s, pad_r) = (lay_px(6.0), lay_px(3.0), lay_px(6.0));
     let mut cells: Vec<CandCell> = Vec::new();
     let (mut x, mut y) = (margin, lay_flow_top());
     let mut used_slots = 0i32;
@@ -2276,8 +2291,8 @@ fn build_grid_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
     let mut hl_row: Option<i32> = None;
     for (i, t) in all.iter().enumerate() {
         let chars = t.chars().count() as i32;
-        let spans = (((chars + 2) / 3).max(1)).min(SLOTS_PER_ROW);
-        if used_slots + spans > SLOTS_PER_ROW {
+        let spans = (((chars + 2) / 3).max(1)).min(slots_per_row);
+        if used_slots + spans > slots_per_row {
             // 换行：序号从 1 重新开始
             y += lay_row_h();
             x = margin;
@@ -2287,9 +2302,19 @@ fn build_grid_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
         if y > lay_flow_top() + FLOW_MAX_ROWS * lay_row_h() {
             break; // 行数封顶，超出部分后续做滚动
         }
-        let disp = mid_ellipsis(t, (spans * 3) as usize);
+        let num_str = (num + 1).to_string();
+        let nw = measure_w(&num_str, num_font);
+        // 正文可用宽（实测收敛）：保证任何字号下槽内都放得下，不出现省略号
+        let budget = spans * slot_w - gap - pad_l - pad_r - nw - pad_s;
+        let mut cap = (spans * 3) as usize;
+        let mut disp = mid_ellipsis(t, cap);
+        while cap > 1 && measure_w(&disp, font) > budget {
+            cap -= 1;
+            disp = mid_ellipsis(t, cap);
+        }
         cells.push(CandCell {
-            num: SharedString::from((num + 1).to_string()),
+            nw,
+            num: SharedString::from(num_str),
             text: SharedString::from(disp),
             hl: (i as i32) == hl_global,
             x,
@@ -2308,6 +2333,7 @@ fn build_grid_cells(all: &[String], hl_global: i32) -> (Vec<CandCell>, i32) {
         for c in cells.iter_mut() {
             if c.y != hy {
                 c.num = SharedString::from("");
+                c.nw = 0;
             }
         }
     }
