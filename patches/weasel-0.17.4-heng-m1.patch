@@ -1,5 +1,5 @@
 diff --git a/RimeWithWeasel/RimeWithWeasel.cpp b/RimeWithWeasel/RimeWithWeasel.cpp
-index 709cd7e..1f010b1 100644
+index 709cd7e..b030cb6 100644
 --- a/RimeWithWeasel/RimeWithWeasel.cpp
 +++ b/RimeWithWeasel/RimeWithWeasel.cpp
 @@ -5,14 +5,23 @@
@@ -1244,7 +1244,7 @@ index 709cd7e..1f010b1 100644
    }
    // refresh UI (and tray icon) so the option change takes effect immediately,
    // e.g. when toggling ascii_mode from the TSF language bar
-@@ -526,26 +1047,51 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+@@ -526,187 +1047,73 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
    Status& weasel_status = m_ui->status();
    Context weasel_context;
  
@@ -1274,38 +1274,21 @@ index 709cd7e..1f010b1 100644
      session_status.style.client_caps &= ~INLINE_PREEDIT_CAPABLE;
  
 -  if (!_ShowMessage(weasel_context, weasel_status)) {
-+  if (m_builtin_ui && ipc_id != 0) {
-+    // v6：core 内置自绘候选窗路线（P 的 L2）。weasel 自带面板只隐藏不绘制，
-+    // 候选窗由 core UI 线程呈现（heng_ui_sync 内部取 context、点击内部选词，
-+    // commit 经 _Respond 的 heng_take_ui_commit 取回上屏）。
-+    m_ui->Hide();
-+    if (!weasel_status.disabled && !weasel_context.cinfo.empty())
-+      heng_ui_sync_ex(to_session_id(ipc_id), (int)m_last_caret_x,
-+                      (int)m_last_caret_y + 6, (int)m_last_caret_top);
-+    else
-+      heng_ui_hide();
-+  } else if (!_ShowMessage(weasel_context, weasel_status)) {
-     m_ui->Hide();
-     m_ui->Update(weasel_context, weasel_status);
-   }
- 
+-    m_ui->Hide();
+-    m_ui->Update(weasel_context, weasel_status);
+-  }
+-
 -  _RefreshTrayIcon(session_id, _UpdateUICallback);
 -
-+  if (_UpdateUICallback) {
-+    boost::thread th([=]() {
-+      ::Sleep(100);
-+      if (_UpdateUICallback)
-+        _UpdateUICallback();
-+    });
-+  }
-+
-   {
-     std::lock_guard<std::mutex> lock(m_notifier_mutex);
-     m_message_type.clear();
-@@ -555,158 +1101,19 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
-   }
- }
- 
+-  {
+-    std::lock_guard<std::mutex> lock(m_notifier_mutex);
+-    m_message_type.clear();
+-    m_message_value.clear();
+-    m_message_label.clear();
+-    m_option_name.clear();
+-  }
+-}
+-
 -void RimeWithWeaselHandler::_LoadSchemaSpecificSettings(
 -    WeaselSessionId ipc_id,
 -    const std::string& schema_id) {
@@ -1366,11 +1349,24 @@ index 709cd7e..1f010b1 100644
 -    style.current_ascii_icon = load_icon(config, "schema/ascii_icon", NULL);
 -    style.current_full_icon = load_icon(config, "schema/full_icon", NULL);
 -    style.current_half_icon = load_icon(config, "schema/half_icon", NULL);
--  }
++  if (m_builtin_ui && ipc_id != 0) {
++    // v6：core 内置自绘候选窗路线（P 的 L2）。weasel 自带面板只隐藏不绘制，
++    // 候选窗由 core UI 线程呈现（heng_ui_sync 内部取 context、点击内部选词，
++    // commit 经 _Respond 的 heng_take_ui_commit 取回上屏）。
++    m_ui->Hide();
++    if (!weasel_status.disabled && !weasel_context.cinfo.empty())
++      heng_ui_sync_ex(to_session_id(ipc_id), (int)m_last_caret_x,
++                      (int)m_last_caret_y + 6, (int)m_last_caret_top);
++    else
++      heng_ui_hide();
++  } else if (!_ShowMessage(weasel_context, weasel_status)) {
++    m_ui->Hide();
++    m_ui->Update(weasel_context, weasel_status);
+   }
 -  // load schema icon end
 -  rime_api->config_close(&config);
 -}
--
+ 
 -void RimeWithWeaselHandler::_LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
 -                                                     bool ignore_app_name) {
 -  SessionStatus& session_status = get_session_status(ipc_id);
@@ -1398,7 +1394,13 @@ index 709cd7e..1f010b1 100644
 -        }
 -      }
 -    }
--  }
++  if (_UpdateUICallback) {
++    boost::thread th([=]() {
++      ::Sleep(100);
++      if (_UpdateUICallback)
++        _UpdateUICallback();
++    });
+   }
 -  if (!found) {
 -    session_status.style.inline_preedit = m_base_style.inline_preedit;
 -    // load from schema.
@@ -1416,11 +1418,18 @@ index 709cd7e..1f010b1 100644
 -      }
 -      rime_api->free_status(&status);
 -    }
--  }
++
++  {
++    std::lock_guard<std::mutex> lock(m_notifier_mutex);
++    m_message_type.clear();
++    m_message_value.clear();
++    m_message_label.clear();
++    m_option_name.clear();
+   }
 -  if (session_status.style.inline_preedit != inline_preedit)
 -    _UpdateInlinePreeditStatus(ipc_id);
--}
--
+ }
+ 
  bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
    std::lock_guard<std::mutex> lock(m_notifier_mutex);
    if (m_message_type.empty() || m_message_value.empty())
@@ -1466,7 +1475,7 @@ index 709cd7e..1f010b1 100644
        show_icon = true;
      } else
        tips = u8tow(m_message_label);
-@@ -730,13 +1137,6 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
+@@ -730,12 +1137,38 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
      return m_ui->IsCountingDown();
    }
  }
@@ -1476,11 +1485,42 @@ index 709cd7e..1f010b1 100644
 -  wchar_t buffer[128];
 -  swprintf_s<128>(buffer, format, labels.at(id).str.c_str());
 -  return wtou8(std::wstring(buffer));
--}
++
++bool RimeWithWeaselHandler::PollUiCommit(WeaselSessionId ipc_id, EatLine eat) {
++  // v6：core 内置候选窗点击选词的 commit 回传（Linux fcitx5 侧同款 drain 机制）。
++  // 点击没有任何按键事件伴随，而 IPC 严格请求-响应（server 无推送通道），
++  // 客户端只能靠定时轮询把这段文本要走 —— 不取则候选窗关了但字不上屏。
++  if (!eat || ipc_id == 0)
++    return false;
++  heng_session_t session_id = to_session_id(ipc_id);
++  if (!session_id)
++    return false;
++  char* p = NULL;
++  if (heng_take_ui_commit(session_id, &p) != HENG_TRUE || !p)
++    return false;
++  std::string text(p);
++  heng_free_string(p);
++  if (text.empty())
++    return false;
++  // 响应体格式与 _Respond 一致（action 头 + 键值 + 结束符），直接复用客户端
++  // 既有的 ResponseParser → Committer → _InsertText 通路。必须带上
++  // status.composing：客户端据此决定插入后是否收尾 TSF composition。
++  bool is_composing = false;
++  HengStatus st;
++  if (heng_get_status(session_id, &st))
++    is_composing = !!st.is_composing;
++  std::wstring body;
++  body.append(L"action=commit,status\n");
++  body.append(L"commit=").append(escape_string(u8tow(text.c_str()))).append(L"\n");
++  body.append(L"status.composing=")
++      .append(is_composing ? L"1" : L"0")
++      .append(L"\n");
++  body.append(L".\n");
++  return eat(body);
+ }
  
  bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
-   std::wstring body;
-@@ -745,770 +1145,334 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
+@@ -745,770 +1178,334 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
    actions.reserve(8);
  
    SessionStatus& session_status = get_session_status(ipc_id);
@@ -2660,6 +2700,47 @@ index 8d8c2f0..1f7b664 100644
        return;
      }
    }
+diff --git a/WeaselIPC/WeaselClientImpl.cpp b/WeaselIPC/WeaselClientImpl.cpp
+index 26122ad..3869bd0 100644
+--- a/WeaselIPC/WeaselClientImpl.cpp
++++ b/WeaselIPC/WeaselClientImpl.cpp
+@@ -142,6 +142,13 @@ void ClientImpl::TrayCommand(UINT menuId) {
+   _SendMessage(WEASEL_IPC_TRAY_COMMAND, menuId, session_id);
+ }
+ 
++bool ClientImpl::PollUiCommit() {
++  if (!_Active())
++    return false;
++  // 返回值不用：是否有待上屏文本由响应体里的 commit= 判定
++  return _SendMessage(WEASEL_IPC_POLL_UI_COMMIT, 0, session_id) != 0;
++}
++
+ void ClientImpl::StartSession() {
+   if (_Active() && Echo())
+     return;
+@@ -276,6 +283,10 @@ void Client::TrayCommand(UINT menuId) {
+   m_pImpl->TrayCommand(menuId);
+ }
+ 
++bool Client::PollUiCommit() {
++  return m_pImpl->PollUiCommit();
++}
++
+ bool Client::Echo() {
+   return m_pImpl->Echo();
+ }
+diff --git a/WeaselIPC/WeaselClientImpl.h b/WeaselIPC/WeaselClientImpl.h
+index 7602792..9a2fa61 100644
+--- a/WeaselIPC/WeaselClientImpl.h
++++ b/WeaselIPC/WeaselClientImpl.h
+@@ -27,6 +27,7 @@ class ClientImpl {
+   void FocusIn();
+   void FocusOut();
+   void TrayCommand(UINT menuId);
++  bool PollUiCommit();
+   bool GetResponseData(ResponseHandler const& handler);
+ 
+  protected:
 diff --git a/WeaselIPC/WeaselIPC.vcxproj b/WeaselIPC/WeaselIPC.vcxproj
 index 3a9d891..2ff2d03 100644
 --- a/WeaselIPC/WeaselIPC.vcxproj
@@ -2737,7 +2818,7 @@ index 539e6d0..1455c28 100644
    </PropertyGroup>
    <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
 diff --git a/WeaselIPCServer/WeaselServerImpl.cpp b/WeaselIPCServer/WeaselServerImpl.cpp
-index 0c27644..73057de 100644
+index 0c27644..8f2d64f 100644
 --- a/WeaselIPCServer/WeaselServerImpl.cpp
 +++ b/WeaselIPCServer/WeaselServerImpl.cpp
 @@ -153,7 +153,13 @@ DWORD ServerImpl::OnCommand(WEASEL_IPC_COMMAND uMsg,
@@ -2754,6 +2835,50 @@ index 0c27644..73057de 100644
    instanceName += getUsername();
    HANDLE hMutexOneInstance = ::CreateMutex(NULL, FALSE, instanceName.c_str());
    bool areYouOK = (::GetLastError() == ERROR_ALREADY_EXISTS ||
+@@ -371,6 +377,23 @@ DWORD ServerImpl::OnChangePage(WEASEL_IPC_COMMAND uMsg,
+   return 0;
+ }
+ 
++DWORD ServerImpl::OnPollUiCommit(WEASEL_IPC_COMMAND uMsg,
++                                 DWORD wParam,
++                                 DWORD lParam) {
++  // 返回值语义：1 = 本轮写了响应体（客户端须GetResponseData 取走），
++  // 0 = 无待上屏文本、未写响应体。**必须严格对应**，否则客户端会对着
++  // 空管道调GetResponseData 而阻塞。
++  if (!m_pRequestHandler)
++    return 0;
++  auto eat = [this](std::wstring& msg) -> bool {
++    *channel << msg;
++    return true;
++  };
++  if (!m_pRequestHandler->PollUiCommit(lParam, eat))
++    return 0;
++  return 1;
++}
++
+ #define MAP_PIPE_MSG_HANDLE(__msg, __wParam, __lParam) \
+   {                                                    \
+     auto lParam = __lParam;                            \
+@@ -409,6 +432,7 @@ void ServerImpl::HandlePipeMessage(PipeMessage pipe_msg, _Resp resp) {
+   PIPE_MSG_HANDLE(WEASEL_IPC_HIGHLIGHT_CANDIDATE_ON_CURRENT_PAGE,
+                   OnHighlightCandidateOnCurrentPage);
+   PIPE_MSG_HANDLE(WEASEL_IPC_CHANGE_PAGE, OnChangePage);
++  PIPE_MSG_HANDLE(WEASEL_IPC_POLL_UI_COMMIT, OnPollUiCommit);
+   PIPE_MSG_HANDLE(WEASEL_IPC_TRAY_COMMAND, OnCommand);
+   END_MAP_PIPE_MSG_HANDLE(result);
+ 
+diff --git a/WeaselIPCServer/WeaselServerImpl.h b/WeaselIPCServer/WeaselServerImpl.h
+index e826d06..4cc6cfc 100644
+--- a/WeaselIPCServer/WeaselServerImpl.h
++++ b/WeaselIPCServer/WeaselServerImpl.h
+@@ -75,6 +75,7 @@ class ServerImpl : public CWindowImpl<ServerImpl, CWindow, ServerWinTraits>
+                                           DWORD wParam,
+                                           DWORD lParam);
+   DWORD OnChangePage(WEASEL_IPC_COMMAND uMsg, DWORD wParam, DWORD lParam);
++  DWORD OnPollUiCommit(WEASEL_IPC_COMMAND uMsg, DWORD wParam, DWORD lParam);
+ 
+  public:
+   ServerImpl();
 diff --git a/WeaselServer/WeaselServer.rc b/WeaselServer/WeaselServer.rc
 index 53fcadd45ddf3bd25a067c053c65aefe67d366fe..58de8b04aaf11381073a1c5ab9335e01f0bef47d 100644
 GIT binary patch
@@ -3056,6 +3181,164 @@ index 6a18c13..7623db9 100644
  
      if (ke.keycode == ibus::Caps_Lock) {
        if (prevKeyEvent.keycode == ibus::Caps_Lock && prevfEaten == TRUE &&
+diff --git a/WeaselTSF/WeaselTSF.cpp b/WeaselTSF/WeaselTSF.cpp
+index 53290b0..4744c49 100644
+--- a/WeaselTSF/WeaselTSF.cpp
++++ b/WeaselTSF/WeaselTSF.cpp
+@@ -32,15 +32,97 @@ WeaselTSF::WeaselTSF() {
+ 
+   _fCUASWorkaroundTested = _fCUASWorkaroundEnabled = FALSE;
+ 
++  _hPollWnd = NULL;
++  _hPollWndClass = L"WeaselUiCommitPollWnd";
++  _uiCommitPollTimerId = 0;
++
+   _cand = new CCandidateList(this);
+ 
+   DllAddRef();
+ }
+ 
+ WeaselTSF::~WeaselTSF() {
++  _StopUiCommitPoll();
+   DllRelease();
+ }
+ 
++/* ---- v6 内置候选窗：UI 点击上屏轮询 ----
++ *
++ * 点击选词发生在 core UI 线程（server 进程），无按键事件伴随，weasel IPC
++ * 又是严格请求-响应（无推送通道）→ 只能由客户端定时主动问一次。窗口用
++ * HWND_MESSAGE（message-only），不参与显示也不抢焦点，由宿主既有消息循环
++ * 派发定时器 —— 回调因此落在 TSF 所在线程，满足 ITfContext 的线程约束。
++ */
++
++static const UINT UI_COMMIT_POLL_INTERVAL_MS = 90;  // 同 fcitx5 侧 drain 周期
++
++BOOL WeaselTSF::_StartUiCommitPoll() {
++  if (_hPollWnd)
++    return TRUE;
++  WNDCLASSW wc = {0};
++  wc.lpfnWndProc = _UiCommitPollWndProc;
++  wc.hInstance = GetModuleHandleW(NULL);
++  wc.lpszClassName = _hPollWndClass;
++  if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
++    return FALSE;
++  _hPollWnd = CreateWindowExW(0, _hPollWndClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
++                              wc.hInstance, this);
++  if (!_hPollWnd)
++    return FALSE;
++  _uiCommitPollTimerId = SetTimer(_hPollWnd, 1, UI_COMMIT_POLL_INTERVAL_MS, NULL);
++  return _uiCommitPollTimerId != 0;
++}
++
++void WeaselTSF::_StopUiCommitPoll() {
++  if (_hPollWnd) {
++    if (_uiCommitPollTimerId)
++      KillTimer(_hPollWnd, _uiCommitPollTimerId);
++    DestroyWindow(_hPollWnd);
++    _hPollWnd = NULL;
++  }
++  _uiCommitPollTimerId = 0;
++}
++
++LRESULT CALLBACK WeaselTSF::_UiCommitPollWndProc(HWND hWnd,
++                                                 UINT uMsg,
++                                                 WPARAM wParam,
++                                                 LPARAM lParam) {
++  WeaselTSF* self = (WeaselTSF*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
++  if (uMsg == WM_TIMER && self) {
++    self->_PollUiCommit();
++    return 0;
++  }
++  if (uMsg == WM_NCCREATE) {
++    CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
++    SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
++  }
++  return DefWindowProcW(hWnd, uMsg, wParam, lParam);
++}
++
++void WeaselTSF::_PollUiCommit() {
++  // 未Activate / 已Deactivate 时无有效TSF 上下文，直接跳过（此时也不该有commit）
++  if (_pThreadMgr == NULL || _tfClientId == TF_CLIENTID_NULL)
++    return;
++  if (!m_client.PollUiCommit())
++    return;  // 本轮无待上屏文本（服务端未回响应体）
++  std::wstring commit;
++  weasel::Config config;
++  auto context = std::make_shared<weasel::Context>();
++  weasel::ResponseParser parser(&commit, context.get(), &_status, &config,
++                                &_cand->style());
++  if (!m_client.GetResponseData(std::ref(parser)) || commit.empty())
++    return;
++  // 与 DoEditSession 同款落屏：先保证有 TSF composition，再插入文本
++  if (!_IsComposing())
++    _StartComposition(_pEditSessionContext,
++                      _fCUASWorkaroundEnabled && !config.inline_preedit);
++  _InsertText(_pEditSessionContext, commit);
++  _EndComposition(_pEditSessionContext, false, !_status.composing);
++  _committed = TRUE;
++  if (!_status.composing && _IsComposing())
++    _EndComposition(_pEditSessionContext, true);
++}
++
+ STDMETHODIMP WeaselTSF::QueryInterface(REFIID riid, void** ppvObject) {
+   if (ppvObject == NULL)
+     return E_INVALIDARG;
+@@ -97,6 +179,7 @@ STDMETHODIMP WeaselTSF::Activate(ITfThreadMgr* pThreadMgr,
+ }
+ 
+ STDMETHODIMP WeaselTSF::Deactivate() {
++  _StopUiCommitPoll();
+   m_client.EndSession();
+ 
+   _InitTextEditSink(com_ptr<ITfDocumentMgr>());
+@@ -163,6 +246,9 @@ STDMETHODIMP WeaselTSF::ActivateEx(ITfThreadMgr* pThreadMgr,
+ 
+   _EnsureServerConnected();
+ 
++  // v6：起UI 点击上屏轮询（须在 server 连接之后 —— 轮询本身要发 IPC 请求）
++  _StartUiCommitPoll();
++
+   return S_OK;
+ 
+ ExitError:
+diff --git a/WeaselTSF/WeaselTSF.h b/WeaselTSF/WeaselTSF.h
+index 1fc29cd..30f69e3 100644
+--- a/WeaselTSF/WeaselTSF.h
++++ b/WeaselTSF/WeaselTSF.h
+@@ -194,6 +194,25 @@ class WeaselTSF : public ITfTextInputProcessorEx,
+   void _Reconnect();
+   std::wstring _GetRootDir();
+ 
++  /* v6 内置候选窗：轮询取走「UI 点击选词」产生的待上屏文本。
++   *
++   * 点击选词发生在 core UI 线程（server 进程），那边没有任何按键事件伴随，
++   * 而 weasel IPC 是严格请求-响应模型（server 无主动推送通道）→ 客户端必须
++   * 主动轮询，否则 commit 永远留在 core 里（候选窗关了但字不上屏）。
++   * Linux fcitx5 侧同款机制（drain_timer_，90ms 周期）。
++   *
++   * 定时器挂在 message-only window 上、由宿主既有消息循环派发，确保回调
++   * 在 TSF 所在线程执行（TSF 的 ITfContext 调用有线程约束）。 */
++  BOOL _StartUiCommitPoll();
++  void _StopUiCommitPoll();
++  void _PollUiCommit();
++  static LRESULT CALLBACK _UiCommitPollWndProc(HWND hWnd,
++                UINT uMsg,
++                WPARAM wParam,
++                LPARAM lParam);
++  HWND _hPollWnd;
++  const WCHAR* _hPollWndClass;
++
+   bool isImmersive() const {
+     return (_activateFlags & TF_TMF_IMMERSIVEMODE) != 0;
+   }
+@@ -236,4 +255,7 @@ class WeaselTSF : public ITfTextInputProcessorEx,
+   BOOL _async_edit = false;
+   BOOL _committed = false;
+   BOOL _isToOpenClose = false;
++
++  /* v6 UI 点击上屏轮询（message-only window + 90ms 定时器） */
++  UINT _uiCommitPollTimerId;
+ };
 diff --git a/WeaselTSF/WeaselTSF.rc b/WeaselTSF/WeaselTSF.rc
 index 648bad1d09558829b6f53d375e5469e239cdf6c2..346e57cdc16562d91c48d9d2e66d33affa014697 100644
 GIT binary patch
@@ -3425,7 +3708,7 @@ index 0000000..3b5604a
 +echo Log: %WEASEL_ROOT%msbuild-x64.log
 +pause
 diff --git a/include/RimeWithWeasel.h b/include/RimeWithWeasel.h
-index ab20d8d..f3ebef1 100644
+index ab20d8d..355e61b 100644
 --- a/include/RimeWithWeasel.h
 +++ b/include/RimeWithWeasel.h
 @@ -5,7 +5,19 @@
@@ -3483,7 +3766,13 @@ index ab20d8d..f3ebef1 100644
  };
  typedef std::map<DWORD, SessionStatus> SessionStatusMap;
  typedef DWORD WeaselSessionId;
-@@ -66,26 +92,21 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
+@@ -62,30 +88,27 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
+                          const std::string& opt,
+                          bool val);
+   virtual void UpdateColorTheme(BOOL darkMode);
++  // v6 内置候选窗：取走「UI 点击选词」产生的待上屏文本（响应体回传给客户端）
++  virtual bool PollUiCommit(WeaselSessionId ipc_id, EatLine eat);
+ 
    void OnUpdateUI(std::function<void()> const& cb);
  
   private:
@@ -3515,7 +3804,7 @@ index ab20d8d..f3ebef1 100644
      return m_session_status_map[ipc_id].session_id;
    }
    SessionStatus& get_session_status(WeaselSessionId ipc_id) {
-@@ -106,10 +127,6 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
+@@ -106,10 +129,6 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
    std::map<std::string, bool> m_show_notifications_base;
    std::function<void()> _UpdateUICallback;
  
@@ -3526,7 +3815,7 @@ index ab20d8d..f3ebef1 100644
    static std::string m_message_type;
    static std::string m_message_value;
    static std::string m_message_label;
-@@ -118,6 +135,12 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
+@@ -118,6 +137,12 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
    SessionStatusMap m_session_status_map;
    bool m_current_dark_mode;
    bool m_global_ascii_mode;
@@ -3540,7 +3829,7 @@ index ab20d8d..f3ebef1 100644
    DWORD m_pid;
  };
 diff --git a/include/WeaselIPC.h b/include/WeaselIPC.h
-index 27bfd63..7757e09 100644
+index 27bfd63..57229f4 100644
 --- a/include/WeaselIPC.h
 +++ b/include/WeaselIPC.h
 @@ -7,7 +7,13 @@
@@ -3557,6 +3846,39 @@ index 27bfd63..7757e09 100644
  
  #define WEASEL_IPC_METADATA_SIZE 1024
  #define WEASEL_IPC_BUFFER_SIZE (4 * 1024)
+@@ -32,6 +38,11 @@ enum WEASEL_IPC_COMMAND {
+   WEASEL_IPC_SELECT_CANDIDATE_ON_CURRENT_PAGE,
+   WEASEL_IPC_HIGHLIGHT_CANDIDATE_ON_CURRENT_PAGE,
+   WEASEL_IPC_CHANGE_PAGE,
++  // v6 内置候选窗：轮询「UI 点击选词」产生的待上屏文本。
++  // 点击路径没有任何按键事件伴随，而 IPC 是严格请求-响应模型
++  // （server 无主动推送通道）→ 不轮询则点击产生的 commit 永远没人取，
++  // 候选窗关了但字不上屏。Linux fcitx5 侧同款机制（90ms drain_timer_）。
++  WEASEL_IPC_POLL_UI_COMMIT,
+   WEASEL_IPC_LAST_COMMAND
+ };
+ 
+@@ -85,6 +96,11 @@ struct RequestHandler {
+   virtual void EndMaintenance() {}
+   virtual void SetOption(DWORD session_id, const std::string& opt, bool val) {}
+   virtual void UpdateColorTheme(BOOL darkMode) {}
++  // 取走「UI 点击选词」产生的待上屏文本（core 已消费引擎 commit，此处只回传）。
++  // 返回 true = 有文本且已通过 eat 写出响应体；false = 无（调用方不得写管道）。
++  virtual bool PollUiCommit(DWORD session_id, EatLine eat) {
++    return false;
++  }
+ };
+ 
+ // 處理server端回應之物件
+@@ -144,6 +160,8 @@ class Client {
+   void FocusOut();
+   // 托盤菜單
+   void TrayCommand(UINT menuId);
++  // v6 内置候选窗：轮询 UI 点击产生的待上屏文本（无待上屏时不回响应体）
++  bool PollUiCommit();
+   // 读取server返回的数据
+   bool GetResponseData(ResponseHandler handler);
+ 
 diff --git a/include/WeaselUtility.h b/include/WeaselUtility.h
 index 742f157..7ee8937 100755
 --- a/include/WeaselUtility.h

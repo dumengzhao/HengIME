@@ -241,8 +241,27 @@ HENG_API int heng_settings_show(int page);
 /* 关闭设置窗口（v9）。 */
 HENG_API int heng_settings_hide(void);
 
+/* 上屏回调（v10 追加）：cb(ctx, session, text)。
+ *
+ * 注册后 UI 内的鼠标点击选词**立即**回调通知外壳上屏，不再等外壳来取。
+ * 必要性：点击这条路径没有任何按键事件伴随，而 weasel 的 IPC 是严格
+ * 请求-响应模型（无 server→client 推送通道），_Respond 只在按键时被调用
+ * → 不注册本回调则点击产生的 commit 永远没人取，候选窗关了但字不上屏。
+ *
+ * 语义约定：
+ * - 在 core UI 线程同步执行，实现方只应做投递（post 消息 / 排队），
+ *   不要阻塞，也不要反向外调 core 后长时间持有 core 锁；
+ * - text 为 UTF-8、以 NUL 结尾，仅在回调期间有效，需自存；
+ * - 传NULL 注销，退回轮询取语义（heng_take_ui_commit 才有内容）。 */
+typedef void (*heng_commit_handler_fn)(void* ctx, heng_session_t session,
+    const char* text);
+HENG_API int heng_set_commit_handler(heng_commit_handler_fn cb, void* ctx);
+
 /* 取走 UI 点击产生的待上屏文本（消费语义）。返回 HENG_TRUE 且 *out 非 NULL
- * 表示有文本（heng_free_string 释放）；否则 *out 为 NULL。 */
+ * 表示有文本（heng_free_string 释放）；否则 *out 为 NULL。
+ *
+ * 仅在外壳未注册 heng_set_commit_handler 时才有内容（注册后 core 直接回调，
+ * 此接口返回空）。保留供轮询式外壳与调试使用。 */
 HENG_API int heng_take_ui_commit(heng_session_t session, char** out);
 
 /* ---- 配置读取（v4；librime RimeConfig 直通） ----

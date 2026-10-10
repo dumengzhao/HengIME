@@ -127,6 +127,10 @@ enum UiCmd {
     MenuDismiss,
     /// 关闭菜单回到横条
     MenuClose,
+    /// 展开面板：按「行内序号」选词（数字键 1-9）。
+    /// 面板每行序号从 1 重新开始，而 items 是全局连续索引 → 需按行换算：
+    /// 目标全局索引 = 该行首项索引 + (行内序号 - 1)
+    SelectByRowSeq(i32),
     /// 打开设置窗口（参数 = 初始页索引）
     SettingsShow(i32),
     /// 关闭设置窗口
@@ -138,6 +142,36 @@ static UI_CMD_TX: LazyLock<Mutex<Option<Sender<UiCmd>>>> = LazyLock::new(|| Mute
 /// UI 点击产生的待上屏文本：外壳经 heng_take_ui_commit 取走
 pub static PENDING_UI_COMMITS: LazyLock<Mutex<std::collections::HashMap<u64, String>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// 上屏回调（C ABI 函数指针 + 外壳上下文），由外壳经
+/// `heng_set_commit_handler` 注册。UI 点击选词产生 commit 时**立即**回调，
+/// 不等外壳发起下一次请求。
+///
+/// 为什么必须有回调：鼠标点击这条路径没有任何按键事件伴随，而 weasel 的
+/// IPC 是严格请求-响应模型（无server→client 推送通道），`_Respond`
+/// 只在按键时被调用 → 点击产生的 commit 永远没人取，候选窗关了但字不上屏。
+/// fcitx5 侧原本靠在「下次按键前 drain」兜底，行为是延迟生效，跨端不一致。
+pub type CommitHandler = extern "C" fn(ctx: *mut core::ffi::c_void, session: u64, text: *const u8);
+
+/// ctx 以 usize 存（不透明地址）：裸指针非 Send，跨线程静态存储需此包装。
+pub static COMMIT_HANDLER: LazyLock<Mutex<Option<(CommitHandler, usize)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// 上屏一次：优先走回调（即时），无回调时退回 PENDING（外壳轮询取）。
+///
+/// 回调在 UI 线程同步执行，外壳实现里只应做「投递」而非阻塞操作
+/// （Windows 上真正上屏要经 TSF 回到宿主进程，weasel 侧实现为post 消息）。
+fn emit_commit(handle: u64, text: &str) {
+    let handler = COMMIT_HANDLER.lock().unwrap();
+    if let Some((cb, ctx)) = *handler {
+        drop(handler); // 解锁后再调：回调里可能反向调 core（重入）
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(0); // C 字符串结尾
+        cb(ctx as *mut core::ffi::c_void, handle, bytes.as_ptr());
+    } else {
+        PENDING_UI_COMMITS.lock().unwrap().insert(handle, text.to_string());
+    }
+}
 
 // ---- 展开面板共享状态（UI 线程写，capi 键盘拦截读） ----
 pub static UI_EXPANDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -220,6 +254,11 @@ pub fn ui_bar_icon(on: bool) {
 /// 收起横条：按横条下标选词（capi 拦截：空格确认 / 数字键 / 鼠标点击）
 pub fn ui_bar_select(idx: usize) {
     send_cmd(UiCmd::BarSelect(idx));
+}
+
+/// 展开面板按行内序号选词（数字键 1-9）。seq 从 1 起。
+pub fn ui_select_by_row_seq(seq: i32) {
+    send_cmd(UiCmd::SelectByRowSeq(seq));
 }
 
 /// 打开 ☰ 菜单（capi 拦截：☰ 选中时按空格/回车）
@@ -2766,6 +2805,89 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         *visible.borrow_mut() = map || *visible.borrow();
     };
 
+    // ==================== 面板选词（空格/回车 与 数字键共用） ====================
+    // 按面板全局索引选中一项：真实候选走 select_candidate_global + 取引擎
+    // commit；同音词走清组合串 + 文本直上屏。之后统一收面板恢复横条。
+    let select_panel_index = |backend: &mut Box<dyn UiBackend>, idx: usize| {
+        let Some(rime_id) = *current.borrow() else { return };
+        let Ok(engine) = engine() else { return };
+        let item = panel.borrow().as_ref().and_then(|snap| {
+            let real = idx < snap.real_count;
+            snap.items.get(idx).cloned().map(|t| (t, real))
+        });
+        let Some((text, is_real)) = item else { return };
+        {
+            let _guard = OP_LOCK.lock().unwrap();
+            let ok = if is_real {
+                let sel_ok = engine.select_candidate_global(rime_id, idx).unwrap_or(false);
+                if sel_ok {
+                    // select 产生的上屏文本在 librime 的 commit 队列里，
+                    // 必须显式取出交给外壳（否则应用收不到——正常按键
+                    // 路径由 heng_process_key_ex 返回值携带，此路径没有）
+                    match engine.get_commit(rime_id) {
+                        Ok(t) if !t.is_empty() => {
+                            if let Some(h) = SESSIONS.handle_of(rime_id) {
+                                emit_commit(h, &t);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                sel_ok
+            } else {
+                // 同音词：清组合串 + 文本直接上屏
+                let _ = engine.clear_composition(rime_id);
+                if let Some(h) = SESSIONS.handle_of(rime_id) {
+                    emit_commit(h, &text);
+                }
+                true
+            };
+            if ok && !is_real {
+                // 同音词上屏后组合串已清，直接收起
+                ui.set_expanded(false);
+                expanded.set(false);
+                UI_EXPANDED.store(false, Ordering::Relaxed);
+                flip.set(false);
+                *panel.borrow_mut() = None;
+                backend.set_mapped(0, false);
+                backend.set_mapped(2, false);
+                *visible.borrow_mut() = false;
+            }
+        }
+        if is_real {
+            // 真实候选：可能仍在组句（如首词后继续），收面板恢复横条
+            ui.set_expanded(false);
+            expanded.set(false);
+            UI_EXPANDED.store(false, Ordering::Relaxed);
+            flip.set(false);
+            *panel.borrow_mut() = None;
+            let snapshot = {
+                let _guard = OP_LOCK.lock().unwrap();
+                engine.get_context(rime_id)
+            };
+            if let Ok(snapshot) = snapshot {
+                if snapshot.candidates.is_empty() {
+                    backend.set_mapped(0, false);
+                    backend.set_mapped(2, false);
+                    *visible.borrow_mut() = false;
+                } else {
+                    let _guard = OP_LOCK.lock().unwrap();
+                    set_bar_cells(
+                        &ui,
+                        &engine,
+                        rime_id,
+                        &snapshot,
+                        &bar_base,
+                        &bar_items,
+                        &panel_hl,
+                    );
+                    let w = (lay_panel_w() as f32 * scale).round() as u32;
+                    paint(backend, w, bar_h_now(), last_x.get(), last_y.get(), true);
+                }
+            }
+        }
+    };
+
     // ==================== 设置窗口：状态与回调 ====================
     let sstate: Rc<RefCell<Option<SettingsState>>> = Rc::new(RefCell::new(None));
     let settings_visible = Rc::new(Cell::new(false));
@@ -3450,9 +3572,9 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     }
                     if let Ok(text) = engine.get_commit(rime_id) {
                         if !text.is_empty() {
-                            // 挂到对应外壳会话句柄（反向查 handle），外壳取走上屏
+                            // 挂到对应外壳会话句柄（反向查 handle），通知外壳上屏
                             if let Some(h) = SESSIONS.handle_of(rime_id) {
-                                PENDING_UI_COMMITS.lock().unwrap().insert(h, text);
+                                emit_commit(h, &text);
                             }
                         }
                     }
@@ -3511,92 +3633,36 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 }
                 UiCmd::SelectHL => {
                     // 空格/回车：选中面板当前高亮项
-                    let idx = panel_hl.get().max(0) as usize;
-                    let Some(rime_id) = *current.borrow() else { continue };
-                    let Ok(engine) = engine() else { continue };
-                    let item = panel.borrow().as_ref().and_then(|snap| {
-                        let real = idx < snap.real_count;
-                        snap.items.get(idx).cloned().map(|t| (t, real))
-                    });
-                    let Some((text, is_real)) = item else { continue };
-                    {
-                        let _guard = OP_LOCK.lock().unwrap();
-                        let ok = if is_real {
-                            let sel_ok =
-                                engine.select_candidate_global(rime_id, idx).unwrap_or(false);
-                            if sel_ok {
-                                // select 产生的上屏文本在 librime 的 commit 队列里，
-                                // 必须显式取出交给外壳（否则应用收不到——正常按键
-                                // 路径由 heng_process_key_ex 返回值携带，此路径没有）
-                                match engine.get_commit(rime_id) {
-                                    Ok(t) if !t.is_empty() => {
-                                        if let Some(h) = SESSIONS.handle_of(rime_id) {
-                                            PENDING_UI_COMMITS.lock().unwrap().insert(h, t);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            sel_ok
-                        } else {
-                            // 同音词：清组合串 + 文本直接上屏
-                            let _ = engine.clear_composition(rime_id);
-                            if let Some(h) = SESSIONS.handle_of(rime_id) {
-                                PENDING_UI_COMMITS.lock().unwrap().insert(h, text.clone());
-                            }
-                            true
-                        };
-                        if ok && !is_real {
-                            // 同音词上屏后组合串已清，直接收起
-                            ui.set_expanded(false);
-                            expanded.set(false);
-                            UI_EXPANDED.store(false, Ordering::Relaxed);
-                            flip.set(false);
-                            *panel.borrow_mut() = None;
-                            backend.set_mapped(0, false);
-                            backend.set_mapped(2, false);
-                            *visible.borrow_mut() = false;
-                        }
+                    select_panel_index(&mut backend, panel_hl.get().max(0) as usize);
+                }
+                UiCmd::SelectByRowSeq(seq) => {
+                    // 展开面板数字键：按「行内序号」选词（每行序号从 1 重排，
+                    // 而 items 是全局连续索引 → 必须按行换算，否则任何行都选
+                    // 到第一行的第 N 个）。
+                    let seq = seq.max(1) as usize;
+                    // 以当前高亮所在行为锚：用户在第几行按数字，就选那一行
+                    let snap_ref = panel.borrow();
+                    let Some(snap) = snap_ref.as_ref() else { continue };
+                    let hl_idx = panel_hl.get().max(0) as usize;
+                    let Some(anchor_y) = snap.geo.get(hl_idx).map(|g| g.1) else {
+                        continue;
+                    };
+                    // 锚点行首项 = 该 y 的第一个出现位置
+                    let row_start = snap.geo.iter().position(|g| g.1 == anchor_y).unwrap_or(0);
+                    let target = row_start + seq - 1;
+                    let total = snap.items.len();
+                    let real_count = snap.real_count;
+                    drop(snap_ref);
+                    if target >= total {
+                        continue;  // 该行没这么长
                     }
-                    if is_real {
-                        // 真实候选：可能仍在组句（如首词后继续），收面板恢复横条
-                        ui.set_expanded(false);
-                        expanded.set(false);
-                        UI_EXPANDED.store(false, Ordering::Relaxed);
-                        flip.set(false);
-                        *panel.borrow_mut() = None;
-                        let snapshot = {
-                            let _guard = OP_LOCK.lock().unwrap();
-                            engine.get_context(rime_id)
-                        };
-                        if let Ok(snapshot) = snapshot {
-                            if snapshot.candidates.is_empty() {
-                                backend.set_mapped(0, false);
-                                backend.set_mapped(2, false);
-                                *visible.borrow_mut() = false;
-                            } else {
-                                let _guard = OP_LOCK.lock().unwrap();
-                                set_bar_cells(
-                                    &ui,
-                                    &engine,
-                                    rime_id,
-                                    &snapshot,
-                                    &bar_base,
-                                    &bar_items,
-                                    &panel_hl,
-                                );
-                                let w = (lay_panel_w() as f32 * scale).round() as u32;
-                                paint(
-                                    &mut backend,
-                                    w,
-                                    bar_h_now(),
-                                    last_x.get(),
-                                    last_y.get(),
-                                    true,
-                                );
-                            }
-                        }
+                    // 同音词（真实候选之后）走清串直上屏，不能按 global 选
+                    if target >= real_count {
+                        continue;
                     }
+                    panel_hl.set(target as i32);
+                    UI_HL.store(target as i32, Ordering::Relaxed);
+                    select_panel_index(&mut backend, target);
                 }
                 UiCmd::ModeHint { ascii, anchor } => {
                     // 中英切换瞬态气泡：窗口独占切到胶囊形态（124x48 物理像素由

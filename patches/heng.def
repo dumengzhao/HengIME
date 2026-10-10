@@ -67,6 +67,7 @@ EXPORTS
     heng_select_candidate_on_current_page
     heng_set_caret_pos
     heng_set_option
+    heng_set_commit_handler
     heng_set_propagation_policy
     heng_set_session_owner
     heng_settings_hide

@@ -22,8 +22,8 @@ pub type HengSession = u64; // 对应 heng.h 的 heng_session_t（uint64_t），
 pub const HENG_TRUE: c_int = 1;
 pub const HENG_FALSE: c_int = 0;
 
-/// 当前 C ABI 版本（v6：传播策略 + app_options 统一 + 选项持久化）
-pub const HENG_ABI_VERSION: c_int = 9;
+/// 当前 C ABI 版本（v10：新增 heng_set_commit_handler——UI 点击上屏即时回调）
+pub const HENG_ABI_VERSION: c_int = 10;
 /// 仍兼容的最低调用方 ABI（v4 起有 config API；更早调用方未验证）
 pub const HENG_MIN_ABI_VERSION: c_int = 4;
 
@@ -898,6 +898,13 @@ pub extern "C" fn heng_process_key_ex(
                         crate::ui::ui_select_hl();
                         ui_nav = true;
                     }
+                    // 数字键 1-9：选「当前高亮所在行」的第 N 个。
+                    // 面板每行序号独立从 1 起排，而候选索引是全局连续的——
+                    // 不做行换算就会永远选中第一行的第 N 个（已修）。
+                    0x31..=0x39 => {
+                        crate::ui::ui_select_by_row_seq((keysym - 0x30) as i32);
+                        ui_nav = true;
+                    }
                     _ => {}
                 }
             } else {
@@ -1183,8 +1190,32 @@ pub extern "C" fn heng_ui_mode_hint_ex(
     })
 }
 
+/// 注册「UI 点击上屏」回调。cb 为空指针时注销（退回轮询取语义）。
+///
+/// 鼠标点击选词这条路径没有任何按键事件伴随，而 weasel 的 IPC 是严格
+/// 请求-响应模型（无server→client 推送通道），`_Respond` 只在按键时被
+/// 调用 → 点击产生的 commit 永远没人取，候选窗关了但字不上屏。注册本回调
+/// 后 core 选词完立即调用，跨端行为一致。
+///
+/// 回调在 core UI 线程同步执行，实现方只应做投递（post 消息 / 排队），
+/// 不要阻塞或反向长时间持有 core 锁。text 为 UTF-8、以 NUL 结尾，
+/// 仅在回调期间有效，需自存。
+#[no_mangle]
+pub extern "C" fn heng_set_commit_handler(
+    cb: Option<crate::ui::CommitHandler>,
+    ctx: *mut core::ffi::c_void,
+) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        *crate::ui::COMMIT_HANDLER.lock().unwrap() = cb.map(|f| (f, ctx as usize));
+        HENG_TRUE
+    })
+}
+
 /// 取走 UI 点击产生的待上屏文本（消费语义）。返回 HENG_TRUE 且 *out 非 NULL
 /// 表示有文本（heng_free_string 释放）；否则 *out 为 NULL。
+///
+/// 仅在外壳未注册 heng_set_commit_handler 时才有内容（注册后 core 直接回调，
+/// 此接口返回空）。保留供轮询式外壳与调试使用。
 #[no_mangle]
 pub extern "C" fn heng_take_ui_commit(session: HengSession, out: *mut *mut c_char) -> c_int {
     ffi_guard!(HENG_FALSE, {
