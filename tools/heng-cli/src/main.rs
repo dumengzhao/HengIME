@@ -486,7 +486,8 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
         };
         let rc = heng_hello(5, &mut hello);
         check!("heng_hello 填充成功", rc == 1);
-        check!("hello.abi_version == 9", hello.abi_version == 9);
+        // 与 core/src/capi.rs 的 HENG_ABI_VERSION 对齐（当前 10）
+        check!("hello.abi_version == 10", hello.abi_version == 10);
         check!("hello.data_size > 0", hello.data_size > 0);
         check!("min_abi_version <= abi_version", hello.min_abi_version <= hello.abi_version);
 
