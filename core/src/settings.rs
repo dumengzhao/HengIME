@@ -76,9 +76,18 @@ impl Settings {
 
     // ---------- 语义化 setter（S1 样式 / S2 方案快捷键） ----------
 
-    /// 配色方案（weasel.custom.yaml style/color_scheme）
-    pub fn set_color_scheme(&self, id: &str) -> std::io::Result<()> {
-        self.set_path(PATCH_WEASEL, "style/color_scheme", Value::from(id))
+    /// 自定义配色（weasel.custom.yaml style/heng_<key>）
+    ///
+    /// 值格式 `"#rrggbb"` 或字面量 `"transparent"`（选中区域不要背景色）。
+    /// 不用 librime 的 `0xBBGGRR` int：那个格式没有 alpha 通道，
+    /// `0x000000` 与透明撞车，无法表达「不填充」。
+    /// 带 `heng_` 前缀：weasel 不认识这些键会直接忽略，不会与上游样式语义打架。
+    pub fn set_custom_color(&self, key: &str, value: &str) -> std::io::Result<()> {
+        self.set_path(
+            PATCH_WEASEL,
+            &format!("style/heng_{key}"),
+            Value::from(value),
+        )
     }
 
     /// 内嵌编码（inline preedit）

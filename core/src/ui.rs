@@ -31,7 +31,6 @@ use slint::platform::{Platform, WindowAdapter, WindowEvent};
 use slint::{LogicalPosition, ModelRc, PhysicalSize, SharedString, VecModel};
 
 use crate::engine::RimeSessionId;
-use crate::engine::{RimeConfig, RimeConfigIterator};
 use crate::global::{engine, SESSIONS, OP_LOCK};
 use crate::settings::{
     build_bindings, parse_bindings, Settings, FULL_PRESETS, LR_PRESETS, PAGING_PRESETS,
@@ -337,6 +336,15 @@ slint::slint! {
         in property <string> input-text; // 内嵌关时有值（独立字母窗口显示用）
         in property <int> cand-font;  // 候选字号（7 档刻度：14-20，默认 16 = 第 3 档）
         in property <float> font-scale; // 字号缩放系数 k = 字号/14（DPI 式等比）
+        // —— 自定义配色（源补丁 style/heng_* 直读，不走 librime 部署语义）——
+        // 主预览容器背景色
+        in property <color> col-container;
+        // 选中区域背景色（alpha=0 = 不填充，露出容器底色）
+        in property <color> col-hilite-back;
+        // 选中区域字体色
+        in property <color> col-hilite-text;
+        // 未选中候选词字体色（容器转深色时必需，否则深底深字）
+        in property <color> col-cand-text;
         // —— 文本测宽探针 ——
         // 候选格宽度必须用"真实排版宽度"而不是估算表：估算系数随字号漂移，
         // 字号一改就全员省略号（历史事故）。探针 Text 与候选格同字号、
@@ -363,7 +371,7 @@ slint::slint! {
         y: 0;
         width: parent.width;
         height: parent.height;
-        background: root.hint-only ? #404048E6 : #f7f8fa;
+        background: root.hint-only ? #404048E6 : root.col-container;
         // 字母区显示时取消顶部两角圆角（与上方字母窗连成一体）；内嵌态恢复
         property <bool> letters-above: root.input-text != "" && !root.hint-only;
         border-top-left-radius: letters-above ? 0px : (root.hint-only ? 10px : root.font-scale * 8px);
@@ -388,7 +396,7 @@ slint::slint! {
                     height: root.font-scale * 26px;
                     border-radius: root.font-scale * 8px;
                     // 只有选中项有背景药丸，其余纯文字不加底色区分边界
-                    background: cell.hl ? #2164f1 : transparent;
+                    background: cell.hl ? root.col-hilite-back : transparent;
                     // 绝对定位（不用 HorizontalLayout：其对齐语义不好控）。
                     // 序号与正文各自占满格高、垂直居中；间距由实测序号宽 + gap 控制
                     property <length> pad-l: root.font-scale * 6px;
@@ -402,7 +410,7 @@ slint::slint! {
                         height: parent.height;
                         text: cell.num;
                         // 与正文同色（原来浅灰/浅蓝在浅底上不显眼）
-                        color: cell.hl ? #ffffff : #1f2328;
+                        color: cell.hl ? root.col-hilite-text : root.col-cand-text;
                         font-size: root.font-scale * 11px;
                         vertical-alignment: center;
                     }
@@ -413,7 +421,7 @@ slint::slint! {
                         width: parent.width - pad-l - pad-r - cell.nw * 1px - gap-in;
                         height: parent.height;
                         text: cell.text;
-                        color: cell.hl ? #ffffff : #1f2328;
+                        color: cell.hl ? root.col-hilite-text : root.col-cand-text;
                         font-size: root.cand-font * 1px;
                         vertical-alignment: center;
                         overflow: elide;
@@ -502,7 +510,7 @@ slint::slint! {
             y: 0;
             width: parent.width;
             height: parent.height;
-            background: #f7f8fa;
+            background: root.col-container;
             border-radius: 8px;
             // 空白处点击 → 整窗关闭；垫底（后声明的元素在上层，放在菜单项
             // 之后会把整窗点击吞掉、菜单项永远点不到）
@@ -521,7 +529,7 @@ slint::slint! {
                         alignment: center;
                         Text {
                             text: name;
-                            color: #1f2328;
+                            color: root.col-cand-text;
                             font-size: 14px;
                             vertical-alignment: center;
                         }
@@ -580,12 +588,6 @@ slint::slint! {
     export struct SetRow {
         title: string,  // 左侧标题
         sub: string,    // 右侧当前值/说明
-        sw1: color,     // 预览色块（配色方案行用）
-        sw2: color,
-        sw3: color,
-        sw1-on: bool,   // 色块显示开关（关 = 0 宽隐藏）
-        sw2-on: bool,
-        sw3-on: bool,
         active: bool,   // 当前选中
     }
 
@@ -611,12 +613,33 @@ slint::slint! {
         in property <bool> inline-preedit;
         in property <bool> ascii-punct;
         in property <string> about-lines;
+        // —— 自定义配色页 ——
+        in property <[color]> color-vals;   // 4 项当前色（顺序：容器/选中底/选中字/候选字）
+        in property <[string]> color-labels;
+        in property <bool> picker-open;     // 取色面板是否展开
+        in property <int> picker-target;     // 正在编辑第几项（0-3）
+        in property <bool> picker-allow-transparent; // 该项是否允许"不填充"
+        // HSV 取色器：色相 0-360，饱和/明度 0-100
+        in property <float> pick-h;
+        in property <float> pick-s;
+        in property <float> pick-v;
+        in property <[color]> hue-bar;      // 色相条 24 段（固定，不随 s/v 变）
+        in property <[color]> sv-grid;      // SV 方块 COLS×ROWS 格（随色相重算）
+        in property <int> sv-cols;
+        in property <int> sv-rows;
+        in property <color> pick-preview;    // 当前 hsv 合成的预览色
+    in property <string> pick-preview-hex; // 同色hex 文本（面板右下角显示）
+    in property <bool> picker-is-transparent; // 当前项是否已处于「不填」态
         callback nav_clicked(int);
         callback row_clicked(int);
         callback toggle_clicked(string);
         callback scale_clicked(float); // 参数 = 点击位置占轨道比例 0-1
         callback action_clicked(string);
         callback close_clicked();
+        callback color_row_clicked(int);   // 点某个色块行 → 开取色器
+        callback pick_hsv(float, float, float); // 拖拽取色（h/s/v），实时应用
+        callback pick_transparent();             // 点「不填充」
+        callback color_reset(int);               // 参数 = 行号，恢复该项默认
 
         width: 640px;
         height: 480px;
@@ -666,7 +689,219 @@ slint::slint! {
                 // 所有行跟着变宽，右侧胶囊被视口裁掉
                 width: parent.width;
                 spacing: 6px;
-                // —— 页2 外观：拨杆与步进（固定行在前，配色列表在后） ——
+                // —— 页2 外观：面板 → 预览 → 四项色块 → 拨杆 → 字号 ——
+                // 顺序按「视口高度倒排」：内容区只有 ~418px，取色面板 + 预览 +
+                // 四行色块正好放得下，拨杆与字号在下方（可滚动看到）。
+                // 反过来排（面板在末位）会溢出到滚动区外 —— 表现为「点改色后
+                // 内容错位一下，面板看不到」。
+                if root.page == 1 && root.picker-open: Rectangle {
+                    // 高度 = 头部 24 + SV 方块 150 + 间隙 8 + 色相条 22 + 间隙 10
+                    // + 预览行 28 + 内边距 = 274
+                    height: 274px; border-radius: 8px; background: #ffffff;
+                    // 头部
+                    Text {
+                        x: 12px; y: 10px; width: 200px; height: 20px;
+                        text: root.color-labels[root.picker-target];
+                        font-size: 13px; color: #1f2328;
+                        vertical-alignment: center; overflow: elide;
+                    }
+                    Text {
+                        x: parent.width - 148px; y: 10px; width: 112px; height: 20px;
+                        text: "拖动取色"; font-size: 12px; color: #999999;
+                        horizontal-alignment: right; vertical-alignment: center;
+                    }
+                    Rectangle {
+                        x: parent.width - 32px; y: 10px;
+                        width: 20px; height: 20px; border-radius: 10px;
+                        background: pct.has-hover ? #e0e3e8 : transparent;
+                        Text { text: "×"; font-size: 15px; color: #666666; }
+                        pct := TouchArea { clicked => { root.color_row_clicked(-1); } }
+                    }
+                    // SV 方块：横向 = 饱和度 0→100，纵向 = 明度 100→0。
+                    // 格子颜色由 Rust 侧按当前色相算好塞进 model（色相变了整块重算）。
+                    Rectangle {
+                        x: 12px; y: 36px; width: 348px; height: 150px;
+                        border-radius: 6px; border-width: 1px; border-color: #d8dce2;
+                        clip: true;
+                        for sc[k] in root.sv-grid: Rectangle {
+                            x: Math.mod(k, root.sv-cols) * (348px / root.sv-cols);
+                            y: Math.floor(k / root.sv-cols) * (150px / root.sv-rows);
+                            width: 348px / root.sv-cols + 1px;
+                            height: 150px / root.sv-rows + 1px;
+                            background: sc;
+                        }
+                        // 当前位置指示圈（白描边 + 黑描边双层，任何底色上都看得见）
+                        Rectangle {
+                            x: root.pick-s * 3.48px - 5px;
+                            y: (100.0 - root.pick-v) * 1.5px - 5px;
+                            width: 10px; height: 10px; border-radius: 5px;
+                            border-width: 2px; border-color: #ffffff;
+                            background: #00000000;
+                        }
+                        Rectangle {
+                            x: root.pick-s * 3.48px - 6px;
+                            y: (100.0 - root.pick-v) * 1.5px - 6px;
+                            width: 12px; height: 12px; border-radius: 6px;
+                            background: #00000000;
+                            border-width: 1px; border-color: #00000060;
+                        }
+                        sva := TouchArea {
+                            mouse-cursor: crosshair;
+                            moved => {
+                                root.pick_hsv(root.pick-h,
+                                    self.mouse-x / self.width * 100.0,
+                                    100.0 - self.mouse-y / self.height * 100.0);
+                            }
+                            clicked => {
+                                root.pick_hsv(root.pick-h,
+                                    self.mouse-x / self.width * 100.0,
+                                    100.0 - self.mouse-y / self.height * 100.0);
+                            }
+                        }
+                    }
+                    // 色相条：24 段固定色相
+                    Rectangle {
+                        x: 12px; y: 194px; width: 348px; height: 22px;
+                        border-radius: 5px; border-width: 1px; border-color: #d8dce2;
+                        clip: true;
+                        for hc[k] in root.hue-bar: Rectangle {
+                            x: k * (348px / 36);
+                            y: 0;
+                            width: 348px / 36 + 1px;
+                            height: 22px;
+                            background: hc;
+                        }
+                        // 指示条
+                        Rectangle {
+                            x: root.pick-h / 360.0 * 348px - 2px; y: 0;
+                            width: 4px; height: 22px;
+                            border-width: 1px; border-color: #ffffff;
+                            background: #00000000;
+                        }
+                        Rectangle {
+                            x: root.pick-h / 360.0 * 348px - 3px; y: 0;
+                            width: 6px; height: 22px;
+                            border-width: 1px; border-color: #00000080;
+                            background: #00000000;
+                        }
+                        hua := TouchArea {
+                            mouse-cursor: crosshair;
+                            moved => {
+                                root.pick_hsv(self.mouse-x / self.width * 360.0,
+                                    root.pick-s, root.pick-v);
+                            }
+                            clicked => {
+                                root.pick_hsv(self.mouse-x / self.width * 360.0,
+                                    root.pick-s, root.pick-v);
+                            }
+                        }
+                    }
+                    // 底部：当前色预览 + 不填充 + 常用色快捷
+                    Rectangle {
+                        x: 12px; y: 226px; width: 48px; height: 28px;
+                        border-radius: 6px;
+                        background: root.pick-preview;
+                        border-width: 1px; border-color: #d8dce2;
+                    }
+                    // 恒为 true（四项都允许透明）—— 保留属性是因为「不填」需要知道当前项
+                    // 是否已处于透明态，以便高亮；将来若再收窄某项，这里不用改 UI
+                    if root.picker-allow-transparent: Rectangle {
+                        x: 68px; y: 226px; width: 56px; height: 28px;
+                        border-radius: 6px;
+                        background: root.picker-is-transparent ? #2164f1 : #ffffff;
+                        border-width: 1px; border-color: #c9ced6;
+                        Path {
+                            width: 16px; height: 16px; x: 6px; y: 6px;
+                            viewbox-width: 16; viewbox-height: 16;
+                            commands: "M 0 16 L 16 0";
+                            stroke: root.picker-is-transparent ? #ffffff : #b8bec7;
+                            stroke-width: 2px;
+                        }
+                        Text {
+                            x: 24px; y: 0; width: 28px; height: parent.height;
+                            text: "不填"; font-size: 11px;
+                            color: root.picker-is-transparent ? #ffffff : #6b7280;
+                            vertical-alignment: center;
+                        }
+                        ptt := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.pick_transparent(); }
+                        }
+                    }
+                    // 当前取到的 hex —— 比重复「拖动取色」提示有用
+                    Text {
+                        x: parent.width - 132px; y: 226px; width: 120px; height: 28px;
+                        text: root.pick-preview-hex; font-size: 11px; color: #9aa0a8;
+                        font-family: "Consolas";
+                        horizontal-alignment: right; vertical-alignment: center;
+                    }
+                }
+                // —— 页2 外观：自定义配色（预览 + 四项色块 + 固定色板） ——
+                // 预览条：等比缩略候选窗（容器底 + 选中格 + 未选中格），
+                // 改色即时可见，不必关窗去候选窗核对
+                if root.page == 1: Rectangle {
+                    height: 76px; border-radius: 8px; background: #e8ebef;
+                    // 迷你候选窗容器
+                    Rectangle {
+                        x: 14px; y: 12px; width: 220px; height: 52px;
+                        border-radius: 8px;
+                        background: root.color-vals[0];
+                        // 选中格（背景 alpha=0 时自然透出容器底 = 不填充）
+                        Rectangle {
+                            x: 8px; y: 10px; width: 96px; height: 32px;
+                            border-radius: 8px;
+                            background: root.color-vals[1];
+                            Text {
+                                text: "1 你好"; font-size: 14px;
+                                color: root.color-vals[2];
+                                vertical-alignment: center; horizontal-alignment: center;
+                            }
+                        }
+                        // 未选中格
+                        Text {
+                            x: 116px; y: 10px; width: 96px; height: 32px;
+                            text: "2 您好"; font-size: 14px;
+                            color: root.color-vals[3];
+                            vertical-alignment: center; horizontal-alignment: center;
+                        }
+                    }
+                    Text {
+                        x: 248px; y: 12px; width: parent.width - 262px; height: 52px;
+                        text: "实时预览"; font-size: 13px; color: #6b7280;
+                        vertical-alignment: center; wrap: word-wrap;
+                    }
+                }
+                // 四个可配色项（点击行 → 展开取色面板）
+                for ci[i] in 4: Rectangle {
+                    height: 44px; border-radius: 8px;
+                    background: cta-ci.has-hover ? #eceef2 : #ffffff;
+                    // 绝对定位，不用 HorizontalLayout：布局里Text 的
+                    // horizontal-stretch 语义吃掉了显式 width，标题会被推到
+                    // 中间（实测 horizontal-stretch:0 + width 仍无效）
+                    Text {
+                        x: 12px; y: 0; width: 150px; height: parent.height;
+                        text: root.color-labels[i];
+                        font-size: 14px; color: #1f2328;
+                        vertical-alignment: center; overflow: elide;
+                    }
+                    // 当前色块：透明项画白底（下方无内容 = 不填充）
+                    Rectangle {
+                        x: parent.width - 116px; y: 10px;
+                        width: 40px; height: 24px; border-radius: 6px;
+                        background: root.color-vals[i].alpha == 0 ? #ffffff : root.color-vals[i];
+                        border-width: 1px; border-color: #d8dce2;
+                    }
+                    Rectangle {
+                        x: parent.width - 66px; y: 10px;
+                        width: 44px; height: 24px; border-radius: 6px;
+                        background: root.picker-target == i && root.picker-open ? #2164f1 : #e9ebef;
+                        Text {
+                            text: "改色"; font-size: 12px; color: #ffffff;
+                            vertical-alignment: center; horizontal-alignment: center;
+                        }
+                    }
+                    cta-ci := TouchArea { mouse-cursor: pointer; clicked => { root.color_row_clicked(i); } }
+                }
                 if root.page == 1: Rectangle {
                     height: 44px; border-radius: 8px; background: #ffffff;
                     HorizontalLayout {
@@ -725,21 +960,6 @@ slint::slint! {
                     HorizontalLayout {
                         padding-left: 12px; padding-right: 12px; spacing: 8px;
                         alignment: center;
-                        VerticalLayout {
-                            width: row.sw1-on ? 16px : 0px;
-                            alignment: center;
-                            Rectangle { height: 16px; border-radius: 4px; background: row.sw1; border-width: 1px; border-color: #d8dce2; }
-                        }
-                        VerticalLayout {
-                            width: row.sw2-on ? 16px : 0px;
-                            alignment: center;
-                            Rectangle { height: 16px; border-radius: 4px; background: row.sw2; border-width: 1px; border-color: #d8dce2; }
-                        }
-                        VerticalLayout {
-                            width: row.sw3-on ? 16px : 0px;
-                            alignment: center;
-                            Rectangle { height: 16px; border-radius: 4px; background: row.sw3; border-width: 1px; border-color: #d8dce2; }
-                        }
                         Text { text: row.title; font-size: 14px; color: #1f2328; vertical-alignment: center; overflow: elide; }
                         Rectangle { horizontal-stretch: 1; }
                         Text { text: row.sub; font-size: 12px; color: #999999; vertical-alignment: center; overflow: elide; }
@@ -798,6 +1018,9 @@ slint::slint! {
         in property <string> text;
         in property <int> cand-font;  // 与候选格同字号
         in property <float> font-scale;
+        // 与候选窗共用同一套自定义配色（源补丁 style/heng_*）
+        in property <color> col-container;
+        in property <color> col-cand-text;
         width: root.font-scale * 460px;
         height: root.font-scale * 18px;
         background: transparent;
@@ -805,7 +1028,7 @@ slint::slint! {
         // 底部两角取消圆角（与下方候选窗顶部方角连成一体）
         Rectangle {
             x: 0; y: 0; width: parent.width; height: parent.height;
-            background: #f7f8fa;
+            background: root.col-container;
             border-top-left-radius: 8px;
             border-top-right-radius: 8px;
             border-bottom-left-radius: 0px;
@@ -815,7 +1038,7 @@ slint::slint! {
                 width: parent.width - 20px; height: parent.height;
                 text: root.text;
                 // 与候选词同色（原来浅灰 #888d95 不显眼）
-                color: #1f2328;
+                color: root.col-cand-text;
                 font-size: root.cand-font * 1px;
                 vertical-alignment: center;
                 overflow: elide;
@@ -932,8 +1155,35 @@ fn create_backend() -> Option<Box<dyn UiBackend>> {
 
 /// 系统 DPI 缩放因子（96dpi = 1.0）。渲染与窗口尺寸均按此放大；
 /// 指针事件坐标反向除回逻辑像素。
+///
+/// 为什么不用 `GetDeviceCaps(GetDC(NULL), LOGPIXELSX)`（旧实现）：
+/// 该 API 的返回值**取决于进程的 DPI 感知状态**——未声明感知的宿主进程里
+/// 它返回虚拟化的 96 而不是真实 DPI，缩放静默退化成 1.0，表现为
+/// 「高分辨率屏上界面很小」，且换宿主就变。
+///
+/// 改用 `GetDpiForWindow(GetDesktopWindow())`：实测该API **完全不受进程
+/// 感知状态影响**（本机未声明aware 与 PM aware 下都返回 192=2.0×，而
+/// `GetDpiForSystem` 在未声明 aware 时错返回 96）。取桌面窗口的 DPI 而非
+/// 具体窗口，是为了让「窗口创建前」也能拿到正确值（设置窗/候选窗的
+/// HWND 此时还不存在）。
+///
+/// 已知局限：多屏异构缩放（两屏缩放不同）下取的是主屏 DPI，副屏上的窗口
+/// 会偏大/偏小。彻底解决需处理 `WM_DPICHANGED` + 按窗口取 DPI，暂未做。
 #[cfg(target_os = "windows")]
 fn ui_scale() -> f32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    let hwnd = unsafe { GetDesktopWindow() };
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi >= 96 {
+        return dpi as f32 / 96.0;
+    }
+    ui_scale_fallback()
+}
+
+/// 老系统（< Win10 1607）回落：GetDC(NULL) + LOGPIXELSX
+#[cfg(target_os = "windows")]
+fn ui_scale_fallback() -> f32 {
     use windows_sys::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, LOGPIXELSX};
     unsafe {
         let dc = GetDC(std::ptr::null_mut());
@@ -1994,12 +2244,15 @@ use std::cell::RefCell;
     }
 
     impl SubWin {
-        /// 按 (w,h) 重建 DIB（尺寸变化时）
+        /// 按 (w,h) 重建 DIB（尺寸变化时）。DIB 变了窗口尺寸也要跟着变，
+        /// 否则 WM_PAINT 的 BitBlt 会按旧客户区尺寸拉伸/截断新帧
+        /// （用户中途改系统缩放、或把窗口挪到异构 DPI 屏时必现）。
         fn ensure_bitmap(&mut self, w: u32, h: u32) -> bool {
             unsafe {
                 if self.cur_size == (w, h) && !self.bits.is_null() {
                     return true;
                 }
+                let resized = self.cur_size != (0, 0);
                 if !self.hbmp.is_null() {
                     DeleteObject(self.hbmp);
                     self.hbmp = std::ptr::null_mut();
@@ -2035,6 +2288,20 @@ use std::cell::RefCell;
                 self.hbmp = hbmp;
                 self.bits = pv as *mut u8;
                 self.cur_size = (w, h);
+                // 已存在的窗口要同步客户区尺寸（首次创建交给 configure，
+                // 那时 cur_size 还是 0/0，DIB 与窗口由create_subwin 同步给出）
+                if resized {
+                    let (x, y) = self.pos;
+                    SetWindowPos(
+                        self.hwnd,
+                        std::ptr::null_mut(),
+                        x,
+                        y,
+                        w as i32,
+                        h as i32,
+                        SWP_NOACTIVATE | SWP_NOZORDER,
+                    );
+                }
                 true
             }
         }
@@ -2671,7 +2938,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // 启动时先应用候选字号（7 档刻度 14-20，默认 16 = 第 3 档）——
     // 布局尺寸全部由此推导，必须在算高度之前
     if let Ok(eng) = engine() {
-        let f = Settings::new(eng)
+        let sett = Settings::new(eng);
+        let f = sett
             .get_path(crate::settings::PATCH_WEASEL, "style/font_point_size")
             .and_then(|v| v.as_i64())
             .map(|v| v.clamp(14, 20) as i32)
@@ -2681,9 +2949,19 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         let k = f as f32 / 14.0;
         ui.set_font_scale(k);
         lsw.set_font_scale(k);
+        // 自定义配色：启动即应用（不走 redeploy，纯 UI 属性）
+        let colors = read_theme_colors(&sett);
+        apply_theme_colors(&ui, &lsw, &colors);
     }
     // DPI 缩放：布局用逻辑像素，渲染/窗口尺寸放大到物理像素
     let scale = ui_scale();
+    if std::env::var_os("HENG_UI_DUMP").is_some() {
+        eprintln!(
+            "heng-ui: dpi scale = {scale} → 设置窗物理 {}x{}",
+            (640.0 * scale).round() as u32,
+            (480.0 * scale).round() as u32
+        );
+    }
     let bar_h = (lay_bar_h() as f32 * scale).round() as u32;
     // 顶部字母区高度（物理px）：独立窗口，paint 时贴候选窗正上方
     let input_row_h = (lay_letters_h() as f32 * scale).round() as u32;
@@ -2903,6 +3181,9 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         if !open {
             return;
         }
+        // 与 SettingsShow 同理：按当前 DPI 实时算（用户中途改缩放后，
+        // 帧缓冲尺寸要跟着变，否则 BitBlt 会拉伸/截断）
+        let scale = ui_scale();
         let w = (640.0 * scale).round() as u32;
         let h = (480.0 * scale).round() as u32;
         if sbuf.borrow().len() != (w * h) as usize {
@@ -3010,9 +3291,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     }
                 }
                 1 => {
-                    if let Some((id, _, _)) = st.schemes.get(r as usize) {
-                        changed = settings.set_color_scheme(id).is_ok();
-                    }
+                    // 页2（外观）行由专属块处理，行点击不再切预设配色
                 }
                 2 => {
                     let (l, p2, si, pu, fu) =
@@ -3040,6 +3319,103 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 // 会话已重建：候选窗回初始态
                 let _ = tx.send(UiCmd::Hide);
             }
+        }
+    });
+    // —— 自定义配色：点行开取色器 / 点色块即生效 ——
+    // 不走 redeploy（配色只喂 Slint 属性，librime 不参与），故不杀会话、
+    // 不 Hide 候选窗；写 patch 成功即推属性 + 重绘。
+    sui.on_color_row_clicked({
+        let sui = sui.clone();
+        let sstate = sstate.clone();
+        move |idx| {
+            let Some(st) = sstate.borrow().as_ref().map(|s| s.clone()) else { return };
+            let mut ns = st;
+            // idx = -1 是面板上的 ×（收起）
+            if idx < 0 {
+                ns.picker_open = false;
+            } else {
+                let i = idx as usize;
+                if i >= COLOR_KEYS.len() {
+                    return;
+                }
+                ns.picker_open = true;
+                ns.picker_target = i;
+            }
+            *sstate.borrow_mut() = Some(ns.clone());
+            settings_apply_page(&sui, &ns, sui.get_page());
+        }
+    });
+    // HSV 拖拽取色：写 patch + 推属性。
+    // 色相变 → SV 方块整块重算（280 格，拖动时每帧都做也够快）。
+    sui.on_pick_hsv({
+        let sui = sui.clone();
+        let sstate = sstate.clone();
+        let ui = ui.clone();
+        let lsw = lsw.clone();
+        let tx = tx.clone();
+        move |h, s, v| {
+            let Ok(engine) = engine() else { return };
+            let _guard = OP_LOCK.lock().unwrap();
+            let settings = Settings::new(&engine);
+            let Some(st) = sstate.borrow().as_ref().map(|s| s.clone()) else { return };
+            let t = st.picker_target.min(COLOR_KEYS.len() - 1);
+            let hex = hex_of(h, s, v);
+            if settings.set_custom_color(COLOR_KEYS[t], &hex).is_err() {
+                return;
+            }
+            let mut ns = st;
+            ns.colors[t] = hex;
+            *sstate.borrow_mut() = Some(ns.clone());
+            apply_theme_colors(&ui, &lsw, &ns.colors);
+            // 面板自身的 HSV 状态：SV 方块跟色相走，预览块跟指针走
+            sui.set_pick_h(h);
+            sui.set_pick_s(s);
+            sui.set_pick_v(v);
+            sui.set_sv_grid(Rc::new(VecModel::from(sv_grid_colors(h))).into());
+            sui.set_pick_preview(hsv_color(h, s / 100.0, v / 100.0));
+            sui.set_pick_preview_hex(hex_of(h, s, v).into());
+            sui.set_picker_is_transparent(false);
+            sui.set_color_vals(Rc::new(VecModel::from(
+                ns.colors.iter().map(|c| theme_color(c)).collect::<Vec<_>>(),
+            ))
+            .into());
+            // 候选窗需要重绘才能看到新配色
+            let _ = tx.send(UiCmd::Hide);
+        }
+    });
+    sui.on_pick_transparent({
+        let sui = sui.clone();
+        let sstate = sstate.clone();
+        let ui = ui.clone();
+        let lsw = lsw.clone();
+        let tx = tx.clone();
+        move || {
+            let Ok(engine) = engine() else { return };
+            let _guard = OP_LOCK.lock().unwrap();
+            let settings = Settings::new(&engine);
+            let Some(st) = sstate.borrow().as_ref().map(|s| s.clone()) else { return };
+            let t = st.picker_target.min(COLOR_KEYS.len() - 1);
+            // 「不填充」；仅选中背景允许
+            if !COLOR_ALLOW_TRANSPARENT[t] {
+                return;
+            }
+            if settings
+                .set_custom_color(COLOR_KEYS[t], TRANSPARENT_MARK)
+                .is_err()
+            {
+                return;
+            }
+            let mut ns = st;
+            ns.colors[t] = TRANSPARENT_MARK.to_string();
+            *sstate.borrow_mut() = Some(ns.clone());
+            apply_theme_colors(&ui, &lsw, &ns.colors);
+            sui.set_picker_is_transparent(true);
+            sui.set_pick_preview_hex(TRANSPARENT_MARK.into());
+            sui.set_color_vals(Rc::new(VecModel::from(
+                ns.colors.iter().map(|c| theme_color(c)).collect::<Vec<_>>(),
+            ))
+            .into());
+            let _ = tx.send(UiCmd::Hide);
         }
     });
     sui.on_toggle_clicked({
@@ -3281,8 +3657,12 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         };
                         *sstate.borrow_mut() = Some(st);
                         let (sw, sh) = screen_size();
-                        let w = (640.0 * scale).round() as u32;
-                        let h = (480.0 * scale).round() as u32;
+                        // 尺寸按**显示这一刻**的 DPI 算，不复用启动时捕获的 scale：
+                        // 用户可能在会话期间改过系统缩放，或把输入法跑在缩放不同的屏上。
+                        // 候选窗尺寸由每次 Sync 的 paint 重算，无需在此处理。
+                        let sc = ui_scale();
+                        let w = (640.0 * sc).round() as u32;
+                        let h = (480.0 * sc).round() as u32;
                         backend.configure(1, (sw - w as i32) / 2, (sh - h as i32) / 2, w, h);
                         backend.set_mapped(1, true);
                         let _ = sui.show();
@@ -3855,8 +4235,12 @@ const SET_NAV: [&str; 6] = ["输入方案", "外观", "快捷键", "标点符号
 /// 设置页运行态（打开时从 staging + patch 加载一次，改动后重载）
 #[derive(Clone)]
 struct SettingsState {
-    schemes: Vec<(String, String, [String; 3])>, // id, name, 预览色×3
-    scheme_idx: usize,
+    /// 自定义配色四项，顺序 = [容器背景, 选中背景, 选中字体, 候选字体]；
+    /// 每项为 `"#rrggbb"` 或 `"transparent"`（四项都允许透明）
+    colors: [String; 4],
+    /// 取色面板是否展开 + 正在编辑第几项（纯 UI 态，不持久化）
+    picker_open: bool,
+    picker_target: usize,
     inline: bool,
     font: i32,
     schemas: Vec<(String, String)>, // id, name（顺序 = 启用序，首个 = 默认）
@@ -3870,23 +4254,173 @@ struct SettingsState {
     user_files: Vec<(String, u64)>,
 }
 
-/// 读配置字符串（内部缓冲 512B，配色名/路径足够）
-fn cfg_str(engine: &Engine, cfg: &RimeConfig, key: &str) -> Option<String> {
-    let mut buf = [0u8; 512];
-    let len = engine.config_get_string(cfg, key, &mut buf)?;
-    Some(String::from_utf8_lossy(&buf[..len.min(511)]).into_owned())
+// ==================== 自定义配色（替代原 preset_color_schemes 列表） ====================
+
+/// 四项可配色的键名（写 weasel.custom.yaml style/heng_<key>）
+const COLOR_KEYS: [&str; 4] = [
+    "container_back",
+    "hilite_back",
+    "hilite_text",
+    "cand_text",
+];
+/// 四项的默认色（与原硬编码一致；未配时回退）
+const COLOR_DEFAULTS: [&str; 4] = ["#f7f8fa", "#2164f1", "#ffffff", "#1f2328"];
+/// 设置页显示名
+const COLOR_LABELS: [&str; 4] = [
+    "主预览容器背景色",
+    "选中区域背景色",
+    "选中区域字体色",
+    "候选词字体色",
+];
+/// 四项全部允许「不填充」。容器背景透明会透出宿主窗口内容（文字叠文字，
+/// 看着脏但不崩）；字体透明则是用户自己的选择 —— 配色是自由项，不设闸门。
+const COLOR_ALLOW_TRANSPARENT: [bool; 4] = [true; 4];
+
+// ==================== HSV 取色器（任意颜色，纯鼠标拖拽） ====================
+
+/// 色相条分段数（越多越平滑；36 段 = 每段 10°）。
+/// 注意：slint! 侧色相条格子写的是硬编码 `348px / 36`，改这里要同步改那里。
+const HUE_SEGMENTS: usize = 36;
+/// SV 方块列数（横向 = 饱和度）。348px / 28列 ≈ 每格 12px，软件渲染下过渡足够平滑
+const SV_COLS: usize = 28;
+/// SV 方块行数（纵向 = 明度）。150px / 18 行 ≈ 每格 8px
+const SV_ROWS: usize = 18;
+
+/// HSV → RGB。h: 0-360，s/v: 0-1
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
+    let h = h.rem_euclid(360.0);
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (r + m, g + m, b + m)
 }
 
-/// 读配色值：librime 颜色为 0xBBGGRR（int 或 "0xBBGGRR" 字符串）→ #rrggbb
-fn read_color(engine: &Engine, cfg: &RimeConfig, path: &str) -> String {
-    let v = match engine.config_get_int(cfg, path) {
-        Some(v) => v,
-        None => cfg_str(engine, cfg, path)
-            .and_then(|s| i32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-            .unwrap_or(0),
+fn hsv_color(h: f32, s: f32, v: f32) -> slint::Color {
+    let (r, g, b) = hsv_to_rgb(h, s, v);
+    slint::Color::from_argb_u8(
+        255,
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    )
+}
+
+/// hsv（s/v 为 0-100）→ "#rrggbb"
+fn hex_of(h: f32, s: f32, v: f32) -> String {
+    let (r, g, b) = hsv_to_rgb(h, s / 100.0, v / 100.0);
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8
+    )
+}
+
+/// 色相条各段颜色（固定，不随 s/v 变）
+fn hue_bar_colors() -> Vec<slint::Color> {
+    (0..HUE_SEGMENTS)
+        .map(|i| {
+            let h = i as f32 * 360.0 / HUE_SEGMENTS as f32 + 360.0 / HUE_SEGMENTS as f32 / 2.0;
+            hsv_color(h, 1.0, 1.0)
+        })
+        .collect()
+}
+
+/// SV 方块各格颜色（随色相变 —— 每次色相改变都要整块重算）
+fn sv_grid_colors(h: f32) -> Vec<slint::Color> {
+    let mut out = Vec::with_capacity(SV_COLS * SV_ROWS);
+    for row in 0..SV_ROWS {
+        // 行 0 = 明度 100%（顶部），行末 = 明度 0%（黑）
+        let v = 1.0 - row as f32 / (SV_ROWS - 1) as f32;
+        for col in 0..SV_COLS {
+            let s = col as f32 / (SV_COLS - 1) as f32;
+            out.push(hsv_color(h, s, v));
+        }
+    }
+    out
+}
+
+/// "#rrggbb" → HSV（打开面板时定位指示圈用；非 hex/透明回退蓝）
+fn hex_to_hsv(s: &str) -> (f32, f32, f32) {
+    let hex = s.trim().strip_prefix('#').unwrap_or("");
+    if hex.len() != 6 {
+        return (216.0, 0.887, 0.945); // #2164f1
+    }
+    let v = u32::from_str_radix(hex, 16).unwrap_or(0);
+    let (r, g, b) = (
+        ((v >> 16) & 0xff) as f32 / 255.0,
+        ((v >> 8) & 0xff) as f32 / 255.0,
+        (v & 0xff) as f32 / 255.0,
+    );
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let mut h = if d <= f32::EPSILON {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / d) % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
     };
-    let (r, g, b) = (v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff);
-    format!("#{r:02x}{g:02x}{b:02x}")
+    if h < 0.0 {
+        h += 360.0;
+    }
+    let sat = if max <= 0.0 { 0.0 } else { d / max };
+    (h, sat * 100.0, max * 100.0)
+}
+
+/// 读四项自定义配色（源补丁直读，缺失回退默认）
+fn read_theme_colors(settings: &Settings) -> [String; 4] {
+    let mut out: [String; 4] = COLOR_DEFAULTS.map(|s| s.to_string());
+    for (i, key) in COLOR_KEYS.iter().enumerate() {
+        if let Some(v) = settings
+            .get_path(PATCH_WEASEL, &format!("style/heng_{key}"))
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+        {
+            let v = v.trim().to_string();
+            if v == TRANSPARENT_MARK || is_hex_color(&v) {
+                out[i] = v;
+            }
+        }
+    }
+    out
+}
+
+/// 「不填充」保留字
+const TRANSPARENT_MARK: &str = "transparent";
+
+/// `"#rgb"` / `"#rrggbb"` → true
+fn is_hex_color(s: &str) -> bool {
+    let b = s.strip_prefix('#').unwrap_or("");
+    matches!(b.len(), 3 | 6) && b.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// 把四项配色推给候选窗 + 字母区（内嵌关时字母窗也要跟，否则字母区仍白底）
+fn apply_theme_colors(
+    ui: &CandWindow,
+    lsw: &LettersWindow,
+    colors: &[String; 4],
+) {
+    let container = theme_color(&colors[0]);
+    let hl_back = theme_color(&colors[1]);
+    let hl_text = theme_color(&colors[2]);
+    let cand_text = theme_color(&colors[3]);
+    ui.set_col_container(container);
+    ui.set_col_hilite_back(hl_back);
+    ui.set_col_hilite_text(hl_text);
+    ui.set_col_cand_text(cand_text);
+    lsw.set_col_container(container);
+    lsw.set_col_cand_text(cand_text);
 }
 
 fn load_settings_state(
@@ -3895,8 +4429,9 @@ fn load_settings_state(
     cur_session: Option<RimeSessionId>,
 ) -> SettingsState {
     let mut st = SettingsState {
-        schemes: vec![],
-        scheme_idx: 0,
+        colors: COLOR_DEFAULTS.map(|s| s.to_string()),
+        picker_open: false,
+        picker_target: 0,
         inline: true,
         font: 14,
         schemas: vec![],
@@ -3932,51 +4467,19 @@ fn load_settings_state(
         {
             st.font = v.clamp(10, 32) as i32;
         }
-        let cur = cfg_str(engine, &cfg, "style/color_scheme").unwrap_or_default();
-        unsafe {
-            let mut it: RimeConfigIterator = std::mem::zeroed();
-            if engine.config_begin_map(&cfg, "preset_color_schemes", &mut it) {
-                loop {
-                    // librime 惯例：BeginMap 只初始化，先 next 才指向第一个子键
-                    if !engine.config_next(&mut it) {
-                        break;
-                    }
-                    let id = if it.key.is_null() {
-                        None
-                    } else {
-                        std::ffi::CStr::from_ptr(it.key)
-                            .to_str()
-                            .ok()
-                            .map(|s| s.to_string())
-                    };
-                    let Some(id) = id else { break };
-                    let name = cfg_str(
-                        engine,
-                        &cfg,
-                        &format!("preset_color_schemes/{id}/name"),
-                    )
-                    .unwrap_or_else(|| id.clone());
-                    let sw = [
-                        read_color(engine, &cfg, &format!("preset_color_schemes/{id}/back_color")),
-                        read_color(
-                            engine,
-                            &cfg,
-                            &format!("preset_color_schemes/{id}/candidate_text_color"),
-                        ),
-                        read_color(
-                            engine,
-                            &cfg,
-                            &format!("preset_color_schemes/{id}/hilited_candidate_back_color"),
-                        ),
-                    ];
-                    if id == cur {
-                        st.scheme_idx = st.schemes.len();
-                    }
-                    st.schemes.push((id, name, sw));
-                }
+        // 自定义配色：源补丁直读（样式不参与 librime 部署语义，同 inline/font）
+        st.colors = read_theme_colors(settings);
+        engine.config_close(&mut cfg);
+    }
+    // 调试钩子：HENG_UI_PICKER=<0-3> 让取色面板默认展开（沙箱无交互桌面，
+    // 无法模拟点击验证面板视觉；真机调配色时也可用）
+    if let Ok(v) = std::env::var("HENG_UI_PICKER") {
+        if let Ok(i) = v.trim().parse::<usize>() {
+            if i < COLOR_KEYS.len() {
+                st.picker_open = true;
+                st.picker_target = i;
             }
         }
-        engine.config_close(&mut cfg);
     }
     st.schemas = engine.schema_list();
     let (lr_on, paging, simp, punct, full) = parse_bindings(settings.get_bindings().as_ref());
@@ -4002,25 +4505,41 @@ fn empty_row(title: &str, sub: &str, active: bool) -> SetRow {
     SetRow {
         title: title.into(),
         sub: sub.into(),
-        sw1: slint::Color::from_argb_u8(255, 0, 0, 0),
-        sw2: slint::Color::from_argb_u8(255, 0, 0, 0),
-        sw3: slint::Color::from_argb_u8(255, 0, 0, 0),
-        sw1_on: false,
-        sw2_on: false,
-        sw3_on: false,
         active,
     }
 }
 
-/// "#rrggbb" → slint::Color（解析失败按黑色）
-fn hex_color(s: &str) -> slint::Color {
-    let v = u32::from_str_radix(s.trim_start_matches('#'), 16).unwrap_or(0);
-    slint::Color::from_argb_u8(
-        255,
-        ((v >> 16) & 0xff) as u8,
-        ((v >> 8) & 0xff) as u8,
-        (v & 0xff) as u8,
-    )
+/// 配置色值 → slint::Color：`"transparent"` → alpha=0；`"#rgb"`/`"#rrggbb"` → 不透明
+fn theme_color(v: &str) -> slint::Color {
+    let s = v.trim();
+    if s == TRANSPARENT_MARK {
+        return slint::Color::from_argb_u8(0, 0, 0, 0);
+    }
+    let hex = s.strip_prefix('#').unwrap_or("");
+    let (r, g, b) = match hex.len() {
+        3 => {
+            // #abc → #aabbcc
+            let d: Vec<u8> = hex
+                .chars()
+                .filter_map(|c| c.to_digit(16).map(|d| d as u8))
+                .collect();
+            if d.len() != 3 {
+                (0u8, 0u8, 0u8)
+            } else {
+                (d[0] * 17, d[1] * 17, d[2] * 17)
+            }
+        }
+        6 => {
+            let v = u32::from_str_radix(hex, 16).unwrap_or(0);
+            (
+                ((v >> 16) & 0xff) as u8,
+                ((v >> 8) & 0xff) as u8,
+                (v & 0xff) as u8,
+            )
+        }
+        _ => (0, 0, 0),
+    };
+    slint::Color::from_argb_u8(255, r, g, b)
 }
 
 /// 把当前状态 + 页码写进 Slint 属性
@@ -4036,20 +4555,9 @@ fn settings_apply_page(sui: &SettingsWindow, st: &SettingsState, page: i32) {
             }
         }
         1 => {
-            head = "外观 · 点击行切换配色（自动重新部署）".into();
-            for (i, (id, name, sw)) in st.schemes.iter().enumerate() {
-                rows.push(SetRow {
-                    title: name.clone().into(),
-                    sub: id.clone().into(),
-                    sw1: hex_color(&sw[0]),
-                    sw2: hex_color(&sw[1]),
-                    sw3: hex_color(&sw[2]),
-                    sw1_on: true,
-                    sw2_on: true,
-                    sw3_on: true,
-                    active: i == st.scheme_idx,
-                });
-            }
+            head = "外观 · 配色点色块即生效（不重启、不重部署）".into();
+            // 页2 的配色行由 slint! 里的专属块渲染（预览 + 四项 + 色板），
+            // 不走通用 page-rows
         }
         2 => {
             head = "快捷键 · 点击行切换预设（自动重新部署）".into();
@@ -4086,6 +4594,43 @@ fn settings_apply_page(sui: &SettingsWindow, st: &SettingsState, page: i32) {
     sui.set_inline_preedit(st.inline);
     sui.set_ascii_punct(st.ascii_punct);
     sui.set_about_lines(st.about.clone().into());
+    // 配色四项 + 色板 + 取色面板状态
+    sui.set_color_vals(Rc::new(VecModel::from(
+        st.colors.iter().map(|c| theme_color(c)).collect::<Vec<_>>(),
+    ))
+    .into());
+    sui.set_color_labels(Rc::new(VecModel::from(
+        COLOR_LABELS.iter().map(|s| SharedString::from(*s)).collect::<Vec<_>>(),
+    ))
+    .into());
+    // —— HSV 取色器状态 ——
+    // 色相条固定；SV 方块随色相整块重算（28×18 = 504 格，纯 CPU 计算可忽略）
+    sui.set_sv_cols(SV_COLS as i32);
+    sui.set_sv_rows(SV_ROWS as i32);
+    sui.set_hue_bar(Rc::new(VecModel::from(hue_bar_colors())).into());
+    // 指示圈位置由「目标项当前色」反解，不另存状态 —— 面板收起时不会残留脏值
+    let t = st.picker_target.min(COLOR_KEYS.len() - 1);
+    let is_transparent = st.colors[t] == TRANSPARENT_MARK;
+    let (h, s, v) = if is_transparent {
+        // 已是透明态：保留上次取色位置（用默认蓝定位），但显示为不填态
+        (216.0, 88.7, 94.5)
+    } else {
+        hex_to_hsv(&st.colors[t])
+    };
+    sui.set_pick_h(h);
+    sui.set_pick_s(s);
+    sui.set_pick_v(v);
+    sui.set_sv_grid(Rc::new(VecModel::from(sv_grid_colors(h))).into());
+    sui.set_pick_preview(hsv_color(h, s / 100.0, v / 100.0));
+    sui.set_pick_preview_hex(if is_transparent {
+        TRANSPARENT_MARK.into()
+    } else {
+        hex_of(h, s, v).into()
+    });
+    sui.set_picker_is_transparent(is_transparent);
+    sui.set_picker_open(st.picker_open);
+    sui.set_picker_target(st.picker_target as i32);
+    sui.set_picker_allow_transparent(COLOR_ALLOW_TRANSPARENT[t]);
 }
 
 fn screen_size() -> (i32, i32) {
@@ -4131,4 +4676,112 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_color_parsing() {
+        assert!(is_hex_color("#fff"));
+        assert!(is_hex_color("#f7f8fa"));
+        assert!(!is_hex_color("#ff"));
+        assert!(!is_hex_color("f7f8fa"));
+        assert!(!is_hex_color("transparent"));
+        // #rgb 展开：f→ff
+        let c = theme_color("#abc");
+        assert_eq!((c.red(), c.green(), c.blue()), (0xaa, 0xbb, 0xcc));
+        assert_eq!(c.alpha(), 255u8);
+        // 透明保留字 → alpha=0
+        let t = theme_color(TRANSPARENT_MARK);
+        assert_eq!(t.alpha(), 0u8);
+        // 非法值按黑（不崩）
+        let bad = theme_color("nonsense");
+        assert_eq!((bad.red(), bad.green(), bad.blue()), (0u8, 0u8, 0u8));
+    }
+
+    #[test]
+    fn theme_color_read_defaults_and_ignore_garbage() {
+        let dir = std::env::temp_dir().join("heng-theme-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Settings::with_dir(dir.clone());
+        // 无 patch → 全默认
+        let c = read_theme_colors(&s);
+        assert_eq!(c, COLOR_DEFAULTS.map(|x| x.to_string()));
+        // 合法 hex + transparent 都接受
+        s.set_custom_color("container_back", "#222222").unwrap();
+        s.set_custom_color("hilite_back", TRANSPARENT_MARK).unwrap();
+        let c = read_theme_colors(&s);
+        assert_eq!(c[0], "#222222");
+        assert_eq!(c[1], TRANSPARENT_MARK);
+        // 非法值被忽略（回落默认），不崩
+        s.set_custom_color("cand_text", "definitely-not-a-color").unwrap();
+        let c = read_theme_colors(&s);
+        assert_eq!(c[3], COLOR_DEFAULTS[3]);
+        std::fs::remove_file(dir.join(PATCH_WEASEL)).unwrap();
+    }
+
+    #[test]
+    fn all_four_colors_allow_transparent() {
+        // 四项都允许「不填」—— 配色是自由项，不设闸门
+        assert_eq!(COLOR_ALLOW_TRANSPARENT, [true; 4]);
+        // 透明保留字不会被当成非法 hex 拒掉
+        assert!(!is_hex_color(TRANSPARENT_MARK));
+        assert_eq!(theme_color(TRANSPARENT_MARK).alpha(), 0u8);
+        // 每项写「transparent」都要能落盘并读回（模拟四项依次设透明）
+        let dir = std::env::temp_dir().join("heng-trans-all-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Settings::with_dir(dir.clone());
+        for key in COLOR_KEYS {
+            s.set_custom_color(key, TRANSPARENT_MARK).unwrap();
+        }
+        let c = read_theme_colors(&s);
+        for v in c.iter() {
+            assert_eq!(v, TRANSPARENT_MARK);
+        }
+        std::fs::remove_file(dir.join(PATCH_WEASEL)).unwrap();
+    }
+
+    #[test]
+    fn hsv_conversion_roundtrip() {
+        // hex → hsv → rgb 必须回到原色（±1/255 容差）
+        for hex in ["#000000", "#ffffff", "#ff0000", "#00ff00", "#0000ff", "#2164f1"] {
+            let (h, s, v) = hex_to_hsv(hex);
+            let (r, g, b) = hsv_to_rgb(h, s / 100.0, v / 100.0);
+            let got = (
+                (r * 255.0).round() as u8,
+                (g * 255.0).round() as u8,
+                (b * 255.0).round() as u8,
+            );
+            let want = (
+                u8::from_str_radix(&hex[1..3], 16).unwrap(),
+                u8::from_str_radix(&hex[3..5], 16).unwrap(),
+                u8::from_str_radix(&hex[5..7], 16).unwrap(),
+            );
+            assert_eq!(got, want, "hex {}", hex);
+        }
+    }
+
+    #[test]
+    fn hsv_picker_models_are_complete() {
+        // 面板一次要画满：色相 24 段、SV 方块 20×14=280 格，一格不能少
+        assert_eq!(hue_bar_colors().len(), HUE_SEGMENTS);
+        assert_eq!(sv_grid_colors(210.0).len(), SV_COLS * SV_ROWS);
+        // 色相变了方块必须真变（否则拖色相时 SV 区不刷新）
+        assert_ne!(sv_grid_colors(0.0), sv_grid_colors(180.0));
+        // SV 方块四角：左上=白(s=0,v=1)、右上=纯色相(s=1,v=1)、
+        // 左下=黑(s=0,v=0)、右下=色相最暗
+        let g = sv_grid_colors(0.0);
+        assert_eq!((g[0].red(), g[0].green(), g[0].blue()), (255u8, 255, 255));
+        assert_eq!(
+            (g[SV_COLS - 1].red(), g[SV_COLS - 1].green(), g[SV_COLS - 1].blue()),
+            (255u8, 0, 0)
+        );
+        let bottom = g[(SV_ROWS - 1) * SV_COLS];
+        assert_eq!(
+            (bottom.red(), bottom.green(), bottom.blue()),
+            (0u8, 0, 0)
+        );
+    }
 }
