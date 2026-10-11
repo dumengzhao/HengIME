@@ -909,8 +909,8 @@ pub extern "C" fn heng_process_key_ex(
                 }
             } else {
                 // 收起单行：不分页，←→/空格/回车/数字 全部本地处理（↑ 吞掉）。
-                // 图标导航目标 = 最右图标（现为 ☰ 菜单）；将来若在 ☰ 右侧新增
-                // 图标，把"最后一个图标"目标改指新图标即可，跳过逻辑不变
+                // 键盘**不进入右侧图标**（☰ 选中态要画硬编码蓝底，自定义配色下
+                // 与容器色打架）：→ 到最后一个预选词即展开，☰ 只响应鼠标点击。
                 let has_menu = engine
                     .get_context(rime_id)
                     .map(|s| !s.candidates.is_empty())
@@ -919,12 +919,12 @@ pub extern "C" fn heng_process_key_ex(
                 // 否则（HTTP/CLI/测试等无 UI 线程场景）全部回落 librime 原行为
                 let bar_ready = crate::ui::UI_BAR_COUNT.load(Ordering::Relaxed) > 0;
                 if has_menu && bar_ready {
-                    let icon_sel = crate::ui::UI_ICON_SEL.load(Ordering::Relaxed);
                     let menu_open = crate::ui::UI_MENU_OPEN.load(Ordering::Relaxed);
                     let hl = crate::ui::UI_HL.load(Ordering::Relaxed);
                     let bar_last = crate::ui::UI_BAR_COUNT.load(Ordering::Relaxed) - 1;
                     if menu_open {
-                        // ☰ 菜单打开：←/→ 关闭回横条；空格/回车暂吞（菜单功能未做）
+                        // ☰ 菜单打开（鼠标点开）：←/→ 关闭回横条；空格/回车暂吞
+                        //（菜单功能未做）
                         match keysym {
                             XK_LEFT | XK_RIGHT => {
                                 crate::ui::ui_menu_close();
@@ -946,40 +946,29 @@ pub extern "C" fn heng_process_key_ex(
                                 ui_nav = true;
                             }
                             XK_RIGHT => {
-                                if icon_sel {
-                                    // 最后图标上再按 → = 展开面板
+                                if hl >= bar_last {
+                                    // 末词再 → = 直接展开面板（不经过图标焦点）
                                     crate::ui::ui_toggle();
-                                } else if hl >= bar_last {
-                                    // 最后一个词 → 跳过 ▾ 直达最右图标 ☰
-                                    crate::ui::ui_bar_icon(true);
                                 } else {
                                     crate::ui::ui_move_hl(1);
                                 }
                                 ui_nav = true;
                             }
                             XK_LEFT => {
-                                if icon_sel {
-                                    // ☰ ← 回到最后一个词（跳过 ▾）
-                                    crate::ui::ui_bar_icon(false);
-                                } else if hl > 0 {
+                                if hl > 0 {
                                     crate::ui::ui_move_hl(-1);
                                 }
                                 // 首词再 ←：吞掉（不分页）
                                 ui_nav = true;
                             }
                             0x20 | XK_RETURN => {
-                                if icon_sel {
-                                    // ☰ 上确认 = 打开菜单（占位：符号/常用语/设置）
-                                    crate::ui::ui_menu_open();
-                                } else {
-                                    // 内联同步选词（横条锚定菜单第一页，高亮序号
-                                    // 即全局序号）：commit 由本次 _Respond 直接取走，
-                                    // 不能走异步 BarSelect（会错过本轮 _Respond）
-                                    let _ = engine.select_candidate_global(
-                                        rime_id,
-                                        hl.max(0) as usize,
-                                    );
-                                }
+                                // 内联同步选词（横条锚定菜单第一页，高亮序号
+                                // 即全局序号）：commit 由本次 _Respond 直接取走，
+                                // 不能走异步 BarSelect（会错过本轮 _Respond）
+                                let _ = engine.select_candidate_global(
+                                    rime_id,
+                                    hl.max(0) as usize,
+                                );
                                 ui_nav = true;
                             }
                             c if (0x30..=0x39).contains(&c) => {

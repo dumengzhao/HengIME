@@ -114,9 +114,7 @@ enum UiCmd {
     },
     /// 键盘空格/回车：选中面板当前高亮项（内部命令）
     SelectHL,
-    /// 收起横条：选中/取消选中 ☰ 图标（true=选中，词高亮隐藏）
-    BarIcon(bool),
-    /// 收起横条：按全局横条下标选词（鼠标点击 / 空格确认 / 数字键）
+    /// 收起横条：按全局横条下标选词（鼠标点击 / 数字键）
     BarSelect(usize),
     /// 打开 ☰ 菜单（占位：符号/常用语/设置）
     MenuOpen,
@@ -176,11 +174,9 @@ fn emit_commit(handle: u64, text: &str) {
 pub static UI_EXPANDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static UI_HL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 pub static UI_TOTAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-/// 收起横条词数（capi 判断 → 是否到达最后一个词）
+/// 收起横条词数（capi 判断 → 是否到达最后一个词 → 直接展开）
 pub static UI_BAR_COUNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-/// 收起横条：☰（最右图标）是否被选中（→ 到词尾跳过 ▾ 直达 ☰）
-pub static UI_ICON_SEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// ☰ 菜单是否打开（打开时 ←/→ 关闭回横条）
+/// ☰ 菜单是否打开（鼠标点开；←/→ 关闭回横条）
 pub static UI_MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn send_cmd(cmd: UiCmd) -> bool {
@@ -245,12 +241,7 @@ pub fn ui_mode_hint_ex(ascii: bool, anchor: Option<(i32, i32, i32)>) {
     send_cmd(UiCmd::ModeHint { ascii, anchor });
 }
 
-/// 收起横条：☰ 图标选中/取消（capi 拦截：→ 到词尾 / ← 返回）
-pub fn ui_bar_icon(on: bool) {
-    send_cmd(UiCmd::BarIcon(on));
-}
-
-/// 收起横条：按横条下标选词（capi 拦截：空格确认 / 数字键 / 鼠标点击）
+/// 收起横条：按横条下标选词（capi 拦截：数字键 / 鼠标点击）
 pub fn ui_bar_select(idx: usize) {
     send_cmd(UiCmd::BarSelect(idx));
 }
@@ -260,7 +251,7 @@ pub fn ui_select_by_row_seq(seq: i32) {
     send_cmd(UiCmd::SelectByRowSeq(seq));
 }
 
-/// 打开 ☰ 菜单（capi 拦截：☰ 选中时按空格/回车）
+/// 打开 ☰ 菜单（鼠标点击 ☰）
 pub fn ui_menu_open() {
     send_cmd(UiCmd::MenuOpen);
 }
@@ -327,13 +318,18 @@ slint::slint! {
         in property <int> menu-height;    // ☰ 菜单态窗口高度
         in property <int> content-height; // 展开态内容总高（滚动范围）
         in property <[CandCell]> all-cells;
-        in property <bool> icon-sel;  // ☰ 被键盘选中（单行 → 到词尾跳过 ▾）
         in property <bool> menu-open; // ☰ 菜单打开（覆盖层显示 符号/常用语/设置）
         in property <int> hl-y;       // 高亮格 y（逻辑 px），变化时滚动跟随
         in property <bool> ascii;     // true = 英文模式（切换提示用）
         in property <int> hint;       // 中英切换瞬态提示：0=无 1=中 2=英
         in property <bool> hint-only; // hint 独占气泡形态：窗口临时缩成胶囊，候选内容全部隐藏
         in property <string> input-text; // 内嵌关时有值（独立字母窗口显示用）
+        // 字母区是否显示在候选窗上方（无字母区时收起条需自己垂直居中）
+        in property <bool> show-letters: root.input-text != "" && !root.hint-only;
+        // 收起态首行下移量：条高 34、格高 26，垂直居中需 y=4 而非设计稿的 2，
+        // 即补 2×k。有字母区时不加（保持与字母窗紧贴的收紧间距）。
+        in property <length> bar-y-offset: (!root.expanded && !root.show-letters)
+            ? root.font-scale * 2px : 0px;
         in property <int> cand-font;  // 候选字号（7 档刻度：14-20，默认 16 = 第 3 档）
         in property <float> font-scale; // 字号缩放系数 k = 字号/14（DPI 式等比）
         // —— 自定义配色（源补丁 style/heng_* 直读，不走 librime 部署语义）——
@@ -373,7 +369,7 @@ slint::slint! {
         height: parent.height;
         background: root.hint-only ? #404048E6 : root.col-container;
         // 字母区显示时取消顶部两角圆角（与上方字母窗连成一体）；内嵌态恢复
-        property <bool> letters-above: root.input-text != "" && !root.hint-only;
+        property <bool> letters-above: root.show-letters;
         border-top-left-radius: letters-above ? 0px : (root.hint-only ? 10px : root.font-scale * 8px);
         border-top-right-radius: letters-above ? 0px : (root.hint-only ? 10px : root.font-scale * 8px);
         border-bottom-left-radius: root.hint-only ? 10px : root.font-scale * 8px;
@@ -391,7 +387,10 @@ slint::slint! {
                 height: root.expanded ? root.content-height * 1px : parent.height;
                 for cell[idx] in root.all-cells: Rectangle {
                     x: cell.x * 1px;
-                    y: cell.y * 1px;
+                    // 收起态无字母区时补半格下移：设计稿首行 y=2 是为与字母窗
+                    // 收紧拼接用的，独立字母区没起来时条内就只剩下 6px 下留白，
+                    // 文字重心偏上、与右上角按 (height-h)/2 居中的 ▾/☰ 对不齐。
+                    y: cell.y * 1px + root.bar-y-offset;
                     width: cell.w * 1px;
                     height: root.font-scale * 26px;
                     border-radius: root.font-scale * 8px;
@@ -456,8 +455,8 @@ slint::slint! {
                 height: thumb-h;
             }
         }
-        // 收起态右上按钮（换位后：▾ 在左、☰ 在最右 = 键盘导航的"最后一个图标"）：
-        // → 到词尾跳过 ▾ 直达 ☰，☰ 上再按 → 展开面板、按空格/回车打开菜单
+        // 收起态右上按钮（▾ 展开 / ☰ 菜单）：均只响应鼠标点击，键盘不进入
+        //（→ 到最后一个预选词即展开，不经过图标焦点）
         // 图标用 Path/色块矢量绘制而非字符 "▾"/"☰"：Windows 默认字体缺
         // 这两个码位的字形，软件渲染器不做逐字形回退，会渲染成空白
         if !root.expanded && !root.hint-only: Rectangle {
@@ -489,15 +488,15 @@ slint::slint! {
             width: root.font-scale * 26px;
             height: root.font-scale * 28px;
             border-radius: root.font-scale * 8px;
-            background: ta_menu.has-hover || root.icon-sel ? #2164f1 : transparent;
+            background: ta_menu.has-hover ? #e8ebef : transparent;
             Rectangle {
                 width: root.font-scale * 12px;
                 height: root.font-scale * 8px;
                 x: (parent.width - root.font-scale * 12px) / 2;
                 y: (parent.height - root.font-scale * 8px) / 2;
-                Rectangle { y: 0; width: parent.width; height: root.font-scale * 1.5px; background: root.icon-sel ? #ffffff : #666666; }
-                Rectangle { y: root.font-scale * 3.25px; width: parent.width; height: root.font-scale * 1.5px; background: root.icon-sel ? #ffffff : #666666; }
-                Rectangle { y: root.font-scale * 6.5px; width: parent.width; height: root.font-scale * 1.5px; background: root.icon-sel ? #ffffff : #666666; }
+                Rectangle { y: 0; width: parent.width; height: root.font-scale * 1.5px; background: #666666; }
+                Rectangle { y: root.font-scale * 3.25px; width: parent.width; height: root.font-scale * 1.5px; background: #666666; }
+                Rectangle { y: root.font-scale * 6.5px; width: parent.width; height: root.font-scale * 1.5px; background: #666666; }
             }
             ta_menu := TouchArea {
                 mouse-cursor: pointer;
@@ -2914,8 +2913,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     let bar_base = Rc::new(Cell::new(0i32));
     // 收起横条词表缓存（←→ 移动视觉高亮时不重取词）
     let bar_items: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    // 收起横条：☰（最右图标）选中态；菜单打开态
-    let icon_sel = Rc::new(Cell::new(false));
+    // 收起横条：☰ 菜单打开态
     let menu_open = Rc::new(Cell::new(false));
     let last_panel_h = Cell::new(0u32);
     let last_x = Cell::new(200);
@@ -3594,9 +3592,6 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             menu_open.set(false);
                             UI_MENU_OPEN.store(false, Ordering::Relaxed);
                             ui.set_menu_open(false);
-                            icon_sel.set(false);
-                            UI_ICON_SEL.store(false, Ordering::Relaxed);
-                            ui.set_icon_sel(false);
                             set_bar_cells(
                                 &ui,
                                 &engine,
@@ -3759,9 +3754,6 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         ));
                         ui.set_expanded(true);
                         UI_EXPANDED.store(true, Ordering::Relaxed);
-                        icon_sel.set(false);
-                        UI_ICON_SEL.store(false, Ordering::Relaxed);
-                        ui.set_icon_sel(false);
                         menu_open.set(false);
                         UI_MENU_OPEN.store(false, Ordering::Relaxed);
                         ui.set_menu_open(false);
@@ -3816,9 +3808,6 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     }
                     panel_hl.set(new_hl);
                     UI_HL.store(new_hl, Ordering::Relaxed);
-                    icon_sel.set(false);
-                    UI_ICON_SEL.store(false, Ordering::Relaxed);
-                    ui.set_icon_sel(false);
                     let (cells, _rows) = if in_panel {
                         build_grid_cells(&items, new_hl)
                     } else {
@@ -3919,25 +3908,6 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         last_x.get(),
                         last_y.get(),
                         false,
-                    );
-                }
-                UiCmd::BarIcon(on) => {
-                    // ☰（最右图标）选中：词高亮隐藏；取消：恢复词高亮
-                    // （panel_hl 保持不动，← 回来即原词）
-                    icon_sel.set(on);
-                    UI_ICON_SEL.store(on, Ordering::Relaxed);
-                    ui.set_icon_sel(on);
-                    let items = bar_items.borrow().clone();
-                    let hl = if on { -1 } else { panel_hl.get() };
-                    let (cells, _rows) = build_flow_cells(&items, hl);
-                    ui.set_all_cells(ModelRc::new(VecModel::from(cells)));
-                    paint(
-                        &mut backend,
-                        (lay_panel_w() as f32 * scale).round() as u32,
-                        bar_h_now(),
-                        last_x.get(),
-                        last_y.get(),
-                        true,
                     );
                 }
                 UiCmd::BarSelect(idx) => {
