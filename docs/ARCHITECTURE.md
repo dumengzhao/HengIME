@@ -222,7 +222,44 @@ core 的 `heng_sync_user_data()` 导出当前无 UI 入口，是「服务端 + �
 | 单测 | `cargo test -p heng-core --lib`（7 项） |
 | ABI 全链路 | `cargo run --release -p heng-cli -- abitest` |
 | 视觉验证 | `HENG_UI_DUMP=1 heng-cli settings <page>` 抓帧到 `%TEMP%/*.ppm` |
-| Windows dev | `tools/weasel-dev-install.ps1`（注册需管理员） |
+| Windows 外壳 | `third_party/src/weasel/build-x64.bat`（正式）/ `build-x64-dev.bat`（dev） |
+| Windows dev 部署 | `tools/weasel-dev-install.ps1`（注册需管理员） |
+
+**两套工具链不自动同步。** cargo 与 msbuild 互不知晓对方的存在，
+`heng_core.dll` 由 cargo 产出、由 msbuild 链接进 exe，两者之间靠
+`build-core.bat` 显式拷贝。该脚本由两个 `build-x64*.bat` 在 msbuild 之前调用，
+依次完成 `cargo build --release`、结束占用 `heng_core.dll` 的 server 进程、
+把产物复制到 `output/` 或 `output-dev/`。
+
+跳过这一步的后果是 exe 链接当前 ABI、运行时加载旧版 core：服务能启动、
+管道能建立、`heng-cli` 能连上引擎，但 TSF 输入到不了编辑器。静态检查全过，
+不一致只在真机打字时暴露。
+
+**运行时外部依赖由 `sync-deps.bat` 补齐**，由两个 `build-x64*.bat` 在
+msbuild 之后调用。`WinSparkle.dll`、`rime.dll`、共享数据目录 `data/` 都不是
+msbuild 产物，清空 `output/` 后必须恢复，否则服务在加载阶段退出且早于第一条日志。
+它们的来源集中放在 `third_party/externals/`，缺什么补什么、已存在则跳过。
+`data/` 只在缺失时整目录拷贝，不做镜像同步——引擎运行时会写入 `data/build/`，
+镜像会在每次构建时抹掉它并触发重新部署。
+
+**`weaselx64.dll` 编译前须让位。** 它是 TSF 进程内服务器，被每个激活过输入法的
+宿主（explorer、记事本、各编辑器）加载，同时作为 COM InprocServer32 注册。
+link.exe 写输出前先 unlink，而 `DeleteFile` 对已映射为映像的文件失败，
+报 `LNK1104`。改文件名则可行——宿主继续用重命名后文件的映射，链接器发现
+路径已空。`unlock-tsf.bat` 做这件事，不需要管理员权限，也不需要
+`regsvr32 /u`：COM 注册存的是路径而非文件身份，链接产物写回同名即生效。
+
+让位的文件带随机后缀（`weaselx64.dll.parked<rand>`），每次运行顺带清扫遗留：
+已释放映射的删得掉，仍被占用的删不掉并留到下次——这正是需要的行为。
+
+四个脚本按此顺序串在两个 `build-x64*.bat` 里：
+
+```
+build-core.bat   (msbuild 前)  cargo build + 停 server + 部署 heng_core.dll
+unlock-tsf.bat   (msbuild 前)  让出 weaselx64.dll 路径
+msbuild                      编译全部项目
+sync-deps.bat   (msbuild 后)  补 WinSparkle.dll / rime.dll / data\
+```
 
 **并行开发隔离**（`HENG_DEV` 编译期宏）：dev 版与正式版共用一个进程空间会互相抢占，
 锚点有五处——TSF GUID 组、IPC 管道名、显示名、数据路径、单实例互斥锁。
@@ -230,6 +267,7 @@ core 的 `heng_sync_user_data()` 导出当前无 UI 入口，是「服务端 + �
 `output/` 与 `output-dev/`。
 
 改 ABI 的完整流程见 `.workbuddy/tools/rebuild_heng_lib.py` 的文档字符串。
+weasel 侧改动的固化与验证流程见 [patches/README.md](../patches/README.md)。
 
 ---
 
