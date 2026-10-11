@@ -1,71 +1,114 @@
-# 设置界面规划（CW2 / M2 重定方向）
+# 设置窗口
 
-> 2026-10-05 决策：**放弃 HTTP + Web 设置页（原 M2 方向），改用 Slint 设置窗口。**
-> 原案依据（ARCHITECTURE.md §5.5）的「Slint 未验证」前提已被 CW 线推翻；
-> 桌面端浏览器开设置的体验割裂（端口/防火墙/非原生）不可接受。
+> 七页结构已全部上线。本文记录当前结构、配置读写取舍与 Slint 开发注意事项。
+> 在整体架构中的位置见 [ARCHITECTURE.md](ARCHITECTURE.md) §5。
 
-## 1. 决策与理由
+---
 
-| 维度 | 原案：HTTP + Web | 新案：Slint 设置窗口 |
+## 1. 为什么是 Slint 原生窗口
+
+设置界面为 Slint 原生窗口，未采用 HTTP + Web 方案。对比：
+
+| 维度 | HTTP + Web | Slint 原生窗口 |
 |---|---|---|
-| 视觉统一 | 与候选窗两套语言 | **同一 Slint 栈、同一设计语言** |
-| 桌面体验 | 浏览器打开 localhost:9371 | 原生窗口（可聚焦，属性要求远低于候选窗） |
+| 视觉统一 | 与候选窗两套语言 | 同一 Slint 栈、同一设计语言 |
+| 桌面体验 | 浏览器打开 localhost:9371 | 原生窗口（可聚焦） |
 | 端口/防火墙 | 依赖 9371 监听 | 无 |
-| 五端覆盖 | 理论 ×5 | 桌面三端 + Android（Slint 支持）；**鸿蒙例外** |
-| 状态 | 一行未写（无沉没成本） | 复用已真机闭环的栈 |
+| 五端覆盖 | 理论 ×5 | 桌面三端 + Android；**鸿蒙例外** |
 
-- **鸿蒙决策门**（与 M0.5 同款逻辑）：不为没影的平台预付复杂度，到 M-鸿蒙 里程碑再定
-  （ArkUI 原生设置页 / 其它），配置数据层不变即可平滑接入。
-- HTTP 通道**不删**：9371 仍是 CLI/调试/未来词库同步通道，只是不再承载设置 UI。
-- `heng_describe()` 自省保留：不再用于动态生成控件（自用输入法手写页面更可控），
-  用于「关于/诊断」页显示版本与能力清单。
+- **HTTP 通道保留**：9371 仍是 CLI/诊断通道，不承载设置 UI。
+- `heng_describe()` 自省保留，但不用于动态生成控件 —— 页面手写更可控，
+  它只服务「关于」页显示版本与能力清单。
+- **鸿蒙单独决策**：设置页用 ArkUI 原生还是复用 Slint，到鸿蒙里程碑再定，
+  配置数据层不变即可平滑接入。
 
-## 2. 数据层先焊死（UI 换什么都不影响）
+---
 
-- 配置读写只走 core；UI 层零配置知识。
-- 现状缺口：config API v4（`heng_config_*`）**只读 staging**；写配置需要新增：
-  - `heng_settings_set_*` 语义化 setter（候选窗样式/翻页键/标点/方案切换…），
-    落盘到 `*.custom.yaml` patch（`default.custom.yaml` / `weasel.custom.yaml` /
-    `<schema>.custom.yaml`），不碰上游发行 YAML；
-  - 写入后 `start_maintenance(TRUE)` 触发重新部署（M1 已验证该路径：配置变化自动部署）。
-- 读回：复用 config API v4（staging 编译结果即生效值）。
-- per-machine state（installation_id 等）仍归 core 本地存储（ARCHITECTURE.md §8 既定）。
+## 2. 数据层：读与写不对称
+
+这是与最初设想不同的地方，写代码前要知道。
+
+| 方向 | 走哪条路 | 为什么 |
+|---|---|---|
+| **读** | config API v4（`heng_config_*`），读 staging 编译结果 | 即生效值，不需要另建映射 |
+| **写** | **不走 ABI**，直接改 patch 源文件 | 设置 UI 就在 core 内，没有跨进程调用需求 |
+| **读（配色）** | 直读 patch 源文件 | 样式不参与 librime 部署语义，源 patch 即真相 |
+
+**没有** `heng_settings_set_*` 这类 ABI setter —— 最初设想的「语义化 setter 走 ABI」
+被推翻了，实际是 core 内部 `settings.rs` 的 `set_path` / `set_custom_color` 等函数
+被 `ui.rs` 同进程直接调用。
+
+写入落点是 `*.custom.yaml` patch，不碰上游发行 YAML。写完是否 redeploy 分两种：
+
+- **需要 redeploy**：方案列表、快捷键、标点等影响 librime 行为的项。
+- **写后不 redeploy**（redeploy 会作废活动会话）：配色、字号、inline preedit 三项，
+  写完直接 `set_*` + 重绘。
+
+per-machine state（如 `installation_id`）仍归 librime/core 本地存储。
+
+---
 
 ## 3. 窗口与页面结构
 
-窗口：普通可聚焦 Slint 窗口，**640×480**（最小 560×420），浅色 #f7f8fa 基调与候选窗一致，
-8px 圆角，左侧导航 + 右侧内容（微信输入法式简洁风）。运行于 core UI 线程（与候选窗同循环，独立窗口）。
+640×480（乘 `ui_scale()` 的 DPI 缩放），浅色 #f7f8fa 基调，左侧导航 + 右侧内容。
+**窗口固定尺寸，不可缩放**，无最小/最大约束。窗口本身是 `WS_POPUP` 无边框方角，
+8px 圆角是内部控件的。
 
-导航板块（六页）：
+**七页，页号是外壳契约**（`heng_settings_show(page)`）：
 
-| # | 页面 | 内容 | 数据落点 |
+| 页 | 名称 | 内容 | 落点 |
 |---|---|---|---|
-| 1 | 输入方案 | schema 列表（启用/停用）、默认方案、中英文/简繁开关 | default.custom.yaml（schema_list） |
-| 2 | 候选窗样式 | 配色方案（preset_color_schemes 39 套，点选即预览）、横/竖排、字号、单行候选数、inline preedit、页大小 | weasel.custom.yaml + schema patch |
-| 3 | 快捷键 | 翻页键（-=/ 方向键）、左右键行为、全半角、简繁切换、二次确认 | default.custom.yaml（key_binder） |
-| 4 | 标点符号 | 全/半角标点、自定义标点映射（常用几组预设） | default.custom.yaml（punctuator） |
-| 5 | 词库与同步 | 用户词典导入/导出、词频同步（远期，接 8.4 词库同步） | 用户目录 + 同步服务 |
-| 6 | 关于与诊断 | 版本（abi_version 自省）、部署日志位置、手动重新部署、重启服务 | 只读 + 动作按钮 |
+| 0 | 输入方案 | schema 列表、默认方案 | `default.custom.yaml` |
+| 1 | 外观 | **四项配色 + HSV 取色器**、字号、inline preedit | `weasel.custom.yaml` 的 `style/heng_*` |
+| 2 | 快捷键 | 左右键行为、翻页键、简繁/标点/全半角切换键 | `default.custom.yaml`（key_binder） |
+| 3 | 标点符号 | 半角标点模式（拨杆，立即生效） | `default.custom.yaml`（punctuator） |
+| 4 | 词库 | 用户词典文件列表、打开用户目录、备份用户词典 | 用户目录 |
+| 5 | 服务 | 重启/退出服务、重新部署、词典管理、三个目录按钮 | — |
+| 6 | 关于 | 版本、ABI、目录信息（只读） | — |
 
-每页右侧即时生效（写 patch → 自动 redeploy → 候选窗热刷新），无需「保存」按钮。
+第 5 页是从托盘/语言栏菜单搬过来的运维功能（原菜单已精简为设置/关于/检查更新三项）。
+「服务」页里的进程级动作由外壳执行 —— core 是宿主加载的 DLL，自己重启/退出没意义，
+只能抛意图过去（`heng_set_service_handler`）。
 
-入口：
-- WeaselServer 托盘菜单「设置」（现有托盘逻辑接线）；
-- 默认快捷键（如 Ctrl+Shift+P 之类，S2 定）不与现有 hotkeys 冲突；
-- 首版只做托盘入口。
+配色不采用 `preset_color_schemes` 预设列表：自绘候选窗不读 `style/color_scheme`
+（那是 weasel 原生 UI 的键），预设链路对本项目无效。实际使用四项自定义颜色
+（`style/heng_*`）+ HSV 取色器。
 
-## 4. 里程碑（S 线）
+---
 
-| 里程碑 | 内容 | 验收 |
-|---|---|---|
-| S0 数据层 | core 设置 setter API + custom.yaml patch + redeploy；托盘「设置」开空窗口 | abitest 增项；改一项配置真机生效 |
-| S1 样式页 | 窗口骨架（导航+内容区）+ 第 2 页候选窗样式（配色预览最直观，先做熟） | 真机点选配色/字号/横竖排即改即见 |
-| S2 方案+快捷键+标点 | 第 1/3/4 页 | 真机切方案、改翻页键生效 |
-| S3 诊断页 + 词库管理 | 第 5/6 页（词库可与 8.4 同步合并做） | 导出用户词典成功 |
-| S-Android 决策门 | Android 用 Slint 或原生；鸿蒙定方向 | — |
+## 4. 入口
 
-## 5. 与既有文档的关系
+- **托盘/语言栏菜单「设置」** → `heng_settings_show(0)`（输入方案页）
+- **托盘/语言栏菜单「关于」** → `heng_settings_show(6)`
+- **候选窗工具条 ☰ 菜单「设置」** → 打开外观页
 
-- ARCHITECTURE.md §5.5「设置界面用 Web」、§settings-web/ 目录规划 → 本文档取代；
-  v3 修订说明待 M2 收尾时并入主文档。
-- M2 里程碑改名：设置界面与配置中心（Slint 窗口方向）。
+**没有全局快捷键**。Ctrl+Shift+P 已分配给「标点切换键」，不可用于设置入口。
+
+---
+
+## 5. Slint 踩坑记录（改设置窗时会遇到）
+
+1. **`if cond:` 不能套 `for`** —— Slint 的 `if` 只能跟单个元素作为子节点。
+   给页专属的循环加守卫，要写进迭代表达式：
+   ```slint
+   for ci[i] in (root.page == 1 ? 4 : 0): Rectangle { ... }
+   ```
+   （这不是显式 if 块，是给 for 传 0 或 4 个元素）
+2. **HorizontalLayout 里的 Text 会吃掉全部剩余宽度**，把后面的控件挤走。
+   `horizontal-stretch: 0` + 显式 `width` **无效**，只能改绝对定位。
+3. **GridLayout 的 Row 不自动换行**，横向排不下会被裁掉。要网格就用绝对定位算
+   `x: Math.mod(k,8)*32px` / `y: Math.floor(k/8)*32px`。
+4. **长度 × 长度 = px² 编译失败**：`26px * 3px` 不行，写 `26px * 3`。
+5. **颜色字面量必须 6 或 8 位十六进制**，`#0000008080`（10 位）报 Invalid color literal。
+6. 设置窗**没有键盘事件通路** —— 平台层只处理指针事件，Slint `TextInput`
+   收不到字符。所以没有文本输入框，hex 值也是只读显示。
+7. **裸 Text 放进 VerticalLayout 会被拉伸占满剩余高度**，标题行要显式钉高
+   + 内部 Text 垂直居中。
+
+---
+
+## 6. 已知问题
+
+- 设置窗在 Visual Studio 里单步会被中断（工具链冲突），但不影响编译和真机使用。
+- 进程级动作（重启/退出服务、打开程序目录）依赖外壳注册 handler，
+  未注册时会静默失败并在页头提示。

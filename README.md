@@ -19,8 +19,8 @@
 ```
 core（Rust，heng-core）             写一次 ×1
 ├─ librime 封装与 FFI
-├─ 版本化 C ABI（include/heng.h，abi_version=9）
-├─ 内置自绘候选窗 + 六页设置窗口（Slint）
+├─ 版本化 C ABI（include/heng.h，abi_version=10）
+├─ 内置自绘候选窗 + 七页设置窗口（Slint）
 ├─ 配置中心对接（config-center/shared/heng.yaml 为配置真源）
 └─ 本地 HTTP（诊断与外部工具用，127.0.0.1:9371，非输入链路）
         ↕ 同进程 C ABI：五端外壳进程内直接加载 heng_core 动态库
@@ -37,7 +37,7 @@ librime + 词库（雾凇拼音）           现成 ×0
 |---|---|---|---|---|
 | Windows | TSF | Weasel 改造（服务进程 `WeaselServer.exe`） | core 内置自绘（Win32 分层窗口） | **可用** |
 | Linux | Fcitx5 | fcitx5 addon + heng_blue 主题 | core 内置自绘（X11/XWayland） | **可用** |
-| macOS | IMK | Squirrel 改造 | core 内置自绘（NSPanel，待实现） | 外壳接入中 |
+| macOS | IMK | Squirrel 改造（`third_party/src/squirrel`） | core 内置自绘（NSPanel，**未实现**） | 外壳接入中，无候选窗 |
 | Android | IMS | Trime 参考 | core 内置自绘（计划） | 未开始 |
 | 鸿蒙 | IME Kit | 自研（librime 无鸿蒙前端） | core 内置自绘（计划） | 未开始 |
 
@@ -46,9 +46,9 @@ librime + 词库（雾凇拼音）           现成 ×0
 | 模块 | 职责 |
 |---|---|
 | `engine/` | librime FFI 绑定与会话封装（组词、候选、上屏、开关状态） |
-| `capi.rs` | 版本化 C ABI（`heng.h`，abi_version=9），各端外壳唯一的对接面 |
-| `ui.rs` | 内置自绘候选窗：Slint 软渲染产出预乘 ARGB 帧，平台后端只负责搬帧与指针事件（Linux=X11，Windows=Win32 分层窗口，macOS=NSPanel 待实现）；另含**六页设置窗口**（无边框 Slint 窗口，托盘菜单 `heng_settings_show` 唤起） |
-| `settings.rs` | 设置数据层：weasel.yaml / schema 读写、config 迭代器封装、用户词库文件列表 |
+| `capi.rs` | 版本化 C ABI（`heng.h`，abi_version=10），各端外壳唯一的对接面 |
+| `ui.rs` | 内置自绘候选窗：Slint 软渲染产出预乘 ARGB 帧，平台后端只负责搬帧与指针事件（Linux=X11，Windows=Win32 分层窗口，macOS=NSPanel 未实现）；另含**七页设置窗口**（无边框 Slint 窗口，托盘菜单 `heng_settings_show` 唤起） |
+| `settings.rs` | 设置数据层：config API v4 读 staging 生效值；写直接改 `*.custom.yaml` patch（不碰上游 YAML） |
 | `server.rs` | 本地 HTTP 服务（诊断与 heng-cli serve 用，127.0.0.1:9371，不在输入链路上） |
 | `global.rs` | 全局引擎与会话表 |
 
@@ -56,27 +56,33 @@ librime + 词库（雾凇拼音）           现成 ×0
 
 ```
 HengIME/
-├── docs/                    架构方案与决策记录
-│   ├── ARCHITECTURE.md        架构方案 v2（竞品对照、路线决策）
-│   └── ROUTE-P.md             路线 P 裁决与规划
+├── docs/                    现行文档
+│   ├── ARCHITECTURE.md        架构现状
+│   ├── FEATURES.md            功能规划清单
+│   ├── SETTINGS-PLAN.md       设置窗口结构与开发注意事项
+│   └── archive/               决策记录与试验报告
 │
 ├── core/                    统一能力模块（cdylib: heng_core.dll/.so/.dylib）
 │   ├── src/                   engine · capi · ui · settings · server · global
 │   └── include/heng.h         C ABI 头文件（供各端外壳 include）
 │
-├── shells/                  五端外壳
-│   ├── linux/fcitx5/          fcitx5 集成 + heng_blue 主题
-│   ├── macos/                 Squirrel 改造（进行中）
-│   ├── windows/               Weasel 改造（改动固化为 patches/）
-│   ├── android/               计划中
-│   └── harmony/               计划中
+├── shells/                  自研外壳
+│   └── linux/fcitx5/          fcitx5 addon
 │
-├── config-center/           配置中心（shared/heng.yaml 为配置真源）
-├── patches/                 weasel 源码改动的固化补丁与配置
-├── tools/heng-cli/          命令行校验器（version/cand/commit/serve/abitest/uitest/settings）
-├── third_party/             预编译依赖与参考源码（gitignored，见 third_party/README.md）
-├── settings-web/            计划中：设置界面（Web，五端共用）
-└── skins/                   计划中：皮肤
+├── third_party/src/         上游改造型外壳的源码（gitignored）
+│   ├── weasel/                 Windows：Weasel 改造，改动固化在 patches/
+│   ├── squirrel/               macOS：Squirrel 改造
+│   ├── fcitx5-rime/ trime/     参考实现
+│
+├── config-center/           配置真源（shared/heng.yaml）与分发脚本
+├── patches/                 weasel 改动固化 + 雾凇/rime yaml + heng.def
+├── tools/
+│   ├── heng-cli/              调试 CLI
+│   ├── weasel-dev-install.ps1  Windows dev 版注册/启动/卸载
+│   └── squirrel-dev-install.sh
+├── runtime/ runtime-dev/   正式版 / dev 版用户数据
+├── experiments/             窗口属性实验
+└── tools/icons/
 ```
 
 ## 里程碑
@@ -84,14 +90,14 @@ HengIME/
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | M0 | core 地基：librime 绑定 + 版本化 C ABI + heng-cli + 本地 HTTP | 已完成 |
-| M0.5 | 决策门：三条试验（薄壳化 / GUI 工具包 / 前端差异），裁决走路线 P（core 前置） | 已完成 |
+| M0.5 | 决策门：三条试验（薄壳化 / GUI 工具包 / 前端差异），裁决走 core 前置路线 | 已完成 |
 | M1 | Windows 外壳：Weasel 改造，数据源整体换为 heng-core | 已完成 |
 | M5 | Windows 收尾：样式配置化、app_options、配置中心对接 | 已完成 |
 | M-P1 | core 内置自绘候选窗（Linux + Windows），替代各端自带候选 UI | 已完成 |
-| M7 | Linux 外壳：fcitx5 addon + heng_blue 主题 | 主体完成 |
-| M6 | macOS 外壳：Squirrel 改造（ABI v7 已就绪） | 进行中 |
-| M2 | 设置界面与配置中心完善（core 内置六页设置窗已上线并接入托盘；Web 端未开始） | 进行中 |
-| M3 | 词库与数据同步 | 未开始 |
+| M7 | Linux 外壳：fcitx5 addon | 可用 |
+| M2 | 设置界面：core 内置七页 Slint 设置窗（Web 方案已废弃） | 已上线，进程级动作待验证 |
+| M6 | macOS 外壳：Squirrel 改造，core 可编译运行 | 进行中（NSPanel 候选窗未实现） |
+| M3 | 词库与数据同步（账号 + 服务端方案） | 未开始，见 FEATURES §4 |
 | M4 | 鸿蒙外壳 | 未开始 |
 | M8 | AI 预测（可插拔模块） | 未开始 |
 
@@ -101,15 +107,17 @@ HengIME/
 |---|---|
 | 包名 / Bundle ID | `com.heng.ime` |
 | Rust crate 前缀 | `heng-` |
-| core 服务进程 | `heng-server` |
+| Windows 服务进程 | `WeaselServer.exe`（上游 weasel 自带） |
+| 本地 HTTP 自报名 | `heng-server`（由 `heng-cli serve` 拉起，仅诊断用） |
 | 命令行工具 | `heng-cli` |
 | 中文名 | 衡 |
 
 > 注意：鸿蒙端的包名一旦确定不要修改——改包名会导致旧 Profile 直接失效，需重新申请签名。
 
-## 设计文档
+## 文档
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 架构方案 v2：竞品架构对照、可借鉴清单、两条路线的决策依据
-- [docs/ROUTE-P.md](docs/ROUTE-P.md) —— 路线 P（core 前置 + 内置候选窗）的裁决与规划
-- [docs/M0.5-*.md](docs/) —— 决策门三问的试验数据
+- [docs/FEATURES.md](docs/FEATURES.md) —— 功能规划清单：功能范围与进度
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 架构现状：进程模型、core 结构、各端状态、已知局限
+- [docs/SETTINGS-PLAN.md](docs/SETTINGS-PLAN.md) —— 设置窗口结构、配置读写取舍、Slint 开发注意事项
+- [docs/archive/](docs/archive/) —— 决策记录与试验报告
 - [third_party/README.md](third_party/README.md) —— 第三方依赖重建步骤
