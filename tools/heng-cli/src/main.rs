@@ -336,16 +336,14 @@ fn cmd_uitest(seq: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
     snap("5-rowdown"); // ↓ 行移（行感知，非固定 ±6）
     heng_core::ui::ui_row_move(-1);
     snap("6-rowup"); // ↑ 行移回来
-    // —— 收起态：图标 / 菜单（占位）——
+    // —— 收起态：菜单（占位）——
     heng_core::ui::ui_set_expanded(false); // ↑ 首行收起的同款路径
     snap("7-collapsed"); // 横条恢复（网格布局重建成流式）
-    heng_core::ui::ui_bar_icon(true);
-    snap("8-icon"); // ☰ 选中：词高亮隐藏 + ☰ 底色
+    // 注：原8-icon / 10-back 两个快照依赖 ui_bar_icon（☰ 键盘选中态），
+    //该中间态已在93ecb73 删除（→ 到最后一个预选词直接展开，☰ 只响应鼠标点击）
     heng_core::ui::ui_menu_open();
     snap("9-menu"); // 菜单占位面板 460x126
     heng_core::ui::ui_menu_close();
-    heng_core::ui::ui_bar_icon(false);
-    snap("10-back"); // 回横条，词高亮恢复
     // —— 展开态滚动跟随：↓ 超出 5 行可视区，面板应滚动 + 滚动条下移 ——
     heng_core::ui::ui_toggle(); // 重新展开
     snap("11-expand0"); // 展开初始（滚动位置应归零）

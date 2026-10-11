@@ -1137,6 +1137,46 @@ pub extern "C" fn heng_settings_hide() -> c_int {
     })
 }
 
+/// 注册「服务级动作」回调（v10）。cb 为空指针时注销。
+///
+/// 设置页「服务」页的重启服务 / 退出服务 / 打开程序目录这三个动作 core 自己
+/// 做不了（core 是宿主加载的 DLL，重启/退出的是宿主进程），只能把意图抛给
+/// 外壳。`action` 取值见 `SERVICE_*`。
+///
+/// 回调在 core UI 线程同步执行，实现方只应做投递（post 消息 / 排队）。
+#[no_mangle]
+pub extern "C" fn heng_set_service_handler(
+    cb: Option<crate::ui::ServiceHandler>,
+    ctx: *mut core::ffi::c_void,
+) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        *crate::ui::SERVICE_HANDLER.lock().unwrap() = cb.map(|f| (f, ctx as usize));
+        HENG_TRUE
+    })
+}
+
+/// 在资源管理器中打开某个目录（v10）。
+///
+/// 供设置页「服务」页的「打开用户目录 / 程序目录 / 日志目录」使用。
+/// `dir` 为 UTF-8 路径。目录不存在则返回 FALSE。
+#[no_mangle]
+pub extern "C" fn heng_open_dir(dir: *const c_char) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if dir.is_null() {
+            return HENG_FALSE;
+        }
+        let Ok(s) = (unsafe { std::ffi::CStr::from_ptr(dir) }).to_str() else {
+            return HENG_FALSE;
+        };
+        let p = std::path::Path::new(s);
+        if s.is_empty() || !p.is_dir() {
+            return HENG_FALSE;
+        }
+        crate::ui::open_in_explorer(p);
+        HENG_TRUE
+    })
+}
+
 /// 隐藏候选窗（焦点离开/清空组合串时调用）。始终返回 HENG_TRUE。
 #[no_mangle]
 pub extern "C" fn heng_ui_hide() -> c_int {
@@ -1512,6 +1552,15 @@ pub extern "C" fn heng_set_caret_pos(session: HengSession, pos: c_int) -> c_int 
 }
 
 /// 用户数据同步（Rime sync 机制）。返回 TRUE=成功。
+///
+/// **注意**：设置页「服务」栏的「用户资料同步」入口已移除 —— 该功能与未来的
+/// 「服务端 + 账号」资料同步方案重合，且 librime 的 sync **不含任何网络代码**
+/// （未配 `sync_dir` 时只把快照写到 `user_dir\sync\<installation_id>\`，
+/// 是本地镜像、零传输）。
+///
+/// 但**本导出不要删**：「导出快照」正是未来服务端方案的底座 ——
+/// 账号登录后上传的就是这份文本快照（带 `#@/tick`、`#@/user_id` 头），
+/// 服务端只需存文件 + 合并 tick 回传。届时 UI 入口会在新的「账号」页重建。
 #[no_mangle]
 pub extern "C" fn heng_sync_user_data() -> c_int {
     ffi_guard!(HENG_FALSE, {

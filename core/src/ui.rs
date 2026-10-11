@@ -150,6 +150,48 @@ pub static PENDING_UI_COMMITS: LazyLock<Mutex<std::collections::HashMap<u64, Str
 /// fcitx5 侧原本靠在「下次按键前 drain」兜底，行为是延迟生效，跨端不一致。
 pub type CommitHandler = extern "C" fn(ctx: *mut core::ffi::c_void, session: u64, text: *const u8);
 
+/// 服务级动作回调（设置页「服务」页用）。
+///
+/// 语义：core 无法自己重启/退出宿主进程（WeaselServer 是宿主，core 是它加载的
+/// DLL），所以 core 只把「意图」抛给外壳，由外壳执行实际的进程操作。
+/// `action` 取值见 [`SERVICE_*`] 常量。
+///
+/// 实现方只应做投递（post 消息 / 排队），不要在回调里阻塞或反向长时间持有
+/// core 锁。
+pub type ServiceHandler = extern "C" fn(ctx: *mut core::ffi::c_void, action: i32);
+
+/// 重新部署。**保留值但当前不发**：设置页「重新部署」按钮由 core 直接调
+/// `engine.redeploy()`，不经过本回调（无跨线程需求）。保留以固定 API 契约。
+#[allow(dead_code)]
+pub const SERVICE_REDEPLOY: i32 = 1;
+/// 重启算法服务（退出 WeaselServer，TSF 侧会重新拉起）
+pub const SERVICE_RESTART: i32 = 2;
+/// 退出算法服务（停掉 WeaselServer 进程）
+pub const SERVICE_QUIT: i32 = 3;
+/// 打开程序目录（宿主可执行文件同级）
+pub const SERVICE_OPEN_INSTALL: i32 = 4;
+
+/// ctx 以 usize 存（不透明地址）：裸指针非 Send，跨线程静态存储需此包装。
+pub static SERVICE_HANDLER: LazyLock<Mutex<Option<(ServiceHandler, usize)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// 触发一次服务级动作。未注册回调时静默返回 false（轮询式外壳用不上这些）。
+pub fn fire_service(action: i32) -> bool {
+    let handler = SERVICE_HANDLER.lock().unwrap();
+    let Some((cb, ctx)) = *handler else { return false };
+    drop(handler); // 解锁后再调：回调里可能反向调 core（重入）
+    cb(ctx as *mut core::ffi::c_void, action);
+    true
+}
+
+/// 页头提示：复用 `head-text`（页头那一行灰字）承载一次性通知。
+///
+/// 不新增 toast 机制 —— 页头本来就是每页顶部的说明文字位置，
+/// 塞一条临时提示最省事，且不会额外占版面。
+fn show_notice(sui: &SettingsWindow, msg: &str) {
+    sui.set_head_text(msg.into());
+}
+
 /// ctx 以 usize 存（不透明地址）：裸指针非 Send，跨线程静态存储需此包装。
 pub static COMMIT_HANDLER: LazyLock<Mutex<Option<(CommitHandler, usize)>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -870,8 +912,12 @@ slint::slint! {
                         vertical-alignment: center; wrap: word-wrap;
                     }
                 }
-                // 四个可配色项（点击行 → 展开取色面板）
-                for ci[i] in 4: Rectangle {
+                // 四个可配色项（点击行 → 展开取色面板）。
+                // 注意：Slint 的 `if cond: for x in y:` 语法非法，for 只能跟
+                // 单个 for/if/repeat 作为子元素，所以守卫必须写成for 自己的
+                // 条件表达式 `for x in (cond ? y : [])`——早期漏写 page 判据，
+                // 导致这四行出现在所有 6 个页面
+                for ci[i] in (root.page == 1 ? 4 : 0): Rectangle {
                     height: 44px; border-radius: 8px;
                     background: cta-ci.has-hover ? #eceef2 : #ffffff;
                     // 绝对定位，不用 HorizontalLayout：布局里Text 的
@@ -990,8 +1036,56 @@ slint::slint! {
                     SetBtn { text: "打开用户目录"; clicked => { root.action_clicked("open-user"); } }
                     SetBtn { text: "备份用户词典"; clicked => { root.action_clicked("backup"); } }
                 }
-                // —— 页5 关于 ——
+                // —— 页5 服务：原托盘/语言栏菜单里搬过来的运维类功能 ——
+                // 分三组：服务生命周期 / 数据与部署 / 目录与诊断。
+                // 每组一个标题行 + 一行按钮，语义与旧菜单的四组对应。
                 if root.page == 5: Rectangle {
+                    // 分组标题：裸 Text 放进 VerticalLayout 会被拉伸占满剩余高度
+                    // （实测留出大片空白），故显式钉高 + 内部 Text 垂直居中
+                    height: 22px;
+                    Text {
+                        x: 2px; y: 0; width: parent.width; height: parent.height;
+                        text: "服务"; font-size: 12px; color: #9aa0a8;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.page == 5: HorizontalLayout {
+                    height: 40px; spacing: 8px;
+                    SetBtn { text: "重启算法服务"; clicked => { root.action_clicked("restart-service"); } }
+                    SetBtn { text: "退出算法服务"; clicked => { root.action_clicked("quit-service"); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if root.page == 5: Rectangle {
+                    height: 22px;
+                    Text {
+                        x: 2px; y: 0; width: parent.width; height: parent.height;
+                        text: "数据与部署"; font-size: 12px; color: #9aa0a8;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.page == 5: HorizontalLayout {
+                    height: 40px; spacing: 8px;
+                    SetBtn { text: "重新部署"; clicked => { root.action_clicked("redeploy"); } }
+                    SetBtn { text: "词典管理"; clicked => { root.action_clicked("dict"); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if root.page == 5: Rectangle {
+                    height: 22px;
+                    Text {
+                        x: 2px; y: 0; width: parent.width; height: parent.height;
+                        text: "目录与诊断"; font-size: 12px; color: #9aa0a8;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.page == 5: HorizontalLayout {
+                    height: 40px; spacing: 8px;
+                    SetBtn { text: "打开用户目录"; clicked => { root.action_clicked("open-user"); } }
+                    SetBtn { text: "打开程序目录"; clicked => { root.action_clicked("open-install"); } }
+                    SetBtn { text: "打开日志目录"; clicked => { root.action_clicked("open-log"); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                // —— 页6 关于 ——
+                if root.page == 6: Rectangle {
                     min-height: 120px; border-radius: 8px; background: #ffffff;
                     HorizontalLayout {
                         padding: 12px;
@@ -1002,12 +1096,6 @@ slint::slint! {
                             vertical-alignment: center;
                         }
                     }
-                }
-                if root.page == 5: HorizontalLayout {
-                    height: 40px; spacing: 8px;
-                    SetBtn { text: "重新部署"; clicked => { root.action_clicked("redeploy"); } }
-                    SetBtn { text: "打开日志目录"; clicked => { root.action_clicked("open-log"); } }
-                    SetBtn { text: "打开用户目录"; clicked => { root.action_clicked("open-user"); } }
                 }
             }
         }
@@ -3516,7 +3604,35 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     }
                 }
                 "open-user" => open_in_explorer(settings.user_dir()),
-                "open-log" => open_in_explorer(&std::env::temp_dir()),
+                // 日志目录 = %TEMP%\rime.weasel（见 log_dir() 处的说明）
+                "open-log" => open_in_explorer(&log_dir()),
+                // 程序目录 = WeaselServer.exe 同级。外壳未注册服务回调时，
+                // core 只能靠自己的可执行文件位置猜 —— 那不是程序目录，
+                // 故静默失败并在页头提示
+                "open-install" => {
+                    if !fire_service(SERVICE_OPEN_INSTALL) {
+                        show_notice(&sui, "无法定位程序目录：请从语言栏菜单打开");
+                    }
+                }
+                // —— 服务页：进程级动作一律抛给外壳（core 是宿主加载的 DLL，
+                // 自己重启/退出没有意义）——
+                "restart-service" => {
+                    if !fire_service(SERVICE_RESTART) {
+                        show_notice(&sui, "重启服务需要外壳支持");
+                    }
+                }
+                "quit-service" => {
+                    if !fire_service(SERVICE_QUIT) {
+                        show_notice(&sui, "退出服务需要外壳支持");
+                    }
+                }
+                // 词典管理 = 词库页（本页按钮的等价入口，跳过去即可）
+                "dict" => {
+                    sui.set_page(PAGE_DICT);
+                    if let Some(cur) = sstate.borrow().as_ref() {
+                        settings_apply_page(&sui, cur, PAGE_DICT);
+                    }
+                }
                 "backup" => {
                     let secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -4200,7 +4316,27 @@ fn scale_pointer_event(event: WindowEvent, scale: f32) -> WindowEvent {
 
 // ============================ 设置窗口（S0-S3） ============================
 
-const SET_NAV: [&str; 6] = ["输入方案", "外观", "快捷键", "标点符号", "词库", "关于"];
+/// 设置页左侧导航。顺序即页号：
+/// 0 输入方案 / 1 外观 / 2 快捷键 / 3 标点符号 / 4 词库 / 5 服务 / 6 关于
+const SET_NAV: [&str; 7] =
+    ["输入方案", "外观", "快捷键", "标点符号", "词库", "服务", "关于"];
+
+/// 页号契约：与 SET_NAV 下标一一对应，也是托盘/语言栏「关于」菜单的跳转目标。
+/// 外壳侧按这套数字调 `heng_settings_show(page)`，改 SET_NAV 顺序必须同步改这里。
+#[allow(dead_code)]
+mod page_id {
+    pub const SCHEMAS: i32 = 0;
+    pub const APPEARANCE: i32 = 1;
+    pub const KEYS: i32 = 2;
+    pub const PUNCT: i32 = 3;
+    pub const DICT: i32 = 4;
+    pub const SERVICE: i32 = 5;
+    pub const ABOUT: i32 = 6;
+}
+use page_id::{ABOUT as PAGE_ABOUT, DICT as PAGE_DICT};
+
+/// 托盘/语言栏「关于」菜单要跳的页号（保持与 SET_NAV 下标一致）
+pub const PAGE_ABOUT_FOR_MENU: i32 = PAGE_ABOUT;
 
 /// 设置页运行态（打开时从 staging + patch 加载一次，改动后重载）
 #[derive(Clone)]
@@ -4462,13 +4598,24 @@ fn load_settings_state(
         st.ascii_punct = engine.get_option(sid, "ascii_punct").unwrap_or(false);
     }
     st.about = format!(
-        "HengIME 「衡」 v{}\nABI v{}（本设置窗口运行于 core 内部 UI 线程）\n\n用户目录：{}",
+        "HengIME 「衡」 v{}\nABI v{}（本设置窗口运行于 core 内部 UI 线程）\n\n用户目录：{}\n日志目录：{}",
         engine.version().unwrap_or_default(),
         crate::capi::HENG_ABI_VERSION,
         settings.user_dir().display(),
+        log_dir().display(),
     );
     st.user_files = settings.list_user_files();
     st
+}
+
+/// 日志目录 = `%TEMP%\rime.weasel`
+///
+/// glog 的落盘目录由**最先初始化它的那次 `rime_setup`** 决定：
+/// WeaselServer 在 `heng_create` 之前就以 `app_name="rime.weasel"` 初始化了 glog，
+/// core 后面设的 `traits.app_name`（"rime.heng"）已不再影响位置
+/// （实测 `%TEMP%\rime.heng` 不存在）。与 weasel 侧 `WeaselLogPath()` 一致。
+fn log_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("rime.weasel")
 }
 
 fn empty_row(title: &str, sub: &str, active: bool) -> SetRow {
@@ -4554,6 +4701,9 @@ fn settings_apply_page(sui: &SettingsWindow, st: &SettingsState, page: i32) {
                 ));
             }
         }
+        5 => {
+            head = "服务 · 进程运维、数据部署与目录诊断".into();
+        }
         _ => {
             head = "关于".into();
         }
@@ -4621,7 +4771,8 @@ fn screen_size() -> (i32, i32) {
     }
 }
 
-fn open_in_explorer(p: &std::path::Path) {
+/// 在资源管理器中打开目录（设置页「服务」页的目录按钮走这里）
+pub fn open_in_explorer(p: &std::path::Path) {
     #[cfg(target_os = "windows")]
     {
         let _ = std::process::Command::new("explorer").arg(p).spawn();

@@ -234,12 +234,34 @@ HENG_API int heng_ui_mode_hint(int ascii);
 HENG_API int heng_ui_mode_hint_ex(int ascii, int x, int caret_bottom,
                                   int caret_top);
 
-/* 打开设置窗口（v9；page = 初始页索引 0-5：0=输入方案 1=候选窗样式 2=快捷键
- * 3=标点符号 4=词库 5=关于）。窗口运行于 core 内部 UI 线程（宿主进程内）。 */
+/* 打开设置窗口（v9；page = 初始页索引 0-6：0=输入方案 1=外观 2=快捷键
+ * 3=标点符号 4=词库 5=服务 6=关于）。窗口运行于 core 内部 UI 线程（宿主进程内）。 */
 HENG_API int heng_settings_show(int page);
 
 /* 关闭设置窗口（v9）。 */
 HENG_API int heng_settings_hide(void);
+
+/* 服务级动作回调（v10 追加）：cb(ctx, action)。
+ *
+ * 设置页「服务」页的「重启算法服务 / 退出算法服务 / 打开程序目录」三个动作
+ * core 自己做不到—— core 是宿主（WeaselServer）加载的 DLL，要重启/退出的
+ * 恰恰是宿主进程本身；程序目录也在宿主 exe 同级。故 core 只抛意图，
+ * 由外壳执行实际操作。
+ *
+ * action 取值：
+ *   1 = SERVICE_REDEPLOY     重新部署
+ *   2 = SERVICE_RESTART      重启算法服务
+ *   3 = SERVICE_QUIT         退出算法服务
+ *   4 = SERVICE_OPEN_INSTALL 打开程序目录
+ *
+ * 语义约定：在 core UI 线程同步执行，实现方只应做投递（post 消息 / 排队），
+ * 不要阻塞，也不要反向外调 core 后长时间持有 core 锁。传 NULL 注销。 */
+typedef void (*heng_service_handler_fn)(void* ctx, int action);
+HENG_API int heng_set_service_handler(heng_service_handler_fn cb, void* ctx);
+
+/* 在资源管理器中打开某个目录（v10 追加）。dir 为 UTF-8 路径。
+ * 目录不存在或参数非法返回 HENG_FALSE。 */
+HENG_API int heng_open_dir(const char* dir);
 
 /* 上屏回调（v10 追加）：cb(ctx, session, text)。
  *

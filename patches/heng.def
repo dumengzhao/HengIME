@@ -70,8 +70,10 @@ EXPORTS
     heng_set_commit_handler
     heng_set_propagation_policy
     heng_set_session_owner
+    heng_set_service_handler
     heng_settings_hide
     heng_settings_show
+    heng_open_dir
     heng_simulate_key_sequence
     heng_start_session
     heng_style_flag
