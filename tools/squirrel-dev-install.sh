@@ -118,10 +118,25 @@ CORE_DST="$SQUIRREL_DIR/lib/libheng_core.dylib"
 if [ ! -f "$CORE_SRC" ]; then
   echo "❌找不到 core：$CORE_SRC"; echo "   先编译：cargo build --release -p heng-core"; exit 1
 fi
+# 头文件也要同步：Squirrel 的 bridging header 是 #import <heng.h>，
+# 走 HEADER_SEARCH_PATHS 指向 librime/include —— 那是 core/include/heng.h 的**副本**。
+# 只同步 dylib 不同步头文件时，新加的 heng_* 函数在 Swift 侧报
+# 「cannot find 'xxx' in scope」，而 dylib 里其实已经有实现了，最难查。
+HDR_SRC="$(cd "$SQUIRREL_DIR/../../.." && pwd)/core/include/heng.h"
+HDR_DST="$SQUIRREL_DIR/librime/include/heng.h"
+CORE_TOUCHED=0
+if [ -f "$HDR_SRC" ] && [ "$HDR_SRC" -nt "$HDR_DST" ]; then
+  echo "  core 头文件有更新，同步 heng.h..."
+  cp "$HDR_SRC" "$HDR_DST.new" && /usr/bin/perl -e 'rename($ARGV[0],$ARGV[1]) or die "rename: $!"' "$HDR_DST.new" "$HDR_DST"
+  CORE_TOUCHED=1
+fi
 if [ "$CORE_SRC" -nt "$CORE_DST" ]; then
   echo "  core 有更新，同步 dylib..."
   cp "$CORE_SRC" "$CORE_DST.new" && /usr/bin/perl -e 'rename($ARGV[0],$ARGV[1]) or die "rename: $!"' "$CORE_DST.new" "$CORE_DST"
-  echo "  ✅ core 同步完成 —— 请重新编译 Squirrel（xcodebuild），本次只更新了 dylib"
+  CORE_TOUCHED=1
+fi
+if [ "$CORE_TOUCHED" = "1" ]; then
+  echo "  ✅ core 同步完成 —— 请重新编译 Squirrel（xcodebuild），本次只更新了 dylib/头文件"
   exit 2
 fi
 SRC_BIN="$APP_SRC/Contents/MacOS/Squirrel"
