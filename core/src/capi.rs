@@ -859,136 +859,14 @@ pub extern "C" fn heng_process_key_ex(
             return HENG_FALSE;
         };
         let _guard = crate::global::OP_LOCK.lock().unwrap();
-        // 0. 自绘候选窗键盘语义（微信同款）：
-        //    ↓ 未展开 → 打开面板；面板内 ↑↓ = 行间移动、←→ = 格间移动
-        //    （纯面板视觉高亮，不碰 librime）；↑ 在第一行 → 收起；
-        //    空格/回车 → 选中面板当前高亮项（真实候选翻页选中 / 同音词清串直上）
-        const XK_UP: i32 = 0xff52;
-        const XK_DOWN: i32 = 0xff54;
-        const XK_LEFT: i32 = 0xff51;
-        const XK_RIGHT: i32 = 0xff53;
-        const XK_RETURN: i32 = 0xff0b;
-        let mut ui_nav = false;
-        let expanded = crate::ui::UI_EXPANDED.load(Ordering::Relaxed);
-        // ibus RELEASE_MASK（weasel 的 bit14 经 expand_ibus_modifier 映到 bit30；
-        // fcitx5 原生 bit30）：keyup 不拦截不选中，否则一次按键 = keydown+keyup
-        // 两次导航（跳两格）/ 两次选中
-        if mask & (1 << 30) == 0 {
-            if expanded {
-                // ↓/↑ 按行移动（行内格数不定，收起/到底的边界判断在 UI 线程，
-                // 那里有格子几何）；←→ 按格；空格/回车选中
-                match keysym {
-                    XK_DOWN => {
-                        crate::ui::ui_row_move(1);
-                        ui_nav = true;
-                    }
-                    XK_UP => {
-                        crate::ui::ui_row_move(-1);
-                        ui_nav = true;
-                    }
-                    XK_RIGHT => {
-                        crate::ui::ui_move_hl(1);
-                        ui_nav = true;
-                    }
-                    XK_LEFT => {
-                        crate::ui::ui_move_hl(-1);
-                        ui_nav = true;
-                    }
-                    0x20 | XK_RETURN => {
-                        crate::ui::ui_select_hl();
-                        ui_nav = true;
-                    }
-                    // 数字键 1-9：选「当前高亮所在行」的第 N 个。
-                    // 面板每行序号独立从 1 起排，而候选索引是全局连续的——
-                    // 不做行换算就会永远选中第一行的第 N 个（已修）。
-                    0x31..=0x39 => {
-                        crate::ui::ui_select_by_row_seq((keysym - 0x30) as i32);
-                        ui_nav = true;
-                    }
-                    _ => {}
-                }
-            } else {
-                // 收起单行：不分页，←→/空格/回车/数字 全部本地处理（↑ 吞掉）。
-                // 键盘**不进入右侧图标**（☰ 选中态要画硬编码蓝底，自定义配色下
-                // 与容器色打架）：→ 到最后一个预选词即展开，☰ 只响应鼠标点击。
-                let has_menu = engine
-                    .get_context(rime_id)
-                    .map(|s| !s.candidates.is_empty())
-                    .unwrap_or(false);
-                // UI_BAR_COUNT>0 = 横条状态已建立（UI 线程在跑且 sync 过）；
-                // 否则（HTTP/CLI/测试等无 UI 线程场景）全部回落 librime 原行为
-                let bar_ready = crate::ui::UI_BAR_COUNT.load(Ordering::Relaxed) > 0;
-                if has_menu && bar_ready {
-                    let menu_open = crate::ui::UI_MENU_OPEN.load(Ordering::Relaxed);
-                    let hl = crate::ui::UI_HL.load(Ordering::Relaxed);
-                    let bar_last = crate::ui::UI_BAR_COUNT.load(Ordering::Relaxed) - 1;
-                    if menu_open {
-                        // ☰ 菜单打开（鼠标点开）：←/→ 关闭回横条；空格/回车暂吞
-                        //（菜单功能未做）
-                        match keysym {
-                            XK_LEFT | XK_RIGHT => {
-                                crate::ui::ui_menu_close();
-                                ui_nav = true;
-                            }
-                            0x20 | XK_RETURN => {
-                                ui_nav = true;
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        match keysym {
-                            XK_DOWN => {
-                                crate::ui::ui_toggle();
-                                ui_nav = true;
-                            }
-                            XK_UP => {
-                                // 单行不分页：↑ 不做任何事（吞掉）
-                                ui_nav = true;
-                            }
-                            XK_RIGHT => {
-                                if hl >= bar_last {
-                                    // 末词再 → = 直接展开面板（不经过图标焦点）
-                                    crate::ui::ui_toggle();
-                                } else {
-                                    crate::ui::ui_move_hl(1);
-                                }
-                                ui_nav = true;
-                            }
-                            XK_LEFT => {
-                                if hl > 0 {
-                                    crate::ui::ui_move_hl(-1);
-                                }
-                                // 首词再 ←：吞掉（不分页）
-                                ui_nav = true;
-                            }
-                            0x20 | XK_RETURN => {
-                                // 内联同步选词（横条锚定菜单第一页，高亮序号
-                                // 即全局序号）：commit 由本次 _Respond 直接取走，
-                                // 不能走异步 BarSelect（会错过本轮 _Respond）
-                                let _ = engine.select_candidate_global(
-                                    rime_id,
-                                    hl.max(0) as usize,
-                                );
-                                ui_nav = true;
-                            }
-                            c if (0x30..=0x39).contains(&c) => {
-                                // 数字键按横条序号选词：'1'-'9' → 0-8，'0' → 9
-                                let n = if c == 0x30 { 9 } else { (c - 0x31) as i32 };
-                                if n <= bar_last {
-                                    let _ = engine.select_candidate_global(
-                                        rime_id,
-                                        n.max(0) as usize,
-                                    );
-                                    ui_nav = true;
-                                }
-                                // 超出横条词数：不拦，交给 librime（页内选词）
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
+        // 0. 自绘候选窗键盘语义（微信同款）。整段逻辑抽在 ui_nav_key 里，
+        //    与 heng_ui_nav_key（macOS 专用入口）共用同一实现，避免两端漂移。
+        //    keyup（RELEASE_MASK）不拦截，否则一次按键 = keydown+keyup 两次导航。
+        let ui_nav = if mask & (1 << 30) == 0 {
+            ui_nav_key(&engine, rime_id, keysym)
+        } else {
+            false
+        };
         // 1. 按键
         let handled = if ui_nav {
             true
@@ -1246,6 +1124,79 @@ pub extern "C" fn heng_ui_hide() -> c_int {
     ffi_guard!(HENG_TRUE, {
         crate::ui::ui_hide();
         HENG_TRUE
+    })
+}
+
+/// 候选窗键盘导航（**仅 macOS 外壳使用**）。
+///
+/// 返回 HENG_TRUE 表示该按键已被候选窗导航消费（调用方不应再交给 librime），
+/// HENG_FALSE 表示未消费、按键应继续走普通输入流程。
+///
+/// 为什么不复用 heng_process_key_ex：那个是 Windows/Linux 的热路径，一次调用
+/// 就完成「导航 + 按键 + 取commit + 取 context」，签名与调用时机都绑在那套
+/// 请求-响应模型上。macOS 的 IMK 是同步回调、没有跨进程往返，且方向键走
+/// didCommand(by:) 而非 handle(_:)，塞进 _ex 会让两端时序耦合。
+/// 内部逻辑与 _ex 共用 ui_nav_key，两端行为不会漂移。
+#[no_mangle]
+pub extern "C" fn heng_ui_nav_key(session: HengSession, keysym: c_int, mask: c_int) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if session == 0 {
+            return HENG_FALSE;
+        }
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        let Ok(engine) = engine() else {
+            return HENG_FALSE;
+        };
+        let Some(rime_id) = SESSIONS.rime_id(session) else {
+            return HENG_FALSE;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        // keyup 不消费：否则一次按键 = keydown+keyup 两次导航（跳两格）
+        if mask & (1 << 30) != 0 {
+            return HENG_FALSE;
+        }
+        if ui_nav_key(&engine, rime_id, keysym) {
+            HENG_TRUE
+        } else {
+            HENG_FALSE
+        }
+    })
+}
+
+/// 候选格点击选中（**仅 macOS 外壳使用**）。
+///
+/// 外壳在候选窗上做完自己的命中测试后，把全局候选下标传进来；
+/// 返回 HENG_TRUE 表示已提交上屏。外壳负责在返回后调用
+/// heng_take_ui_commit 或依赖已注册的 heng_set_commit_handler 取文本。
+///
+/// 与 heng_select_candidate_on_current_page 的区别：那个按「页内序号」，
+/// 本函数按**全局下标**（横条/面板的格子顺序），与 UI 线程的格子模型一致。
+#[no_mangle]
+pub extern "C" fn heng_ui_click_candidate(session: HengSession, index: c_int) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if session == 0 || index < 0 {
+            return HENG_FALSE;
+        }
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        let Ok(engine) = engine() else {
+            return HENG_FALSE;
+        };
+        let Some(rime_id) = SESSIONS.rime_id(session) else {
+            return HENG_FALSE;
+        };
+        let _guard = crate::global::OP_LOCK.lock().unwrap();
+        match engine.select_candidate_global(rime_id, index as usize) {
+            Ok(true) => HENG_TRUE,
+            Ok(false) => HENG_FALSE,
+            Err(e) => {
+                set_err(e);
+                HENG_FALSE
+            }
+        }
     })
 }
 
@@ -1817,4 +1768,138 @@ unsafe fn cstr_to_string(p: *const c_char) -> Option<String> {
     } else {
         Some(std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
     }
+}
+
+/// 自绘候选窗的键盘导航语义（微信同款）。返回 true = 该按键已被 UI 消费，
+/// 调用方**不应**再把它交给 librime。调用方需已持有 OP_LOCK。
+///
+/// ↓ 未展开 → 打开面板；面板内 ↑↓ = 行间移动、←→ = 格间移动
+/// （纯面板视觉高亮，不碰 librime）；↑ 在第一行 → 收起；
+/// 空格/回车 → 选中面板当前高亮项（真实候选翻页选中 / 同音词清串直上屏）
+///
+/// mask 的 keyup 检查由调用方负责：ibus RELEASE_MASK（weasel 的 bit14 经
+/// expand_ibus_modifier 映到 bit30，fcitx5 原生 bit30）下必须放行，否则
+/// 一次按键 = keydown+keyup 两次导航（跳两格）/ 两次选中。
+fn ui_nav_key(
+    engine: &crate::engine::Engine,
+    rime_id: crate::engine::RimeSessionId,
+    keysym: c_int,
+) -> bool {
+    const XK_UP: i32 = 0xff52;
+    const XK_DOWN: i32 = 0xff54;
+    const XK_LEFT: i32 = 0xff51;
+    const XK_RIGHT: i32 = 0xff53;
+    const XK_RETURN: i32 = 0xff0b;
+
+    let mut ui_nav = false;
+    let expanded = crate::ui::UI_EXPANDED.load(Ordering::Relaxed);
+    if expanded {
+        // ↓/↑ 按行移动（行内格数不定，收起/到底的边界判断在 UI 线程，
+        // 那里有格子几何）；←→ 按格；空格/回车选中
+        match keysym {
+            XK_DOWN => {
+                crate::ui::ui_row_move(1);
+                ui_nav = true;
+            }
+            XK_UP => {
+                crate::ui::ui_row_move(-1);
+                ui_nav = true;
+            }
+            XK_RIGHT => {
+                crate::ui::ui_move_hl(1);
+                ui_nav = true;
+            }
+            XK_LEFT => {
+                crate::ui::ui_move_hl(-1);
+                ui_nav = true;
+            }
+            0x20 | XK_RETURN => {
+                crate::ui::ui_select_hl();
+                ui_nav = true;
+            }
+            // 数字键 1-9：选「当前高亮所在行」的第 N 个。
+            // 面板每行序号独立从 1 起排，而候选索引是全局连续的——
+            // 不做行换算就会永远选中第一行的第 N 个（已修）。
+            0x31..=0x39 => {
+                crate::ui::ui_select_by_row_seq((keysym - 0x30) as i32);
+                ui_nav = true;
+            }
+            _ => {}
+        }
+    } else {
+        // 收起单行：不分页，←→/空格/回车/数字 全部本地处理（↑ 吞掉）。
+        // 键盘**不进入右侧图标**（☰ 选中态要画硬编码蓝底，自定义配色下
+        // 与容器色打架）：→ 到最后一个预选词即展开，☰ 只响应鼠标点击。
+        let has_menu = engine
+            .get_context(rime_id)
+            .map(|s| !s.candidates.is_empty())
+            .unwrap_or(false);
+        // UI_BAR_COUNT>0 = 横条状态已建立（UI 线程在跑且 sync 过）；
+        // 否则（HTTP/CLI/测试等无 UI 线程场景）全部回落 librime 原行为
+        let bar_ready = crate::ui::UI_BAR_COUNT.load(Ordering::Relaxed) > 0;
+        if has_menu && bar_ready {
+            let menu_open = crate::ui::UI_MENU_OPEN.load(Ordering::Relaxed);
+            let hl = crate::ui::UI_HL.load(Ordering::Relaxed);
+            let bar_last = crate::ui::UI_BAR_COUNT.load(Ordering::Relaxed) - 1;
+            if menu_open {
+                // ☰ 菜单打开（鼠标点开）：←/→ 关闭回横条；空格/回车暂吞
+                //（菜单功能未做）
+                match keysym {
+                    XK_LEFT | XK_RIGHT => {
+                        crate::ui::ui_menu_close();
+                        ui_nav = true;
+                    }
+                    0x20 | XK_RETURN => {
+                        ui_nav = true;
+                    }
+                    _ => {}
+                }
+            } else {
+                match keysym {
+                    XK_DOWN => {
+                        crate::ui::ui_toggle();
+                        ui_nav = true;
+                    }
+                    XK_UP => {
+                        // 单行不分页：↑ 不做任何事（吞掉）
+                        ui_nav = true;
+                    }
+                    XK_RIGHT => {
+                        if hl >= bar_last {
+                            // 末词再 → = 直接展开面板（不经过图标焦点）
+                            crate::ui::ui_toggle();
+                        } else {
+                            crate::ui::ui_move_hl(1);
+                        }
+                        ui_nav = true;
+                    }
+                    XK_LEFT => {
+                        if hl > 0 {
+                            crate::ui::ui_move_hl(-1);
+                        }
+                        // 首词再 ←：吞掉（不分页）
+                        ui_nav = true;
+                    }
+                    0x20 | XK_RETURN => {
+                        // 内联同步选词（横条锚定菜单第一页，高亮序号
+                        // 即全局序号）：commit 由本次调用方直接取走，
+                        // 不能走异步 BarSelect（会错过本轮响应）
+                        let _ = engine.select_candidate_global(rime_id, hl.max(0) as usize);
+                        ui_nav = true;
+                    }
+                    c if (0x30..=0x39).contains(&c) => {
+                        // 数字键按横条序号选词：'1'-'9' → 0-8，'0' → 9
+                        let n = if c == 0x30 { 9 } else { (c - 0x31) as i32 };
+                        if n <= bar_last {
+                            let _ = engine.select_candidate_global(rime_id, n.max(0) as usize);
+                            ui_nav = true;
+                        }
+                        // 超出横条词数：不拦，交给 librime（页内选词）
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    ui_nav
 }

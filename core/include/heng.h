@@ -221,6 +221,27 @@ HENG_API int heng_ui_sync(heng_session_t session, int x, int y);
 HENG_API int heng_ui_sync_ex(heng_session_t session, int x, int caret_bottom,
                              int caret_top);
 
+/* ---- macOS 外壳专用入口（其他平台不调用）----
+ *
+ * 为什么不复用 heng_process_key_ex：那是 Windows/Linux 的热路径，一次调用完成
+ * 「导航 + 按键 + 取 commit + 取 context」，签名与调用时机都绑在那套请求-响应
+ * 模型上。macOS 的 IMK 是主线程同步回调、方向键走 didCommand(by:) 而非
+ * handle(_:)，塞进 _ex 会让两端时序耦合。内部逻辑与 _ex 共用同一实现
+ * （ui_nav_key），两端行为不会漂移。 */
+
+/* 候选窗键盘导航：←/→ 切换预选词，↓ 展开面板，↑/空格/回车/数字按现有语义处理。
+ * 返回 HENG_TRUE = 已被候选窗消费（调用方不应再交给 librime）；
+ * HENG_FALSE = 未消费，按键应继续走普通输入流程。
+ * mask 的 keyup 位（ibus RELEASE_MASK / bit30）非 0 时一律返回 HENG_FALSE，
+ * 否则一次按键 = keydown+keyup 两次导航。 */
+HENG_API int heng_ui_nav_key(heng_session_t session, int keysym, int mask);
+
+/* 候选格点击选中：index 为**全局候选下标**（与 UI 线程格子模型一致，
+ * 横条与展开面板通用）。返回 HENG_TRUE = 已提交上屏。
+ * 上屏文本经 heng_take_ui_commit 取走，或由已注册的 heng_set_commit_handler
+ * 回调送达 —— 二者必须有一个，否则候选窗关了但字不上屏。 */
+HENG_API int heng_ui_click_candidate(heng_session_t session, int index);
+
 /* 隐藏候选窗（焦点离开时调用）。 */
 HENG_API int heng_ui_hide(void);
 
