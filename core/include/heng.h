@@ -238,6 +238,49 @@ HENG_API int heng_ui_mode_hint_ex(int ascii, int x, int caret_bottom,
  * 3=标点符号 4=词库 5=服务 6=关于）。窗口运行于 core 内部 UI 线程（宿主进程内）。 */
 HENG_API int heng_settings_show(int page);
 
+/* ---- macOS 窗口后端（M-P4）----
+ *
+ * core 只负责 slint 渲染（算出「这一帧长什么样」），窗口的创建/定位/贴帧
+ * 交给外壳在**主线程**执行。原因：AppKit 的窗口调用必须在主线程，而 core 的
+ * UI 线程是自己 spawn 的 Rust 线程，不能直接碰 NSPanel。
+ * 另两端由core 各自的 x11_backend / win_backend 直连平台，无此需求。
+ *
+ * 窗口编号 win：0 = 候选窗，1 = 设置窗口，2 = 顶部字母区。
+ * 操作 op：
+ *   0 = CONFIGURE  buf 指向 4 个 i32{x, y, w, h}，buf_len = 4。
+ *                坐标系为**左上原点**（三端统一），与鼠标坐标系一致。
+ *                AppKit 是左下原点，实现方需自行翻 y：
+ *                    y_flipped = screenHeight - (y + h)
+ *   1 = SHOW       贴帧由 op=3 完成。
+ *   2 = HIDE
+ *   3 = BLIT       buf 指向 w*h 个预乘 BGRA 像素（内存序即 BGRA，与 macOS
+ *                  CGBitmapContext(kCGImageAlphaPremultipliedFirst) 一致，
+ *                  可直接 memcpy，无需逐像素转换）。
+ *                  logical_w/logical_h 为逻辑尺寸，缓冲为物理像素。
+ *   4 = BEGIN_DRAG 设置窗口进入系统拖动（对应 X11 grab_pointer /
+ *                  Win32 HTCAPTION）。仅 win=1 会发。
+ *
+ * 语义约定：cb 在 core UI 线程被调用，实现方**必须**立即切回主线程
+ * （如 DispatchQueue.main.async）再碰 AppKit，不得阻塞，也不要持有 core 锁。
+ * buf 仅在本次调用期间有效，需自存副本。传 NULL 注销。 */
+typedef void (*heng_window_handler_fn)(void* ctx, unsigned char win, unsigned char op,
+                                       const void* buf, size_t buf_len,
+                                       unsigned int logical_w, unsigned int logical_h);
+HENG_API int heng_set_window_handler(heng_window_handler_fn cb, void* ctx);
+
+/* 外壳上报主屏尺寸与缩放（设备像素 / backingScaleFactor）。
+ * core 的 ui_scale() 与 screen_size() 靠它拿到真实值—— AppKit 只能在
+ * 主线程查屏幕，而这必须在外壳注册窗口回调时一并喂进来（早于首次布局）。
+ * 建议在显示器插拔 / 缩放变化时重新上报。 */
+HENG_API void heng_set_screen_info(unsigned int width, unsigned int height, float scale);
+
+/* 外壳在主线程收到指针事件后调用，core 排空队列转成 Slint 事件。
+ * x/y/dx/dy 均为**逻辑像素**（DPI 换算由 core 统一做）。
+ * kind 取值：0=移动 1=按下 2=抬起 3=滚轮 4=指针离开 5=窗口关闭请求。
+ * 仅 win=1 的kind=5 会被转成 CloseRequested（关闭设置窗口）。 */
+HENG_API void heng_push_pointer_event(unsigned char win, unsigned char kind,
+                                      float x, float y, float dx, float dy);
+
 /* 关闭设置窗口（v9）。 */
 HENG_API int heng_settings_hide(void);
 

@@ -1137,6 +1137,69 @@ pub extern "C" fn heng_settings_hide() -> c_int {
     })
 }
 
+/// 注册 macOS 窗口后端回调（M-P4）。cb 为空指针时注销。
+///
+/// core 只负责 slint 渲染，窗口创建/定位/贴帧交给外壳在主线程执行
+/// （AppKit 的窗口调用必须在主线程，而 UI 线程是 core 自己 spawn 的 Rust 线程）。
+/// 仅 macOS 有效；另两端由 core 各自的 backend 直连平台，不经过这里。
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn heng_set_window_handler(
+    cb: Option<crate::ui::mac_backend::WindowCb>,
+    ctx: *mut core::ffi::c_void,
+) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        crate::ui::mac_backend::set_window_handler(cb, ctx);
+        HENG_TRUE
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn heng_set_window_handler(
+    _cb: Option<core::ffi::c_void>,
+    _ctx: *mut core::ffi::c_void,
+) -> c_int {
+    HENG_FALSE
+}
+
+/// 外壳上报主屏尺寸与缩放（M-P4）。仅 macOS 有效。
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn heng_set_screen_info(width: u32, height: u32, scale: f32) {
+    crate::ui::mac_backend::set_screen_info(width as i32, height as i32, scale);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn heng_set_screen_info(_width: u32, _height: u32, _scale: f32) {}
+
+/// 外壳上报指针事件（M-P4）。仅 macOS 有效。
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn heng_push_pointer_event(
+    win: u8,
+    kind: u8,
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+) {
+    crate::ui::mac_backend::push_pointer(win, kind, x, y, dx, dy);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn heng_push_pointer_event(
+    _win: u8,
+    _kind: u8,
+    _x: f32,
+    _y: f32,
+    _dx: f32,
+    _dy: f32,
+) {
+}
+
 /// 注册「服务级动作」回调（v10）。cb 为空指针时注销。
 ///
 /// 设置页「服务」页的重启服务 / 退出服务 / 打开程序目录这三个动作 core 自己
