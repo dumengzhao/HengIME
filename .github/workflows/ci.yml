@@ -94,42 +94,92 @@ jobs:
       - name: 编译 core
         run: |
           set -o pipefail
+          # 工具链信息写进摘要：MSVC 与 GNU 工具链在链接 librime 时行为不同，
+          # 失败时需要知道 runner 用的是哪个
+          {
+            echo "### toolchain"
+            echo '```'
+            rustc -vV
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           cargo build --release -p heng-core 2>&1 | tee build.log
-          # 拉取 CI 日志需要仓库 admin 权限，失败时把关键行写进 job 摘要，
-          # 否则外部只能看到 step 失败、看不到原因
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-            echo "### cargo build 失败，末尾 40 行" >> "$GITHUB_STEP_SUMMARY"
-            tail -40 build.log >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "### cargo build 失败，末尾 60 行"
+              echo '```'
+              tail -60 build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
       - name: 单测
-        run: cargo test --release -p heng-core --lib
+        run: |
+          set -o pipefail
+          cargo test --release -p heng-core --lib 2>&1 | tee test.log
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            {
+              echo "### cargo test 失败，末尾 60 行"
+              echo '```'
+              tail -60 test.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: 铺运行时配置
         if: runner.os == 'Linux'
         run: |
-          # runtime/ 被 gitignore，CI 上不存在，而 abitest 的多数断言要读配置
-          # （schema 列表、配色方案数、config API）。用 HENG_RUNTIME 指向现铺的目录。
+          # runtime/ 被 gitignore，CI 上不存在，而 abitest 的断言要读配置与词库。
+          # 用 HENG_RUNTIME 指向现铺的目录。
+          #
+          # 雾凇的部分（词典、lua 模块、符号表、opencc、7 个双拼 schema）不在仓库里，
+          # 也不该入库 —— 它们跟着上游走，直接取 full.zip。入库会与上游脱节，
+          # 而且那批文件里没有任何本项目的改动（实测与本机逐文件 md5 相同）。
+          # 词典是持续更新的（上游一个月至少两次增改词汇与权重），锁版本反而是错的。
           set -euo pipefail
           mkdir -p ci-runtime/rime-shared ci-runtime/rime-user
-          cp patches/rime-default.yaml   ci-runtime/rime-shared/default.yaml
-          cp patches/rime-weasel.yaml    ci-runtime/rime-shared/weasel.yaml
-          cp patches/rime-ice.schema.yaml ci-runtime/rime-shared/rime_ice.schema.yaml
-          cp config-center/shared/heng.yaml ci-runtime/rime-shared/heng.yaml
-          # schema 依赖词典才能真正分词，词典取雾凇 cn_dicts.zip
-          if [ ! -d ci-runtime/rime-shared/cn_dicts ]; then
-            curl -fL --retry 3 -o cn.zip \
-              "https://github.com/iDvel/rime-ice/releases/latest/download/cn_dicts.zip"
-            unzip -q cn.zip -d ci-runtime/rime-shared/
-          fi
+          curl -fL --retry 3 -o rime-full.zip \
+            "https://github.com/iDvel/rime-ice/releases/latest/download/full.zip"
+          unzip -q rime-full.zip -d ci-runtime/rime-shared
+
+          # 本项目改过的三个配置覆盖在雾凇原版之上。
+          # schema_list 只留 rime_ice：其余 8 个方案（t9 + 7 个双拼）本机在用但
+          # 未入库，librime 遇到缺失的 schema 会让整个部署以 failure 收场。
+          python3 tools/ci/make_ci_default.py \
+            ci-runtime/rime-shared/default.yaml \
+            ci-runtime/rime-shared/default.yaml
+          cp patches/rime-ice.schema.yaml    ci-runtime/rime-shared/rime_ice.schema.yaml
+          cp patches/rime-weasel.yaml        ci-runtime/rime-shared/weasel.yaml
+          cp config-center/shared/heng.yaml  ci-runtime/rime-shared/heng.yaml
+
           ls ci-runtime/rime-shared/
-          test -f ci-runtime/rime-shared/cn_dicts/base.dict.yaml
+          test -d ci-runtime/rime-shared/lua
+          test -d ci-runtime/rime-shared/cn_dicts
+          test -f ci-runtime/rime-shared/rime_ice.dict.yaml
+          grep -v '^#' ci-runtime/rime-shared/default.yaml | grep -c 'schema: rime_ice'
 
       - name: ABI 全链路
         env:
           HENG_RUNTIME: ${{ github.workspace }}/ci-runtime
-        run: cargo run --release -p heng-cli -- abitest
+        run: |
+          set -o pipefail
+          {
+            echo "### 运行时目录"
+            echo '```'
+            ls -R "$HENG_RUNTIME" | head -40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cargo run --release -p heng-cli -- abitest 2>&1 | tee abitest.log
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            {
+              echo "### abitest 失败，末尾 60 行"
+              echo '```'
+              tail -60 abitest.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: 编译 heng-cli
         run: cargo build --release -p heng-cli

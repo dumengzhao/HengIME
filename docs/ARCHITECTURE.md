@@ -250,6 +250,16 @@ core 的 `heng_sync_user_data()` 导出当前无 UI 入口，是「服务端 + �
 强制要求 `third_party/librime/dist/lib` 下有官方预编译产物，CI 从 librime release
 下载对应平台的包；Linux 有本地产物就用，没有则链发行版包 `librime-dev`。
 
+**CI 的运行时配置来自雾凇的 `full.zip`**。`runtime/` 被 gitignore，CI 上不存在，
+而 `abitest` 的断言要读配置与词库。雾凇原版的文件（词典、`lua/`、符号表、
+双拼 schema）不入库也不该入库——实测 `full.zip` 里 63 个文件与本机逐文件
+md5 相同，且词典跟随上游更新是期望行为；入库的是本项目改过的四个文件
+（见 `third_party/README.md` 的「配置来源的分工」）。
+
+`default.yaml` 的 `schema_list` 在 CI 上裁剪到只剩 `rime_ice`：其余 8 个方案
+（t9 + 7 个双拼）本机在用但未单独入库，librime 遇到缺失的 schema 会让整个
+部署以 `failure` 收场。裁剪由 `tools/ci/make_ci_default.py` 完成。
+
 **Windows job 里导入库必须重建**：`lib64/heng.lib` 是 core 的导入库，core 每新增
 导出后它不会自动更新，链接期报 `LNK2001`。CI 在编完 core 之后、msbuild 之前从
 dll 的 PE 导出表生成 `.def` 再 `lib /def`，这一步不能用仓库内的工具脚本

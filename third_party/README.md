@@ -54,6 +54,30 @@ WeaselServer.exe --导入--> WinSparkle.dll
 | `rime_ice.schema.yaml` | `patches/rime-ice.schema.yaml` | 模糊音全开 |
 | `heng.yaml` | `config-center/shared/heng.yaml` | 衡核心配置 |
 
+## 配置来源的分工
+
+`runtime/rime-shared/`（gitignored）里的文件分两类，获取方式不同：
+
+| 类别 | 内容 | 来源 | 入库 |
+|---|---|---|---|
+| 雾凇原版 | 词典 `cn_dicts/`、`lua/`、符号表、opencc、7 个双拼 schema、`melt_eng` / `radical_pinyin` 词典与 schema | `iDvel/rime-ice` release 的 `full.zip` | 否 |
+| 本项目改动 | 上一节表里那四个文件 | 上节「权威位置」列 | 是 |
+
+**雾凇的部分不入库**。实测 `full.zip` 里 63 个文件与本机逐文件 md5 相同，
+只有 6 个不同：`default.yaml` / `weasel.yaml` / `rime_ice.schema.yaml`
+（本项目改过）与三个词典（版本差异）。入库会让配置与上游脱节，
+而那批文件里没有本项目自己的改动。
+
+**词典跟随上游更新，不锁版本。** 上游一个月至少两次增改词汇与权重
+（`base.dict.yaml` 头部有 `version` 字段，如 `2026-09-11`）。
+锁版本会让 CI 与本机的分词行为分叉——实测只换词典版本、配置不动，
+abitest 仍全部通过，说明词库更新本身不影响行为一致性。
+
+**`lua/` 目录不可省略。** `rime_ice.schema.yaml` 挂了一批 lua 组件
+（`lua_translator@*unicode`、`lua_filter@*corrector` 等），
+缺目录时 librime 静默降级：不报致命错，但分词不出词条，
+表现为 `preedit` 停在 `nihao`、候选数 0。
+
 ## librime
 
 core 通过 `build.rs` 链接 `third_party/librime/dist/lib/rime.lib`。
