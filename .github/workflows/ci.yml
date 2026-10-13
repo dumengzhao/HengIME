@@ -306,6 +306,10 @@ jobs:
       #
       # PATH 类变量（PATH / INCLUDE / LIB / LIBPATH）要去重：
       # vcvars64 只做前置不查重，重复调用会让它越来越长直至溢出。
+      #
+      # 主体包在 try 里、finally 无条件写诊断文件：collect 步骤的 path 里
+      # 只有实际存在的 *.log 才会被上传，诊断文件没生成时 artifact 里
+      # 就只剩一个 dll，外部完全读不到失败原因。
       - name: 配置 MSVC 工具链环境
         shell: pwsh
         run: |
@@ -313,85 +317,93 @@ jobs:
           $diag = New-Object System.Collections.Generic.List[string]
           function Log($m) { $diag.Add($m); Write-Host $m }
 
-          # runner 上的 VS 装在哪个 edition 目录不固定（Enterprise /
-          # Community / BuildTools 都可能），且 ProgramFiles 与 ProgramW6432
-          # 在 pwsh 里取值不稳。逐个候选找，找到即用；都找不到就把
-          # 搜过的路径写进诊断。候选表与「重建 heng.lib」那步保持一致。
-          $candidates = @(
-            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-            "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-            "${env:ProgramW6432}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          )
-          $vcvars = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          Log "### vcvars 候选"
-          $candidates | ForEach-Object { Log "$_ => $(Test-Path $_)" }
-          Log "选中: $vcvars"
-          if (-not $vcvars) { throw "找不到 vcvars64.bat" }
+          try {
+            # runner 上的 VS 装在哪个 edition 目录不固定（Enterprise /
+            # Community / BuildTools 都可能），且 ProgramFiles 与 ProgramW6432
+            # 在 pwsh 里取值不稳。逐个候选找，找到即用；都找不到就把
+            # 搜过的路径写进诊断。候选表与「重建 heng.lib」那步保持一致。
+            $candidates = @(
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+              "${env:ProgramW6432}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+              "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+              "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+            )
+            $vcvars = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            Log "### vcvars 候选"
+            $candidates | ForEach-Object { Log "$_ => $(Test-Path $_)" }
+            Log "选中: $vcvars"
+            if (-not $vcvars) { throw "找不到 vcvars64.bat" }
 
-          # cls 输出换页符 0x0C，用它把前后两段 set 的输出分开。
-          # 按字符码切而不是按 "\f" 正则：cmd 的输出经 Out-String 后
-          # 换行被规范化，正则不可靠，字符码是确定的。
-          # vcvars 参数写错时它会打印 [ERROR...] 却仍返回 0，所以要按文本判错。
-          $raw = & cmd /c "set && cls && `"$vcvars`" && cls && set" 2>&1 | Out-String
-          $ff = [string][char]0x0C
-          $parts = @($raw.Split($ff))
-          if ($parts.Count -lt 3) {
-            $raw | Out-File -Encoding utf8 msvc-env-diag.log
-            throw "vcvars64 输出分段数 $($parts.Count)，预期 3"
-          }
-          $oldEnv = @{}
-          foreach ($line in ($parts[0] -split "`r?`n")) {
-            if ($line -match '^([^=]+)=(.*)$') { $oldEnv[$Matches[1]] = $Matches[2] }
-          }
-          foreach ($line in ($parts[1] -split "`r?`n")) {
-            if ($line -match '^\[ERROR') { Log "vcvars 报错: $line" }
-          }
+            # cls 输出换页符 0x0C，用它把前后两段 set 的输出分开。
+            # 按字符码切而不是按 "\f" 正则：cmd 的输出经 Out-String 后
+            # 换行被规范化，正则不可靠，字符码是确定的。
+            # vcvars 参数写错时它会打印 [ERROR...] 却仍返回 0，所以要按文本判错。
+            $raw = & cmd /c "set && cls && `"$vcvars`" && cls && set" 2>&1 | Out-String
+            $ff = [string][char]0x0C
+            $parts = @($raw.Split($ff))
+            Log "cmd 输出长度 $($raw.Length)，分段数 $($parts.Count)"
+            Log "### vcvars 原始输出前 40 行"
+            ($raw -split "`r?`n" | Select-Object -First 40) | ForEach-Object { Log "  $_" }
+            if ($parts.Count -lt 3) {
+              throw "vcvars64 输出分段数 $($parts.Count)，预期 3"
+            }
+            $oldEnv = @{}
+            foreach ($line in ($parts[0] -split "`r?`n")) {
+              if ($line -match '^([^=]+)=(.*)$') { $oldEnv[$Matches[1]] = $Matches[2] }
+            }
+            Log "旧环境变量数 = $($oldEnv.Count)"
+            foreach ($line in ($parts[1] -split "`r?`n")) {
+              if ($line -match '^\[ERROR') { Log "vcvars 报错: $line" }
+            }
 
-          $pathLike = @("PATH", "INCLUDE", "LIB", "LIBPATH")
-          $envFile = New-Object System.Collections.Generic.List[string]
-          $pathAdds = New-Object System.Collections.Generic.List[string]
-          $n = 0
-          foreach ($line in ($parts[2] -split "`r?`n")) {
-            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
-            $name = $Matches[1]
-            $val = $Matches[2]
-            if ($oldEnv.ContainsKey($name) -and $oldEnv[$name] -ceq $val) { continue }
-            $n++
-            if ($pathLike -contains $name.ToUpperInvariant()) {
-              # 去重且保持原有遮蔽顺序
-              $seen = New-Object System.Collections.Generic.HashSet[string]
-              $kept = @($val -split ';' | Where-Object { $_ -and $seen.Add($_) })
-              $val = ($kept -join ';')
+            $pathLike = @("PATH", "INCLUDE", "LIB", "LIBPATH")
+            $envFile = New-Object System.Collections.Generic.List[string]
+            $pathAdds = New-Object System.Collections.Generic.List[string]
+            $n = 0
+            foreach ($line in ($parts[2] -split "`r?`n")) {
+              if ($line -notmatch '^([^=]+)=(.*)$') { continue }
+              $name = $Matches[1]
+              $val = $Matches[2]
+              if ($oldEnv.ContainsKey($name) -and $oldEnv[$name] -ceq $val) { continue }
+              $n++
+              if ($pathLike -contains $name.ToUpperInvariant()) {
+                # 去重且保持原有遮蔽顺序
+                $seen = New-Object System.Collections.Generic.HashSet[string]
+                $kept = @($val -split ';' | Where-Object { $_ -and $seen.Add($_) })
+                $val = ($kept -join ';')
+              }
+              if ($name -ieq "PATH") {
+                # PATH 走 GITHUB_PATH；其余变量走 GITHUB_ENV。
+                # 分开是因为 runner 对 GITHUB_PATH 会另做路径规范化。
+                $pathAdds.Add($val)
+                Log "PATH => GITHUB_PATH（长度 $($val.Length)）"
+              } else {
+                # heredoc 形式（<<EOF 写法）而不是 `NAME=value`：
+                # INCLUDE / LIB 这类变量的值里可能含换行，单行形式会被截断。
+                $envFile.Add("$name<<HENGVCVARS_EOF")
+                $envFile.Add($val)
+                $envFile.Add("HENGVCVARS_EOF")
+                Log "$name = $val"
+              }
             }
-            if ($name -ieq "PATH") {
-              # PATH 走 GITHUB_PATH；其余变量走 GITHUB_ENV。
-              # 分开是因为 runner 对 GITHUB_PATH 会另做路径规范化。
-              $pathAdds.Add($val)
-            } else {
-              # heredoc 形式（<<EOF 写法）而不是 `NAME=value`：
-              # INCLUDE / LIB 这类变量的值里可能含换行，单行形式会被截断。
-              $envFile.Add("$name<<HENGVCVARS_EOF")
-              $envFile.Add($val)
-              $envFile.Add("HENGVCVARS_EOF")
-              Log "$name = $val"
+            Log "导出变量数 = $n（其中 PATH 走 GITHUB_PATH，其余走 GITHUB_ENV）"
+            if ($envFile.Count -eq 0 -and $pathAdds.Count -eq 0) {
+              throw "vcvars64 没有带来任何环境变量变化"
+            }
+            # 必须真的写文件：写在磁盘上的才跨步骤生效，写 $env: 只在本步骤有效。
+            if ($envFile.Count -gt 0) {
+              Add-Content -FilePath $env:GITHUB_ENV -Value $envFile -Encoding utf8
+            }
+            foreach ($p in $pathAdds) {
+              Add-Content -FilePath $env:GITHUB_PATH -Value $p -Encoding utf8
             }
           }
-          Log "导出变量数 = $n（其中 PATH 走 GITHUB_PATH，其余走 GITHUB_ENV）"
-          if ($envFile.Count -eq 0 -and $pathAdds.Count -eq 0) {
-            throw "vcvars64 没有带来任何环境变量变化"
+          finally {
+            $diag | Out-File -Encoding utf8 msvc-env-diag.log
+            $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
           }
-          # 必须真的写文件：写在磁盘上的才跨步骤生效，写 $env: 只在本步骤有效。
-          if ($envFile.Count -gt 0) {
-            Add-Content -FilePath $env:GITHUB_ENV -Value $envFile -Encoding utf8
-          }
-          foreach ($p in $pathAdds) {
-            Add-Content -FilePath $env:GITHUB_PATH -Value $p -Encoding utf8
-          }
-          $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
-          $diag | Out-File -Encoding utf8 msvc-env-diag.log
 
       - name: 解压 boost 1.84
         shell: pwsh
