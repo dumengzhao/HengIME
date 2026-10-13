@@ -323,22 +323,20 @@ jobs:
           function Log($m) { $m | Tee-Object -FilePath $log -Append }
 
           # 入库的 boost-project-config.jam 里 `using msvc` 带的是本机绝对路径
-          # （BuildTools 14.44），runner 上是Enterprise，路径不同。这里按
-          # msvc-dev-cmd 注入的环境变量重写，让 b2 用 runner 真实的工具链。
+          # （BuildTools 14.44）+ <setup> 指向本机 vcvarsall.bat，
+          # runner 上是 Enterprise，两个路径都不存在。这里按
+          # msvc-dev-cmd 注入的 VCToolsInstallDir 重写，只留编译器与 archiver：
+          # 工具链环境变量已经在环境里，不需要 <setup>。
           $root = "third_party/src/weasel/deps/boost_1_84_0"
           $cl = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\cl.exe"
           $lib = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\lib.exe"
-          $vcAux = Split-Path (Split-Path $env:VCToolsInstallDir -Parent) -Parent
-          $vcvars = Join-Path $vcAux "Auxiliary\Build\vcvarsall.bat"
           Log "VCToolsInstallDir = $env:VCToolsInstallDir"
           Log "cl.exe  = $cl => $(Test-Path $cl)"
           Log "lib.exe = $lib => $(Test-Path $lib)"
-          Log "vcvars  = $vcvars => $(Test-Path $vcvars)"
           if (-not (Test-Path $cl)) { throw "找不到 cl.exe" }
-          if (-not (Test-Path $vcvars)) { throw "找不到 vcvarsall.bat" }
           @"
           import option ;
-          using msvc : 14.3 : "$($cl -replace '\\','/')" : <setup>"$($vcvars -replace '\\','/')" <archiver>"$($lib -replace '\\','/')" ;
+          using msvc : 14.3 : "$($cl -replace '\\','/')" : <archiver>"$($lib -replace '\\','/')" ;
           option.set keep-going : false ;
           "@ | Set-Content -Path "$root/project-config.jam" -Encoding ASCII
 
@@ -841,14 +839,36 @@ jobs:
           # 后者只做 `cp -RP Sparkle/build/Release/Sparkle.framework Frameworks/`，
           # 不负责编译，而 Sparkle 的产物要 xcodebuild 才会出现。
           # 目标名（$(SPARKLE_FRAMEWORK)）那条规则还会自己 git submodule update，
-          # 比 make sparkle 更完整。
+          # 比make sparkle 更完整。
           if ! make Frameworks/Sparkle.framework >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1; then
             echo "### make Frameworks/Sparkle.framework 失败" >> "$GITHUB_WORKSPACE/mac-setup.log"
             exit 1
           fi
-          test -d Frameworks/Sparkle.framework
-          ls data/opencc data/plum Frameworks >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
-          cat "$GITHUB_WORKSPACE/mac-setup.log"
+
+          # package/add_data_files 里有 `for file in data/plum/*`——它把该目录
+          # 下所有文件注册进 pbxproj 的「Copy Shared Support Files」。
+          # plum preset 只装了它那 8 个包（繁体注音那套），缺雾凇的
+          # t9.schema.yaml / symbols_v.yaml / symbols_caps_v.yaml，
+          # xcodebuild 会报 "The file couldn't be opened because there is
+          # no such file"。把雾凇的方案与符号表铺进同一个目录。
+          curl -fL --retry 3 -o "$GITHUB_WORKSPACE/rime-ice-full.zip" \
+            "https://github.com/iDvel/rime-ice/releases/latest/download/full.zip"
+          unzip -q -o "$GITHUB_WORKSPACE/rime-ice-full.zip" -d rime-ice
+          for f in t9.schema.yaml symbols_v.yaml symbols_caps_v.yaml \
+                   cn_dicts en_dicts lua opencc others; do
+            test -e "rime-ice/$f" || { echo "雾凇包缺 $f" >> "$GITHUB_WORKSPACE/mac-setup.log"; exit 1; }
+          done
+          cp rime-ice/*.yaml data/plum/ 2>/dev/null || true
+          cp -R rime-ice/cn_dicts rime-ice/en_dicts rime-ice/lua rime-ice/opencc rime-ice/others data/plum/
+          # 雾凇的 default.yaml 列了 9 个方案，但 squirrel 的 Squirrel.app 里
+          # 只随包带了 rime_ice 那套，其余 8 个（t9 + 7 个双拼）没有对应
+          # schema 文件的话 librime 部署会以failure 收场。裁到只留 rime_ice。
+          bash "$GITHUB_WORKSPACE/tools/ci/make_ci_default.sh" \
+            data/plum/default.yaml data/plum/default.yaml
+          ls data/plum | head -30 >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
+          test -f data/plum/t9.schema.yaml
+          test -f data/plum/symbols_v.yaml
+          test -f data/plum/symbols_caps_v.yaml
 
       - name: 编译 Squirrel
         run: |
