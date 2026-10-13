@@ -307,12 +307,16 @@ jobs:
       # PATH 类变量（PATH / INCLUDE / LIB / LIBPATH）要去重：
       # vcvars64 只做前置不查重，重复调用会让它越来越长直至溢出。
       #
-      # 主体包在 try 里、finally 无条件写诊断文件：collect 步骤的 path 里
-      # 只有实际存在的 *.log 才会被上传，诊断文件没生成时 artifact 里
-      # 就只剩一个 dll，外部完全读不到失败原因。
+      # 主体包在 try 里、finally 无条件写诊断文件；进入 try 之前先写一份
+      # 空档快照，这样连「脚本在 try 之前就崩了」（解析错误、
+      # function 定义失败这类）也能留下痕迹——纯 finally 覆盖不到那种情况，
+      # 上一轮就是这么零信息的。
       - name: 配置 MSVC 工具链环境
         shell: pwsh
         run: |
+          $diagPath = Join-Path $env:GITHUB_WORKSPACE "msvc-env-diag.log"
+          "### 进入配置 MSVC 工具链环境步骤" |
+            Out-File -FilePath $diagPath -Encoding utf8
           $ErrorActionPreference = 'Stop'
           $diag = New-Object System.Collections.Generic.List[string]
           function Log($m) { $diag.Add($m); Write-Host $m }
@@ -340,10 +344,18 @@ jobs:
             # 按字符码切而不是按 "\f" 正则：cmd 的输出经 Out-String 后
             # 换行被规范化，正则不可靠，字符码是确定的。
             # vcvars 参数写错时它会打印 [ERROR...] 却仍返回 0，所以要按文本判错。
+            #
+            # 这条命令要把 stderr 也收进输出（2>&1），所以先临时把
+            # ErrorActionPreference 降到 Continue：Stop 模式下 cmd 往 stderr
+            # 写的每一行都会变成 ErrorRecord 并中断整条管线，
+            # 而 vcvars 的正常输出里就有这类行。
+            $ErrorActionPreference = 'Continue'
             $raw = & cmd /c "set && cls && `"$vcvars`" && cls && set" 2>&1 | Out-String
+            $cmdExit = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
             $ff = [string][char]0x0C
             $parts = @($raw.Split($ff))
-            Log "cmd 输出长度 $($raw.Length)，分段数 $($parts.Count)"
+            Log "cmd 退出码 $cmdExit，输出长度 $($raw.Length)，分段数 $($parts.Count)"
             Log "### vcvars 原始输出前 40 行"
             ($raw -split "`r?`n" | Select-Object -First 40) | ForEach-Object { Log "  $_" }
             if ($parts.Count -lt 3) {
@@ -401,8 +413,15 @@ jobs:
             }
           }
           finally {
-            $diag | Out-File -Encoding utf8 msvc-env-diag.log
-            $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            # Append 而不是 Out-File：前面的进入快照已经写了首行。
+            # 用绝对路径，且两条都包 ErrorAction 覆盖——finally 里再抛异常
+            # 会替换掉真正的失败原因。
+            try {
+              $diag | Out-File -Append -FilePath $diagPath -Encoding utf8
+              $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            } catch {
+              Write-Host "诊断落盘失败: $_"
+            }
           }
 
       - name: 解压 boost 1.84
@@ -804,6 +823,28 @@ jobs:
             exit /b %RC%
           )
 
+      # 日志先集中到固定目录，再由下面一步整体上传。
+      #
+      # 不用 `*.log` 通配：upload-artifact@v6 的 README 写明
+      # 「the least common ancestor of all the search paths will be used
+      # as the root directory」——清单里既有工作区根的 *.log 又有
+      # third_party/src/weasel/output/ 下的文件时，LCA 是工作区根，
+      # 实测只有 output/WinSparkle.dll 一项进了 artifact，
+      # 所有 .log 一个都没上传，外部完全看不到失败原因。
+      # 集中到 _ci-logs/ 后清单里只剩同级的两类路径，规则简单可预期。
+      - name: 收集日志
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path _ci-logs | Out-Null
+          $n = 0
+          Get-ChildItem -Path . -Filter *.log -File -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName _ci-logs/ -Force; $n++ }
+          Get-ChildItem -Path third_party/src/weasel -Filter *.log -File -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName _ci-logs/ -Force; $n++ }
+          Write-Host "收集到 $n 个日志文件"
+          Get-ChildItem _ci-logs | ForEach-Object { Write-Host "  $($_.Name) $($_.Length)" }
+
       - name: 收集产物与日志
         # 合并成一步：upload-artifact 在同一 job 内并发上传会互相取消，
         # 拆成「收集产物」+「上传日志」两步时后者静默变成 no-op，
@@ -819,9 +860,7 @@ jobs:
             third_party/src/weasel/output/heng_core.dll
             third_party/src/weasel/output/rime.dll
             third_party/src/weasel/output/WinSparkle.dll
-            third_party/src/weasel/msbuild-x64.log
-            third_party/src/weasel/weasel-build.log
-            *.log
+            _ci-logs/
           if-no-files-found: ignore
 
   # Linux 外壳：自研 fcitx5 addon，源码已入库，无需补丁重放。
