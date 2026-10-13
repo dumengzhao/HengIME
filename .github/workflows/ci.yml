@@ -53,7 +53,7 @@ jobs:
             rust-target: aarch64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装 librime（Windows）
         if: runner.os == 'Windows'
@@ -261,7 +261,7 @@ jobs:
 
       - name: 上传日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: logs-core-${{ matrix.name }}
           path: "*.log"
@@ -272,7 +272,7 @@ jobs:
     name: 外壳 Windows (weasel)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装 librime
         shell: pwsh
@@ -297,10 +297,101 @@ jobs:
           git apply --whitespace=nowarn ../../../patches/weasel-0.17.4-heng-m1.patch
           Copy-Item ../../../patches/env.bat .
 
-      - name: 安装 boost 1.84
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+      # 原 ilammy/msvc-dev-cmd@v1 的替代实现。该 action 的 v1.13.0
+      # （v1 tag 指向它）与 master 分支的 action.yml 都仍是 `using: node20`，
+      # 而 GitHub 已移除 runner 上的 Node 20，官方没有 node24 版本可升。
+      # 它做的事只有一件：调 vcvars64 拿到 VS 环境变量，差集写进
+      # GITHUB_ENV / GITHUB_PATH。这里照它的做法（lib.js 的 setupMSVCDevCmd）
+      # 用 pwsh 复现：set && vcvars64 && set，前后两份环境取差集。
+      #
+      # PATH 类变量（PATH / INCLUDE / LIB / LIBPATH）要去重：
+      # vcvars64 只做前置不查重，重复调用会让它越来越长直至溢出。
+      - name: 配置 MSVC 工具链环境
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $diag = New-Object System.Collections.Generic.List[string]
+          function Log($m) { $diag.Add($m); Write-Host $m }
+
+          # runner 上的 VS 装在哪个 edition 目录不固定（Enterprise /
+          # Community / BuildTools 都可能），且 ProgramFiles 与 ProgramW6432
+          # 在 pwsh 里取值不稳。逐个候选找，找到即用；都找不到就把
+          # 搜过的路径写进诊断。候选表与「重建 heng.lib」那步保持一致。
+          $candidates = @(
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramW6432}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          $vcvars = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          Log "### vcvars 候选"
+          $candidates | ForEach-Object { Log "$_ => $(Test-Path $_)" }
+          Log "选中: $vcvars"
+          if (-not $vcvars) { throw "找不到 vcvars64.bat" }
+
+          # cls 输出换页符 0x0C，用它把前后两段 set 的输出分开。
+          # 按字符码切而不是按 "\f" 正则：cmd 的输出经 Out-String 后
+          # 换行被规范化，正则不可靠，字符码是确定的。
+          # vcvars 参数写错时它会打印 [ERROR...] 却仍返回 0，所以要按文本判错。
+          $raw = & cmd /c "set && cls && `"$vcvars`" && cls && set" 2>&1 | Out-String
+          $ff = [string][char]0x0C
+          $parts = @($raw.Split($ff))
+          if ($parts.Count -lt 3) {
+            $raw | Out-File -Encoding utf8 msvc-env-diag.log
+            throw "vcvars64 输出分段数 $($parts.Count)，预期 3"
+          }
+          $oldEnv = @{}
+          foreach ($line in ($parts[0] -split "`r?`n")) {
+            if ($line -match '^([^=]+)=(.*)$') { $oldEnv[$Matches[1]] = $Matches[2] }
+          }
+          foreach ($line in ($parts[1] -split "`r?`n")) {
+            if ($line -match '^\[ERROR') { Log "vcvars 报错: $line" }
+          }
+
+          $pathLike = @("PATH", "INCLUDE", "LIB", "LIBPATH")
+          $envFile = New-Object System.Collections.Generic.List[string]
+          $pathAdds = New-Object System.Collections.Generic.List[string]
+          $n = 0
+          foreach ($line in ($parts[2] -split "`r?`n")) {
+            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
+            $name = $Matches[1]
+            $val = $Matches[2]
+            if ($oldEnv.ContainsKey($name) -and $oldEnv[$name] -ceq $val) { continue }
+            $n++
+            if ($pathLike -contains $name.ToUpperInvariant()) {
+              # 去重且保持原有遮蔽顺序
+              $seen = New-Object System.Collections.Generic.HashSet[string]
+              $kept = @($val -split ';' | Where-Object { $_ -and $seen.Add($_) })
+              $val = ($kept -join ';')
+            }
+            if ($name -ieq "PATH") {
+              # PATH 走 GITHUB_PATH；其余变量走 GITHUB_ENV。
+              # 分开是因为 runner 对 GITHUB_PATH 会另做路径规范化。
+              $pathAdds.Add($val)
+            } else {
+              # heredoc 形式（<<EOF 写法）而不是 `NAME=value`：
+              # INCLUDE / LIB 这类变量的值里可能含换行，单行形式会被截断。
+              $envFile.Add("$name<<HENGVCVARS_EOF")
+              $envFile.Add($val)
+              $envFile.Add("HENGVCVARS_EOF")
+              Log "$name = $val"
+            }
+          }
+          Log "导出变量数 = $n（其中 PATH 走 GITHUB_PATH，其余走 GITHUB_ENV）"
+          if ($envFile.Count -eq 0 -and $pathAdds.Count -eq 0) {
+            throw "vcvars64 没有带来任何环境变量变化"
+          }
+          # 必须真的写文件：写在磁盘上的才跨步骤生效，写 $env: 只在本步骤有效。
+          if ($envFile.Count -gt 0) {
+            Add-Content -FilePath $env:GITHUB_ENV -Value $envFile -Encoding utf8
+          }
+          foreach ($p in $pathAdds) {
+            Add-Content -FilePath $env:GITHUB_PATH -Value $p -Encoding utf8
+          }
+          $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $diag | Out-File -Encoding utf8 msvc-env-diag.log
 
       - name: 解压 boost 1.84
         shell: pwsh
@@ -362,7 +453,8 @@ jobs:
           # 也不提缺了任何东西——只有 1024 targets 里 105 个在动、
           # 组件配置表写着 serialization: building 却没有一个 .obj 编出来
           # 这两点对得上。
-          # msvc-dev-cmd 注入的是本步骤的环境，不影响 b2 自己的 action 脚本。
+          # 前面「配置 MSVC 工具链环境」注入的是本步骤的进程环境，
+          # b2 在自己的 action 脚本里另起 cmd，仍要自己找 setup 脚本。
           $root = "third_party/src/weasel/deps/boost_1_84_0"
           $cl = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\cl.exe"
           $lib = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\lib.exe"
@@ -701,11 +793,11 @@ jobs:
           )
 
       - name: 收集产物与日志
-        # 合并成一步：upload-artifact@v4 在同一 job 内并发上传会互相取消，
-        # 拆成「收集产物」+「上传日志」两步时后者静默变成no-op，
+        # 合并成一步：upload-artifact 在同一 job 内并发上传会互相取消，
+        # 拆成「收集产物」+「上传日志」两步时后者静默变成 no-op，
         # 表现为步骤 success 但 artifact 列表里没有它。
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: heng-windows
           path: |
@@ -725,7 +817,7 @@ jobs:
     name: 外壳 Linux (fcitx5)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装依赖
         run: |
@@ -765,7 +857,7 @@ jobs:
 
       - name: 收集产物与日志
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: heng-linux
           path: |
@@ -782,7 +874,7 @@ jobs:
     # 但那只在运行时分支，编译期所有分支都要过——SDK 里没有这个类就编不过。
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装 librime
         run: |
@@ -1002,9 +1094,9 @@ jobs:
           fi
 
       - name: 收集产物与日志
-        # 与 shell-windows 同理：v4 在同一 job 内并发上传会互相取消。
+        # 与 shell-windows 同理：upload-artifact 在同一 job 内并发上传会互相取消。
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: heng-macos
           path: |
