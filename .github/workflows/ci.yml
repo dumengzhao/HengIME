@@ -806,24 +806,45 @@ jobs:
           $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
           $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
 
-          # 落盘 def 前 40 行与总行数：lib.exe 的失败原因几乎都指向 def 内容，
-          # 而 CI 上这份 def 由当轮编出的 dll 生成，本机无法预先复现。
+          # lib.exe 的失败原因几乎都指向 def 内容，而 CI 上这份 def 由当轮
+          # 编出的 dll 生成，本机无法预先复现，所以落盘备查。
           $defLines = [System.IO.File]::ReadAllLines("$libDir/heng.def")
           $diag.Add("def 行数 = $($defLines.Count)")
           $diag.Add("def 前 40 行:")
           $defLines[0..([Math]::Min(39, $defLines.Count - 1))] |
             ForEach-Object { $diag.Add("  [$_]") }
-          # 展开后真正交给 cmd 的命令行：路径含空格且用 && 串联时，
-          # 引号或重定向位置写错会整条失效，而症状只是退出码非零。
-          $libCmd = "call `"$vcvars`" >nul && cd /d `"$libDir`" && lib /def:heng.def /machine:X64 /out:heng.lib 2>&1"
-          $diag.Add("cmd 命令行: $libCmd")
+
+          # 不在 cmd 里 cd 目录，/def 与 /out 都给绝对路径。
+          #
+          # 原写法是 cd /d "third_party/src/weasel/lib64"（相对路径）后
+          # lib /def:heng.lib。本机复现出与 CI 相同的状态：
+          # lib.exe 自己 exit=0 并照常打印版本信息，但库里没有文件——
+          # cmd 的当前目录不是 lib64，def 与输出被写到了别处，
+          # 而后续步骤只看 $LASTEXITCODE，于是报出一个与 lib 无关的失败。
+          # CI 上还会先撞上 "The input line is too long." /
+          # "The syntax of the command is incorrect."：
+          # vcvars 的 90 字符绝对路径、cd 的相对路径、&& 与重定向串在一行，
+          # 长度逼近 cmd 的命令行上限，解析阶段就失败，lib 根本没被调用。
+          #
+          # 拆掉 cd 与长路径后，交给 cmd 的只剩一条短命令。
+          $defAbs = (Resolve-Path "$libDir/heng.def").Path
+          $libAbs = Join-Path $libDir "heng.lib"
+          $diag.Add("libDir: $libDir")
+          $diag.Add("def 绝对路径: $defAbs")
+          $diag.Add("lib 输出绝对路径: $libAbs")
           $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
           $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
 
           $ErrorActionPreference = 'Continue'
-          $libOut = & cmd /c $libCmd 2>&1 | Out-String
+          $libCmd = "lib /def:`"$defAbs`" /machine:X64 /out:`"$libAbs`" 2>&1"
+          $diag.Add("cmd 命令行: $libCmd")
+          $libOut = & cmd /c "call `"$vcvars`" >nul && $libCmd" 2>&1 | Out-String
           $libExit = $LASTEXITCODE
           $ErrorActionPreference = 'Stop'
+          $diag.Add("退出码: $libExit")
+          $diag.Add("lib 输出: $libOut")
+          $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
+
           "=== lib.exe 输出（退出码 $libExit）===" | Out-File -Append heng-lib-diag.log -Encoding utf8
           if ($libOut) { $libOut | Out-File -Append heng-lib-diag.log -Encoding utf8 }
           "libDir 内容:" | Out-File -Append heng-lib-diag.log -Encoding utf8
@@ -834,8 +855,8 @@ jobs:
             "lib.exe 退出码 $libExit" | Out-File -Append heng-lib-diag.log -Encoding utf8
             throw "lib.exe 失败，退出码 $libExit"
           }
-          if (-not (Test-Path "$libDir/heng.lib")) {
-            "lib.exe 跑完但没有 heng.lib" | Out-File -Append heng-lib-diag.log -Encoding utf8
+          if (-not (Test-Path $libAbs)) {
+            "lib.exe 退出码 0 但 $libAbs 不存在" | Out-File -Append heng-lib-diag.log -Encoding utf8
             throw "heng.lib 未生成"
           }
 
