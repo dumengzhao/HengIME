@@ -825,20 +825,56 @@ jobs:
           # "The syntax of the command is incorrect."：
           # vcvars 的 90 字符绝对路径、cd 的相对路径、&& 与重定向串在一行，
           # 长度逼近 cmd 的命令行上限，解析阶段就失败，lib 根本没被调用。
+          # 拆掉 cd 后交给 cmd 的只剩一条短命令。
           #
-          # 拆掉 cd 与长路径后，交给 cmd 的只剩一条短命令。
+          # /out 也要绝对路径：Join-Path 的结果仍是相对路径，
+          # cmd 把它当字面量传给 lib，产物落在别处，后续 Test-Path 判不到。
           $defAbs = (Resolve-Path "$libDir/heng.def").Path
-          $libAbs = Join-Path $libDir "heng.lib"
+          $libAbs = [System.IO.Path]::GetFullPath((Join-Path $libDir "heng.lib"))
           $diag.Add("libDir: $libDir")
           $diag.Add("def 绝对路径: $defAbs")
           $diag.Add("lib 输出绝对路径: $libAbs")
           $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
           $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
 
+          # lib.exe 的位置从 vcvars 之后的 VCToolsInstallDir 拼出来，
+          # 不靠 PATH 找，也不依赖前序步骤注入的环境变量。
+          #
+          # CI 的 Enterprise vcvars 跑完后 lib 仍不在 PATH 上，而 vcvars 的
+          # 输出被 >nul 吞掉，于是 cmd 报出一个与真实原因无关的
+          # "The syntax of the command is incorrect."——lib 根本没被调用
+          # （本机 BuildTools 的 vcvars 能给到 lib，所以只有 CI 复现；
+          # vcvars 路径长只是让报错更容易被误读成「命令行过长」）。
+          #
+          # 本步骤自己跑一次 vcvars 取 VCToolsInstallDir：跨步骤注入的那份
+          # 虽然同源，但一旦上游导出失败，这里会静默退化成 $null。
           $ErrorActionPreference = 'Continue'
-          $libCmd = "lib /def:`"$defAbs`" /machine:X64 /out:`"$libAbs`" 2>&1"
+          $vcOut = & cmd /c "call `"$vcvars`" >nul && set" 2>&1 | Out-String
+          $vcExit = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          $toolsRoot = $null
+          foreach ($line in ($vcOut -split "`r?`n")) {
+            if ($line -match '^VCToolsInstallDir=(.*)$') { $toolsRoot = $Matches[1] }
+          }
+          $diag.Add("vcvars 退出码 $vcExit，输出长度 $($vcOut.Length)")
+          $diag.Add("VCToolsInstallDir = $toolsRoot")
+          $libExe = if ($toolsRoot) {
+            Join-Path $toolsRoot "bin\Hostx64\x64\lib.exe"
+          } else { $null }
+          $diag.Add("lib.exe = $libExe  存在=$(if ($libExe) { Test-Path $libExe } else { '无 VCToolsInstallDir' })")
+          $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
+          if (-not $libExe -or -not (Test-Path $libExe)) {
+            $diag.Add("vcvars 输出前 20 行:")
+            ($vcOut -split "`r?`n" | Select-Object -First 20) |
+              ForEach-Object { $diag.Add("  $_") }
+            $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
+            throw "找不到 lib.exe（VCToolsInstallDir = $toolsRoot）"
+          }
+
+          $libCmd = "`"$libExe`" /def:`"$defAbs`" /machine:X64 /out:`"$libAbs`""
           $diag.Add("cmd 命令行: $libCmd")
-          $libOut = & cmd /c "call `"$vcvars`" >nul && $libCmd" 2>&1 | Out-String
+          $diag.Add("cmd 命令行长度: $($libCmd.Length)")
+          $libOut = & cmd /c $libCmd 2>&1 | Out-String
           $libExit = $LASTEXITCODE
           $ErrorActionPreference = 'Stop'
           $diag.Add("退出码: $libExit")
