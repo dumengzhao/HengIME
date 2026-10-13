@@ -390,16 +390,18 @@ jobs:
           }
           @"
           import option ;
-          using msvc : 14.3 : "$($cl -replace '\\','/')" : <setup>"$(($setup -replace '\\','/'))" <archiver>"$($lib -replace '\\','/')" ;
+          using msvc : 14.3 : "$($cl -replace '\\','/')" : <setup>"$($setup -replace '\\','/')" <archiver>"$($lib -replace '\\','/')" ;
           option.set keep-going : false ;
           "@ | Set-Content -Path "$root/project-config.jam" -Encoding ASCII
 
           # 官方 7z 包只有 boost 源码，没有编好的 .lib，而 weasel 要链
-          # boost::serialization / boost::thread / boost::chrono。
-          # 参数照抄 weasel 自带 build.bat 的 BJAM_OPTIONS_X64（那边编 x86 +
-          # x64 两轮，CI 只要 x64）。--with-serialization 会自动带上
-          # thread / chrono / wserialization，四个正是本机 stage/lib 里
-          # 实际产出、且 weasel 实际链接的那几个。
+          # boost::thread / boost::serialization / boost::chrono
+          # （include/PipeChannel.h 与 WeaselIPCData.h 用了 boost::thread、
+          # boost::interprocess、boost::serialization）。
+          #
+          # --with-serialization 只带出 serialization 与 wserialization，
+          # thread / chrono 必须显式列出——本机 bin.v2/libs 下就是
+          # chrono / serialization / thread / wserialization 这四个目录。
           # 不加 --with-iostreams：它要 zlib / bzip2，源码包里没有。
           $nproc = [int]$env:NUMBER_OF_PROCESSORS
           if ($nproc -le 0) { $nproc = 2 }
@@ -409,7 +411,7 @@ jobs:
             "toolset=msvc-14.3",
             "define=BOOST_USE_WINAPI_VERSION=0x0603",
             "link=static", "runtime-link=static",
-            "--with-serialization",
+            "--with-serialization", "--with-thread",
             "--build-type=complete",
             "stage"
           )
@@ -432,10 +434,24 @@ jobs:
             Log "b2 无任何输出"
           }
           if ($rc -ne 0) { throw "b2 失败，退出码 $rc" }
-          $libs = @(Get-ChildItem "$root/stage/lib" -Filter "*1_84.lib")
+          # 按名字核对而不是数个数：只编 --with-serialization 时同样是 4 个 .lib
+          # （serialization / wserialization 各两套 CRT 变体），
+          # 但缺的正是 WeaselTSF 要链的 libboost_thread。
+          $libs = @(Get-ChildItem "$root/stage/lib" -Filter "*.lib")
           Log "产出 lib 数 = $($libs.Count)"
           $libs | ForEach-Object { Log $_.Name }
-          if ($libs.Count -lt 4) { throw "boost 静态库不足 4 个，weasel 链接会缺" }
+          # msbuild 的 Release|x64 是动态 CRT，要 mt-s- 那一套
+          $need = @(
+            "libboost_thread-vc143-mt-s-x64-1_84.lib",
+            "libboost_chrono-vc143-mt-s-x64-1_84.lib",
+            "libboost_serialization-vc143-mt-s-x64-1_84.lib",
+            "libboost_wserialization-vc143-mt-s-x64-1_84.lib"
+          )
+          $names = @($libs | ForEach-Object { $_.Name })
+          $missing = @($need | Where-Object { $names -notcontains $_ })
+          if ($missing.Count -gt 0) {
+            throw "boost 缺以下库（链接期会 LNK1104）：$($missing -join ', ')"
+          }
 
       - name: 生成 weasel.props
         shell: pwsh
