@@ -295,6 +295,18 @@ HENG_API int heng_set_window_handler(heng_window_handler_fn cb, void* ctx);
  * 建议在显示器插拔 / 缩放变化时重新上报。 */
 HENG_API void heng_set_screen_info(unsigned int width, unsigned int height, float scale);
 
+/* 外壳上报所在显示器的工作区上下边界（设备像素，**左上原点**，与 core
+ * 三端统一坐标系一致）。仅 macOS 需要——另两端能直接查系统 API。
+ *
+ * 展开候选面板时用它判断「光标下方还放不放下」：放不下就向上翻转。
+ * Windows 用 MonitorFromPoint + GetMonitorInfoW 的 rcWork，Linux 用 x11rb
+ * randr 查 CRTC；macOS 的等价信息只能在主线程从 AppKit 取，故由外壳喂。
+ *
+ * 应上报 NSScreen.visibleFrame（已排除 Dock 与菜单栏），不要上报 frame：
+ * 整屏高度会让光标贴底时误判「下方还有空间」，面板实际被 Dock 盖住。
+ * 显示器插拔 / Dock 显隐 / 菜单栏高度变化时应重新上报。 */
+HENG_API void heng_set_work_area(int top, int bottom);
+
 /* 外壳在主线程收到指针事件后调用，core 排空队列转成 Slint 事件。
  * x/y/dx/dy 均为**逻辑像素**（DPI 换算由 core 统一做）。
  * kind 取值：0=移动 1=按下 2=抬起 3=滚轮 4=指针离开 5=窗口关闭请求。

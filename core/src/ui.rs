@@ -208,7 +208,10 @@ fn emit_commit(handle: u64, text: &str) {
         bytes.push(0); // C 字符串结尾
         cb(ctx as *mut core::ffi::c_void, handle, bytes.as_ptr());
     } else {
-        PENDING_UI_COMMITS.lock().unwrap().insert(handle, text.to_string());
+        PENDING_UI_COMMITS
+            .lock()
+            .unwrap()
+            .insert(handle, text.to_string());
     }
 }
 
@@ -1383,7 +1386,16 @@ fn work_area_at(x: i32, y: i32) -> Option<(i32, i32)> {
     Some((0, screen.height_in_pixels as i32))
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+/// macOS：工作区由外壳经 heng_set_work_area 上报（取 NSScreen.visibleFrame，
+/// 已排除 Dock 与菜单栏），语义对标 Windows 的 rcWork / Linux 的 CRTC。
+/// 未上报时返回 None —— 此时维持向下展开，与其余平台「查不到就不翻转」的约定一致。
+#[cfg(target_os = "macos")]
+fn work_area_at(_x: i32, _y: i32) -> Option<(i32, i32)> {
+    work_area_env().or_else(|| mac_backend::work_area())
+}
+
+/// 其余未适配的平台：恒不可用（维持向下展开）。
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn work_area_at(_x: i32, _y: i32) -> Option<(i32, i32)> {
     None
 }
@@ -1443,6 +1455,25 @@ pub mod mac_backend {
     /// 外壳缓存的屏幕信息，由 UI 线程查询时同步读取。
     /// 外壳在主线程首次回调时填好，之后就不再问 —— 避免每次布局都同步往返。
     static SCREEN: Mutex<Option<(i32, i32, f32)>> = Mutex::new(None);
+
+    /// 所在显示器的工作区上下边界（设备 px，**左上原点**，与 core 三端统一坐标系一致）。
+    /// 由外壳从 NSScreen.visibleFrame 换算后经 heng_set_work_area 上报。
+    ///
+    /// 为什么单独存而不是用 SCREEN 的height 代替：visibleFrame 排除了
+    /// Dock 与菜单栏，而屏幕整高包含它们。光标贴底时用整高判定会以为
+    /// 「下方还有空间」，实际面板会被 Dock 盖住/溢出屏幕。
+    static WORK_AREA: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+
+    /// 外壳调用：上报工作区上下边界（设备 px，左上原点）。主线程可随时调
+    /// （显示器插拔 / Dock 显隐 / 菜单栏高度变化时重新上报）。
+    pub fn set_work_area(top: i32, bottom: i32) {
+        *WORK_AREA.lock().unwrap() = Some((top, bottom));
+    }
+
+    /// 工作区上下边界；未上报时 None（此时不翻转，维持向下展开）。
+    pub fn work_area() -> Option<(i32, i32)> {
+        *WORK_AREA.lock().unwrap()
+    }
 
     /// 外壳调用：上报主屏尺寸与缩放（主线程，随时可调）。
     pub fn set_screen_info(w: i32, h: i32, scale: f32) {
@@ -3188,7 +3219,11 @@ fn ui_log(msg: &str) {
     use std::io::Write;
     let path = std::env::temp_dir().join("heng-ui.log");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{msg}");
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let _ = writeln!(f, "{ts:.6} {msg}");
     }
 }
 
@@ -3482,7 +3517,12 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         // 让候选窗和输入文字之间留一条呼吸缝（完全贴住看着像粘连）。
         const CARET_GAP: i32 = 4;
         let y_eff = if flip.get() {
-            (last_caret_top.get() - (h_total as f32 / scale).round() as i32).max(flip_top.get())
+            // flip_top 来自 work_area，是**设备像素**；last_caret_top 与
+            // h_total/scale 都是**点** —— 直接比较会因量纲错而把窗口顶边
+            // 强行压到设备像素的 flip_top 上（尺度差一个 scale）。
+            // 这里折回点域再取 max，保证「不越过工作区上边界」这条夹紧生效。
+            let flip_top_pt = (flip_top.get() as f32 / scale).round() as i32;
+            (last_caret_top.get() - (h_total as f32 / scale).round() as i32).max(flip_top_pt)
         } else {
             y + CARET_GAP
         };
@@ -3516,7 +3556,13 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
             }
             backend.blit(0, &buf, w, h_total);
         }
-        *visible.borrow_mut() = map || *visible.borrow();
+        // map=false 只代表「本次不唤醒」，不代表窗口该被标记为隐藏 ——
+        // 早期版本写成 `*visible = map` 会把一次 map=false 变成永久不可见，
+        // 之后任何 KeepVisible 分支都进不去（条件含 *visible.borrow()），
+        // 窗口再也回不来。现在只在真正 map=true 时置位。
+        if map {
+            *visible.borrow_mut() = true;
+        }
     };
 
     // ==================== 面板选词（空格/回车 与 数字键共用） ====================
@@ -4024,18 +4070,33 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         // 输入串变化才收起面板（↓/↑ 导航不改 preedit，面板保持）
                         let input_changed = *last_preedit.borrow() != snapshot.preedit;
                         *last_preedit.borrow_mut() = snapshot.preedit.clone();
-                        if snapshot.candidates.is_empty() {
+                        // 只有「既无候选又无组合串」才藏窗。
+                        // 拼音输入存在合法的「有组合串、无候选」中间态（某些字母
+                        // 前缀匹配不到任何词），此时上游 Squirrel/weasel 保留窗口、
+                        // 只显示字母区。此前一律按 candidates.is_empty() 藏窗
+                        // → 窗口连字母区一起闪没，打下一个字母才回来，
+                        // 就是「打某个字母时预览窗消失」的根因。
+                        let composing = !snapshot.preedit.trim().is_empty();
+                        let no_cand = snapshot.candidates.is_empty();
+                        if no_cand && !composing {
                             backend.set_mapped(0, false);
-                                            *visible.borrow_mut() = false;
+                            *visible.borrow_mut() = false;
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
                             flip.set(false);
-                        } else if !input_changed {
+                        } else if !input_changed && !no_cand && *visible.borrow() {
                             // 视觉态保持，什么都不做：
                             // - 展开面板：内容 = 展开瞬间快照（导航键不碰 rime）
                             // - 收起横条：高亮是视觉态（bar_items + panel_hl），
                             //   ←→/空格/数字键被 core 拦截后外壳仍会 sync，
                             //   重建会把药丸打回 librime 高亮位置（选错词的根源）
+                            // 两个必要条件：
+                            // - no_cand：候选为空时必须重建，否则 UI_BAR_COUNT
+                            //   残留旧值，ui_nav_key 的 bar_ready 会误判成
+                            //   「横条已建立」，方向键被本地拦截却无格子可移动
+                            // - visible：窗口可能已被 hidePalettes / 上屏等
+                            //   路径 orderOut 过，此时 preedit 没变也不能什么都不做，
+                            //   否则窗口再也回不来
                         } else {
                             // 新输入 / 首次显示：重建横条（借页凑满需持锁翻页）
                             let _guard = OP_LOCK.lock().unwrap();
@@ -4149,7 +4210,6 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         }
                         let real_count = real.len();
                         let homophones = collect_homophones(engine, rime_id, &real);
-                        let homo_count = homophones.len();
                         let mut all = real.clone();
                         all.extend(homophones);
                         let total = all.len() as i32;
@@ -4159,9 +4219,6 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             .unwrap_or(0);
                         // 诊断日志（%TEMP%\heng-ui.log）：展开内容不足时定位
                         // 是真实候选收集少还是同音词没取到
-                        ui_log(&format!(
-                            "expand: 真实候选={real_count} 同音词={homo_count} 总={total} hl={hl_global}"
-                        ));
                         panel_hl.set(hl_global.max(0));
                         let (cells, rows) = build_grid_cells(&all, hl_global);
                         let hl_y = cells.iter().find(|c| c.hl).map(|c| c.y).unwrap_or(0);
@@ -4190,7 +4247,14 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         let panel_h_phys = last_panel_h.get();
                         match work_area_at(last_x.get(), last_y.get()) {
                             Some((top, bottom)) if bottom > top && bottom > 0 => {
-                                if last_y.get() + panel_h_phys as i32 + 8 > bottom {
+                                // 量纲对齐：work_area 的 top/bottom 与 panel_h_phys
+                                // 都是**设备像素**，而 last_y 来自外壳的光标锚点，是**点**
+                                // （外壳按 IMK 的屏幕坐标直传，未乘 scale）。
+                                // 直接相加会得到「点 + 设备像素」的混合值，
+                                // 判定恒为「下方有空间」→ 永不翻转
+                                //（实测 last_y=1066 vs bottom=2400，差得太远）。
+                                let caret_y_phys = (last_y.get() as f32 * scale).round() as i32;
+                                if caret_y_phys + panel_h_phys as i32 + 8 > bottom {
                                     flip.set(true);
                                     flip_top.set(top);
                                 } else {
@@ -4199,13 +4263,6 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             }
                             _ => flip.set(false),
                         }
-                        ui_log(&format!(
-                            "expand: flip={} panel_bottom_y={} panel_h={} work_area={:?}",
-                            flip.get(),
-                            last_y.get(),
-                            panel_h_phys,
-                            work_area_at(last_x.get(), last_y.get())
-                        ));
                         ui.set_expanded(true);
                         UI_EXPANDED.store(true, Ordering::Relaxed);
                         menu_open.set(false);
@@ -4381,14 +4438,18 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                             // 挂到对应外壳会话句柄（反向查 handle），通知外壳上屏
                             if let Some(h) = SESSIONS.handle_of(rime_id) {
                                 emit_commit(h, &text);
+                            } else {
                             }
                         }
                     }
                     // 刷新横条（选词后组合串可能仍在：继续输入下一个字母）
                     if let Ok(snapshot) = engine.get_context(rime_id) {
-                        if snapshot.candidates.is_empty() {
+                        // 同Sync：选词后若仍有组合串（首词后接着打）就保留窗口，
+                        // 只在组合串也空了才藏。
+                        let composing = !snapshot.preedit.trim().is_empty();
+                        if snapshot.candidates.is_empty() && !composing {
                             backend.set_mapped(0, false);
-                                            *visible.borrow_mut() = false;
+                            *visible.borrow_mut() = false;
                             expanded.set(false);
                             UI_EXPANDED.store(false, Ordering::Relaxed);
                             flip.set(false);

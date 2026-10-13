@@ -1052,6 +1052,29 @@ pub extern "C" fn heng_set_screen_info(width: u32, height: u32, scale: f32) {
 #[no_mangle]
 pub extern "C" fn heng_set_screen_info(_width: u32, _height: u32, _scale: f32) {}
 
+/// 外壳上报所在显示器的工作区上下边界（设备像素，**左上原点**，与 core
+/// 三端统一坐标系一致）。仅 macOS 有效。
+///
+/// 用途：展开候选面板时判断「光标下方还放不放下」——放不下就向上翻转
+/// （微信同款）。Windows 与 Linux 各自能直接查系统 API
+/// （`MonitorFromPoint`+`GetMonitorInfoW` / x11rb randr CRTC），
+/// macOS 的等价信息只能在主线程从 AppKit 取，故由外壳上报。
+///
+/// 取 `NSScreen.visibleFrame` 而非 `frame`：前者已排除 Dock 与菜单栏，
+/// 语义与 Windows 的 `rcWork` 一致；用整屏高度会在光标贴底时误判
+/// 「下方还有空间」，面板实际会被 Dock 盖住。
+///
+/// 显示器插拔 / Dock 显隐 / 菜单栏高度变化时应重新上报。
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn heng_set_work_area(top: i32, bottom: i32) {
+    crate::ui::mac_backend::set_work_area(top, bottom);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn heng_set_work_area(_top: i32, _bottom: i32) {}
+
 /// 外壳上报指针事件（M-P4）。仅 macOS 有效。
 #[cfg(target_os = "macos")]
 #[no_mangle]
