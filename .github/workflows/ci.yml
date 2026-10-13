@@ -352,21 +352,45 @@ jobs:
           $log = "$env:GITHUB_WORKSPACE\boost-build.log"
           function Log($m) { $m | Tee-Object -FilePath $log -Append }
 
-          # 入库的 boost-project-config.jam 里 `using msvc` 带的是本机绝对路径
-          # （BuildTools 14.44）+ <setup> 指向本机 vcvarsall.bat，
-          # runner 上是 Enterprise，两个路径都不存在。这里按
-          # msvc-dev-cmd 注入的 VCToolsInstallDir 重写，只留编译器与 archiver：
-          # 工具链环境变量已经在环境里，不需要 <setup>。
+          # 入库的 boost-project-config.jam 带的是本机绝对路径（BuildTools
+          # 14.44），runner 上是 Enterprise，编译器与 <setup> 两处都得重写。
+          #
+          # <setup> 不能省。msvc.jam 的 set-setup-command 靠它生成
+          # bin.v2\standalone\msvc\msvc-14.3\msvc-setup.bat 与同名 .nup，
+          # 后者是所有 .obj 的前置依赖。省掉它之后 b2 把每个 .obj 都报成
+          # "skipped for lack of msvc-setup.nup"，全程不提 setup 这个词，
+          # 也不提缺了任何东西——只有 1024 targets 里 105 个在动、
+          # 组件配置表写着 serialization: building 却没有一个 .obj 编出来
+          # 这两点对得上。
+          # msvc-dev-cmd 注入的是本步骤的环境，不影响 b2 自己的 action 脚本。
           $root = "third_party/src/weasel/deps/boost_1_84_0"
           $cl = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\cl.exe"
           $lib = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\lib.exe"
+          # vcvars 在 VC\Auxiliary\Build\ 下。VCToolsInstallDir 形如
+          # ...\VC\Tools\MSVC\<ver>\，往上三级（14.44.35207 -> MSVC -> Tools -> VC）
+          # 到 VC\。用 [System.IO.Directory]::GetParent 而不是 Split-Path -Parent：
+          # 后者在嵌套调用里参数解析不可靠，实测会把 Tools 拼成 ToolsX。
+          $vcDir = $env:VCToolsInstallDir
+          for ($i = 0; $i -lt 3; $i++) {
+            $vcDir = [System.IO.Directory]::GetParent($vcDir.TrimEnd('\')).FullName
+          }
+          $setup = @(
+            (Join-Path $vcDir "Auxiliary\Build\vcvars64.bat")
+            (Join-Path $vcDir "Auxiliary\Build\vcvarsall.bat")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           Log "VCToolsInstallDir = $env:VCToolsInstallDir"
           Log "cl.exe  = $cl => $(Test-Path $cl)"
           Log "lib.exe = $lib => $(Test-Path $lib)"
+          Log "setup   = $setup => $([bool]$setup)"
           if (-not (Test-Path $cl)) { throw "找不到 cl.exe" }
+          if (-not $setup) {
+            Get-ChildItem (Join-Path $vcDir "Auxiliary\Build") -Filter "*.bat" |
+              ForEach-Object { Log "  " + $_.FullName }
+            throw "找不到 vcvars64/vcvarsall"
+          }
           @"
           import option ;
-          using msvc : 14.3 : "$($cl -replace '\\','/')" : <archiver>"$($lib -replace '\\','/')" ;
+          using msvc : 14.3 : "$($cl -replace '\\','/')" : <setup>"$(($setup -replace '\\','/'))" <archiver>"$($lib -replace '\\','/')" ;
           option.set keep-going : false ;
           "@ | Set-Content -Path "$root/project-config.jam" -Encoding ASCII
 
@@ -911,22 +935,39 @@ jobs:
             "https://github.com/iDvel/rime-ice/releases/latest/download/full.zip"
           unzip -q -o "$GITHUB_WORKSPACE/rime-ice-full.zip" -d rime-ice
           for f in t9.schema.yaml symbols_v.yaml symbols_caps_v.yaml \
-                   cn_dicts en_dicts lua opencc; do
+                   custom_phrase.txt cn_dicts en_dicts lua opencc; do
             test -e "rime-ice/$f" || { echo "雾凇包缺 $f" >> "$GITHUB_WORKSPACE/mac-setup.log"; exit 1; }
           done
           # 注意 fog 雾凇 full.zip 里没有 others/ 目录（本机 runtime 里有，
           # 那是另一次安装补的），所以不列进必需项。
+          # 雾凇顶层除 yaml 还有 custom_phrase.txt，pbxproj 也注册了它，
+          # 只 cp *.yaml 会漏掉——补齐 txt。
           cp rime-ice/*.yaml data/plum/ 2>/dev/null || true
+          cp rime-ice/custom_phrase.txt data/plum/
           cp -R rime-ice/cn_dicts rime-ice/en_dicts rime-ice/lua rime-ice/opencc data/plum/
           # 雾凇的 default.yaml 列了 9 个方案，但 squirrel 的 Squirrel.app 里
           # 只随包带了 rime_ice 那套，其余 8 个（t9 + 7 个双拼）没有对应
           # schema 文件的话 librime 部署会以failure 收场。裁到只留 rime_ice。
           bash "$GITHUB_WORKSPACE/tools/ci/make_ci_default.sh" \
             data/plum/default.yaml data/plum/default.yaml
+
+          # pbxproj 里静态注册了 52 个 data/plum/* 路径，xcodebuild 的 Copy
+          # 阶段逐个去找，缺一个就整轮 BUILD FAILED，且失败点按注册顺序出现
+          # —— 每次只能暴露下一个。改成在这里对着 pbxproj 的注册清单逐项核对，
+          # 一次把缺的都列出来。
+          missing=""
+          for f in $(grep -o 'path = data/plum/[^;]*' Squirrel.xcodeproj/project.pbxproj \
+                     | sed 's|path = data/plum/||' | sort -u); do
+            [ -e "data/plum/$f" ] || missing="$missing $f"
+          done
+          if [ -n "$missing" ]; then
+            echo "### pbxproj 注册但 data/plum 下没有：$missing" \
+              >> "$GITHUB_WORKSPACE/mac-setup.log"
+            echo "### 已铺：" >> "$GITHUB_WORKSPACE/mac-setup.log"
+            ls data/plum >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
+            exit 1
+          fi
           ls data/plum | head -30 >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
-          test -f data/plum/t9.schema.yaml
-          test -f data/plum/symbols_v.yaml
-          test -f data/plum/symbols_caps_v.yaml
 
       - name: 编译 Squirrel
         run: |
