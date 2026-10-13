@@ -837,44 +837,68 @@ jobs:
           $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
           $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
 
-          # lib.exe 的位置从 vcvars 之后的 VCToolsInstallDir 拼出来，
-          # 不靠 PATH 找，也不依赖前序步骤注入的环境变量。
+          # lib.exe 直接扫目录找，不跑 vcvars、不看 PATH、不依赖前序步骤注入。
           #
-          # CI 的 Enterprise vcvars 跑完后 lib 仍不在 PATH 上，而 vcvars 的
-          # 输出被 >nul 吞掉，于是 cmd 报出一个与真实原因无关的
-          # "The syntax of the command is incorrect."——lib 根本没被调用
-          # （本机 BuildTools 的 vcvars 能给到 lib，所以只有 CI 复现；
-          # vcvars 路径长只是让报错更容易被误读成「命令行过长」）。
+          # 调用写成临时 .bat 而不是内联 cmd 串：内联时 CI 报
+          # "The input line is too long." + "The syntax of the command is incorrect."，
+          # 整串只有 90 余字符，离 cmd 的 8191 上限极远，
+          # 同一段代码在本机（BuildTools 路径 94 字符）跑六种形式全过。
+          # 逐条排除过：PATH 膨胀（撑到 11666 字符仍 exit=0）、
+          # vcvars 自身 ERRORLEVEL（恒为 0）、相对 vs 绝对 cd、&& vs &。
+          # cmd 读脚本文件时不受命令行长度与引号规则约束，
+          # build-x64.bat 一直能用也是这个原因，所以不再猜内联写法。
           #
-          # 本步骤自己跑一次 vcvars 取 VCToolsInstallDir：跨步骤注入的那份
-          # 虽然同源，但一旦上游导出失败，这里会静默退化成 $null。
-          $ErrorActionPreference = 'Continue'
-          $vcOut = & cmd /c "call `"$vcvars`" >nul && set" 2>&1 | Out-String
-          $vcExit = $LASTEXITCODE
-          $ErrorActionPreference = 'Stop'
-          $toolsRoot = $null
-          foreach ($line in ($vcOut -split "`r?`n")) {
-            if ($line -match '^VCToolsInstallDir=(.*)$') { $toolsRoot = $Matches[1] }
+          # lib.exe 用绝对路径调用时不需要 MSVC 环境变量：它是纯链接器，
+          # 自己按 /machine 找 CRT 与 LIBPATH，所以不 call vcvars。
+          # 工具目录从 vcvars 的安装位置反推：vcvars 在
+          # <VSRoot>\VC\Auxiliary\Build\vcvars64.bat，往上 4 级才是 <VSRoot>
+          # （Build -> Auxiliary -> VC -> VSRoot）。上溯 3 级会停在 VC\，
+          # 再拼 VC\Tools\MSVC 就成了 VC\VC\Tools\MSVC。
+          # 用 [System.IO.Directory]::GetParent 而不是嵌套 Split-Path -Parent：
+          # 后者在嵌套调用里参数解析不可靠，实测会把 Tools 拼成 ToolsX。
+          $vcRoot = [System.IO.Directory]::GetParent(
+                      [System.IO.Directory]::GetParent(
+                        [System.IO.Directory]::GetParent(
+                          [System.IO.Directory]::GetParent($vcvars).FullName).FullName).FullName).FullName
+          $toolsBase = Join-Path $vcRoot "VC\Tools\MSVC"
+          $diag.Add("VSRoot = $vcRoot")
+          $diag.Add("MSVC 工具目录 = $toolsBase  存在=$(Test-Path $toolsBase)")
+          $libExe = $null
+          if (Test-Path $toolsBase) {
+            # 版本目录取名字最大的一个（14.44 > 14.38 > …）。
+            $ver = Get-ChildItem $toolsBase -Directory |
+              Sort-Object Name -Descending | Select-Object -First 1
+            if ($ver) {
+              $libExe = Join-Path $ver.FullName "bin\Hostx64\x64\lib.exe"
+              $diag.Add("选中工具版本 = $($ver.Name)")
+            }
+            # 版本目录列表一并记下：找不到时能看出是结构变了还是版本排序变了。
+            $diag.Add("版本目录列表:")
+            Get-ChildItem $toolsBase -Directory | ForEach-Object { $diag.Add("  " + $_.Name) }
           }
-          $diag.Add("vcvars 退出码 $vcExit，输出长度 $($vcOut.Length)")
-          $diag.Add("VCToolsInstallDir = $toolsRoot")
-          $libExe = if ($toolsRoot) {
-            Join-Path $toolsRoot "bin\Hostx64\x64\lib.exe"
-          } else { $null }
-          $diag.Add("lib.exe = $libExe  存在=$(if ($libExe) { Test-Path $libExe } else { '无 VCToolsInstallDir' })")
+          $diag.Add("lib.exe = $libExe  存在=$(if ($libExe) { Test-Path $libExe } else { '未找到' })")
           $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
           if (-not $libExe -or -not (Test-Path $libExe)) {
-            $diag.Add("vcvars 输出前 20 行:")
-            ($vcOut -split "`r?`n" | Select-Object -First 20) |
-              ForEach-Object { $diag.Add("  $_") }
-            $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
-            throw "找不到 lib.exe（VCToolsInstallDir = $toolsRoot）"
+            throw "在 $toolsBase 下找不到 lib.exe"
           }
 
-          $libCmd = "`"$libExe`" /def:`"$defAbs`" /machine:X64 /out:`"$libAbs`""
-          $diag.Add("cmd 命令行: $libCmd")
-          $diag.Add("cmd 命令行长度: $($libCmd.Length)")
-          $libOut = & cmd /c $libCmd 2>&1 | Out-String
+          $bat = Join-Path $libDir "run-lib.bat"
+          # 必须显式 -join 并用 CRLF：WriteAllText 收到 string[] 时会把它
+          # ToString 成空格连接的一整行，cmd 于是把整个文件当成一条命令
+          # （@echo off 变成 "off ..."，后面全是参数），
+          # 症状是 exit=0、无输出、产物不生成。
+          [System.IO.File]::WriteAllText($bat, ((@(
+            "@echo off"
+            "`"$libExe`" /def:`"$defAbs`" /machine:X64 /out:`"$libAbs`""
+            "exit /b %ERRORLEVEL%"
+          ) -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding $false))
+
+          $diag.Add("bat 内容:")
+          $diag.Add(([System.IO.File]::ReadAllText($bat)))
+          $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
+
+          $ErrorActionPreference = 'Continue'
+          $libOut = & cmd /c "`"$bat`"" 2>&1 | Out-String
           $libExit = $LASTEXITCODE
           $ErrorActionPreference = 'Stop'
           $diag.Add("退出码: $libExit")
