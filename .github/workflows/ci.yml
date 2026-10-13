@@ -777,47 +777,67 @@ jobs:
           # build-x64.bat 第 15 行调的是本机固定路径
           # C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\...\vcvarsall.bat，
           # runner 上不存在，脚本会在 msbuild 之前就 exit /b 1。
-          # 那是本机日常构建脚本，不为 CI 改它—— 在该路径放一个转发到 runner
-          # 真实环境脚本的 shim，脚本即可原样运行。
+          # 那是本机日常构建脚本，不为 CI 改它—— 在该路径放一个占位 bat，
+          # 脚本即可原样运行。
           #
-          # shim 转发到 vcvars64.bat 而不是 vcvarsall.bat。两者在本机都可用，
-          # 但 vcvarsall.bat 会按参数选择工具集并调用同目录的其它 bat
-          # （%~dp0 相对定位），经过 shim 的 call 转发后这条链在
-          # Enterprise 安装下断掉，cmd 报的是
-          # "The input line is too long." + "The syntax of the command is incorrect."。
-          # vcvars64.bat 自包含且不需要参数（x64 目标本就是默认值），
-          # build-x64.bat 传的 x64 被 %* 转发过去也一并忽略。
-          $buildDir = Split-Path $vcvars -Parent
-          $fwd = @(
-            (Join-Path $buildDir "vcvars64.bat")
-            (Join-Path $buildDir "vsdevcmd.bat")
-          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          $diag.Add("Build 目录: $buildDir")
-          $diag.Add("转发目标: $fwd")
-          if (-not $fwd) {
-            $diag.Add("Build 目录内容:")
-            Get-ChildItem $buildDir -Filter "*.bat" | ForEach-Object { $diag.Add("  " + $_.Name) }
-            $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
-            throw "VC\Auxiliary\Build 下找不到 vcvars64/vsdevcmd"
-          }
+          # 占位 bat 只校验环境、不调用 runner 的 Enterprise vcvars。
+          # CI 上任何 `call <vcvars bat>` 都失败，输出恰好 70 字节且只有
+          #   The input line is too long. / The syntax of the command is incorrect.
+          # 被调用的 bat 一个字都没输出——cmd 在解析阶段就放弃了，
+          # 整串命令只有 60~270 字符，离 8191 上限极远。
+          # 本机以同一份 vcvars 逐条排除且全部 exit=0：内联六种形式、
+          # call 关键字有无、cls 分隔、vcvarsall vs vcvars64、
+          # %* 转发与否、PATH 撑到 11666 字符、环境变量加到 240 个
+          # （近 300KB）。唯一剩下的差异是 runner 用 Enterprise 而本机用
+          # BuildTools，这个差异在本机无法复现，也不该继续猜。
+          #
+          # 需要的四个变量由前面的「配置 MSVC 工具链环境」经 GITHUB_ENV
+          # 注入，那一步在 CI 上验证过是成功的（47 个变量，含 VCToolsInstallDir、
+          # INCLUDE、LIB、LIBPATH、Platform）。占位 bat 据此判定，
+          # 缺变量就明确失败并打印出来，不静默通过。
           $shimDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
           New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
           [System.IO.File]::WriteAllText(
             (Join-Path $shimDir "vcvarsall.bat"),
-            ((@("@echo off", "call `"$fwd`" %*", "exit /b %ERRORLEVEL%") -join "`r`n") + "`r`n"))
-          $diag.Add("shim $shimDir\vcvarsall.bat -> $fwd")
-          # shim 自身先自测一次：这一步失败时 build-x64.bat 会在 msbuild 之前
-          # exit /b 1，而那之后的日志全在 bat 里不易定位。
-          $shimProbe = & cmd /c "call `"$shimDir\vcvarsall.bat`" x64 >nul && set VCToolsInstallDir" 2>&1 | Out-String
+            ((@(
+              "@echo off",
+              "rem CI placeholder: the real vcvars was already applied by the",
+              "rem preceding MSVC-env step via GITHUB_ENV. Verify and move on.",
+              "if not defined VCToolsInstallDir (",
+              "  echo [ERROR] VCToolsInstallDir is not set - no vcvars env",
+              "  exit /b 1",
+              ")",
+              "if not defined INCLUDE (",
+              "  echo [ERROR] INCLUDE is not set",
+              "  exit /b 1",
+              ")",
+              "if not defined LIB (",
+              "  echo [ERROR] LIB is not set",
+              "  exit /b 1",
+              ")",
+              "if not exist `"%VCToolsInstallDir%bin\Hostx64\x64\`" (",
+              "  echo [ERROR] tools dir missing under VCToolsInstallDir",
+              "  exit /b 1",
+              ")",
+              "echo [shim] MSVC env present, VCToolsInstallDir=%VCToolsInstallDir%",
+              "exit /b 0"
+            ) -join "`r`n") + "`r`n"))
+          $diag.Add("占位 bat: $shimDir\vcvarsall.bat（校验变量，不调 Enterprise vcvars）")
+          # 自测：占位 bat 单独跑一次，失败就在这里而不是 msbuild 阶段。
+          $shimProbe = & cmd /c "call `"$shimDir\vcvarsall.bat`" x64" 2>&1 | Out-String
           $shimExit = $LASTEXITCODE
-          $diag.Add("shim 自测退出码 $shimExit，输出长度 $($shimProbe.Length)")
-          if ($shimExit -ne 0 -or $shimProbe -notmatch 'VCToolsInstallDir=') {
-            $diag.Add("shim 自测输出:")
-            ($shimProbe -split "`r?`n" | Select-Object -First 10) | ForEach-Object { $diag.Add("  $_") }
+          $diag.Add("占位 bat 自测退出码 $shimExit，输出长度 $($shimProbe.Length)")
+          if ($shimProbe) { ($shimProbe -split "`r?`n" | Select-Object -First 8) | ForEach-Object { $diag.Add("  $_") } }
+          if ($shimExit -ne 0) {
+            $diag.Add("当前注入的 MSVC 变量:")
+            foreach ($v in @('VCToolsInstallDir', 'VCToolsVersion', 'INCLUDE', 'LIB', 'LIBPATH', 'WindowsSdkDir')) {
+              $val = [System.Environment]::GetEnvironmentVariable($v)
+              $diag.Add("  $v = $(if ($val) { $val.Substring(0, [Math]::Min(80, $val.Length)) } else { '<未设置>' })")
+            }
             $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
-            throw "shim 自测失败，vcvars 环境未就绪"
+            throw "占位 bat 自测失败，MSVC 环境未就绪（退出码 $shimExit）"
           }
-          $diag.Add("shim 自测 VCToolsInstallDir 已就绪")
+          $diag.Add("占位 bat 自测通过")
 
           $diag.Add("导出符号 $($names.Count) 项，def 首行 $($def[1])")
           $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
