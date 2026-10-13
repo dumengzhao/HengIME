@@ -1,20 +1,20 @@
 # HengIME
 
-> 衡 —— 跨五端的自用输入法
+> 衡 —— 跨六端的自用输入法
 >
-> Windows · macOS · Linux · Android · 鸿蒙
+> Windows · macOS · Linux · Android · iOS · 鸿蒙
 
-一份引擎，五套外壳，上层统一。
+一份引擎，六套外壳，上层统一。
 
 ---
 
 ## 项目定位
 
-自用输入法，不上架应用商店，仅使用免费证书。目标是在五个平台上提供**行为、视觉、设置、功能完全统一**的输入体验。
+自用输入法，不上架应用商店。桌面三端用免费证书发布；iOS 的键盘扩展需 Apple Developer 账号（$99/年）。目标是六个平台上**行为、设置、数据一致**，桌面三端候选窗逐像素统一，移动三端 UI 用宿主原生框架、观感对齐。
 
 ## 总体架构
 
-所有跨端一致的能力收敛到 core（一份代码），外壳只保留与宿主系统交互所必需的最薄一层；候选窗也收进 core，由内置自绘 UI 统一呈现。
+所有跨端一致的能力收敛到 core（一份代码），外壳只保留与宿主系统交互所必需的最薄一层。桌面三端候选窗收进 core，由内置 Slint 自绘 UI 统一呈现；移动三端候选窗与键盘 UI 用宿主原生框架，core 只提供候选数据。
 
 ```
 core（Rust，heng-core）             写一次 ×1
@@ -25,21 +25,26 @@ core（Rust，heng-core）             写一次 ×1
 └─ 本地 HTTP（诊断与外部工具用，127.0.0.1:9371，非输入链路）
         ↕ 同进程 C ABI：五端外壳进程内直接加载 heng_core 动态库
         （Windows 的 WeaselServer.exe 同样进程内加载 heng_core.dll，无 IPC）
-五端外壳                            每端一次 ×5
-（只做：按键转发 + 会话管理 + 输入位置上报）
+六端外壳                            每端一次 ×6
+（只做：按键转发 + 会话管理 + 输入位置上报；移动端另含键盘 UI）
         ↕
 librime + 词库（雾凇拼音）           现成 ×0
 ```
 
-## 五端外壳
+## 六端外壳
 
 | 平台 | 宿主框架 | 外壳形态 | 候选窗 | 状态 |
 |---|---|---|---|---|
-| Windows | TSF | Weasel 改造（服务进程 `WeaselServer.exe`） | core 内置自绘（Win32 分层窗口） | **可用** |
-| Linux | Fcitx5 | fcitx5 addon + heng_blue 主题 | core 内置自绘（X11/XWayland） | **可用** |
-| macOS | IMK | Squirrel 改造（`third_party/src/squirrel`） | core 内置自绘（NSPanel，**未实现**） | 外壳接入中，无候选窗 |
-| Android | IMS | Trime 参考 | core 内置自绘（计划） | 未开始 |
-| 鸿蒙 | IME Kit | 自研（librime 无鸿蒙前端） | core 内置自绘（计划） | 未开始 |
+| Windows | TSF | Weasel 改造（服务进程 `WeaselServer.exe`） | core 自绘（Win32 分层窗口） | **可用** |
+| Linux | Fcitx5 | fcitx5 addon + heng_blue 主题 | core 自绘（X11/XWayland） | **可用** |
+| macOS | IMK | Squirrel 改造（`third_party/src/squirrel`） | core 自绘（NSPanel，**未实现**） | 外壳接入中，无候选窗 |
+| Android | IMS | 自研，Trime 参考 | 宿主原生 View | 未开始 |
+| iOS | Custom Keyboard Extension | 自研（UIKit） | 宿主原生 UIKit | 未开始 |
+| 鸿蒙 | IME Kit | 自研（librime 无鸿蒙前端） | 宿主原生 ArkUI | 未开始 |
+
+桌面三端候选窗由 core 的 Slint 软渲染统一产出，逐像素一致；移动三端候选窗与
+键盘 UI 由各端原生框架绘制，颜色/字号/间距走 `config-center/shared/heng.yaml`
+的 tokens 对齐，观感一致。
 
 ## core 组件
 
@@ -98,6 +103,8 @@ HengIME/
 | M2 | 设置界面：core 内置七页 Slint 设置窗（Web 方案已废弃） | 已上线，进程级动作待验证 |
 | M6 | macOS 外壳：Squirrel 改造，core 可编译运行 | 进行中（NSPanel 候选窗未实现） |
 | M3 | 词库与数据同步（账号 + 服务端方案） | 未开始，见 FEATURES §4 |
+| M-P3 | Android 外壳：aarch64 交叉编译 + JNI + IMS 骨架 + 原生键盘 | 未开始 |
+| M-P3.5 | iOS 外壳：Custom Keyboard Extension（UIKit 键盘 + 候选栏） | 未开始，需 Apple Developer 账号 |
 | M4 | 鸿蒙外壳 | 未开始 |
 | M8 | AI 预测（可插拔模块） | 未开始 |
 

@@ -8,8 +8,9 @@
 
 ## 1. 一句话
 
-一份 librime 引擎 + 一个 Slint 自绘 UI，收在 Rust 的 `heng-core` 里；
-五端外壳只负责把宿主按键事件转成 core 调用，再把 core 的帧搬上屏。
+一份 librime 引擎 + 桌面端的 Slint 自绘候选窗，收在 Rust 的 `heng-core` 里；
+六端外壳只负责把宿主按键/触摸事件转成 core 调用——桌面外壳取 core 产出的帧缓冲
+上屏，移动外壳取候选快照填入宿主原生 UI 组件。
 
 ---
 
@@ -20,7 +21,7 @@
     │  键盘消息
     ▼
 宿主输入法框架                 每端不同，但只做事件搬运
-TSF / IMK / Fcitx5 / IMS / IME Kit
+TSF / IMK / Fcitx5 / IMS / Custom Keyboard Extension / IME Kit
     │  ①创建会话 ②转发按键 ③提交文本 ④上报光标位置
     ▼
 外壳（Rust FFI 或 C++ 薄壳）
@@ -73,10 +74,15 @@ librime 与候选窗都在 `WeaselServer.exe` 内，该进程直接调用 `heng_
 | Windows | `win_backend` | `WS_POPUP \| NOACTIVATE \| TOOLWINDOW` + `UpdateLayeredWindow(ULW_ALPHA)` |
 | Linux | `x11_backend` | X11/XWayland，override-redirect 窗口 |
 | macOS | **未实现** | `create_backend()` 返回 `None`，自绘候选窗不可用，其余能力不受影响 |
-| Android / 鸿蒙 | 未实现 | |
+| Android / iOS / 鸿蒙 | 不适用 | 移动端不使用 Slint 后端：候选窗与键盘 UI 由宿主原生框架渲染 |
 
 三个后端都只做两件事：`blit`（搬帧）和 `poll_events`（非阻塞泵事件）。
 **没有后端时引擎与会话仍可正常工作**，只是没有自绘候选窗。
+
+移动三端不接入 Slint 后端。键盘 UI 与候选栏由宿主原生框架绘制（Android View、
+UIKit、ArkUI），外壳经 `heng_get_context` 取候选快照后填入；`heng_ui_sync` /
+`heng_ui_hide` / `heng_settings_show` 等 UI ABI 在移动端编译时不链接平台后端，
+调用静默 no-op——与 macOS 无后端时的行为一致。
 
 窗口属性（置顶、不抢焦点、点击不激活系统）已真机验证：Windows 用原生窗口样式位
 （`NOACTIVATE`），连 `WM_MOUSEACTIVATE` 都不会收到；Linux 靠 override-redirect。
@@ -186,14 +192,18 @@ docs/                文档
 
 | 端 | 宿主 | 外壳位置 | 候选窗 | 状态 |
 |---|---|---|---|---|
-| Windows | TSF | `third_party/src/weasel`（改动在 `patches/`） | Win32 分层窗口 | 可用 |
-| Linux | Fcitx5 | `shells/linux/fcitx5`（310 行） | X11 | 可用 |
-| macOS | IMK | `third_party/src/squirrel` | NSPanel **未实现** | core 可编译运行，无候选窗 |
-| Android | IMS | 未建 | — | 未开始 |
-| 鸿蒙 | IME Kit | 未建 | — | 未开始 |
+| Windows | TSF | `third_party/src/weasel`（改动在 `patches/`） | core 自绘（Win32 分层窗口） | 可用 |
+| Linux | Fcitx5 | `shells/linux/fcitx5`（310 行） | core 自绘（X11） | 可用 |
+| macOS | IMK | `third_party/src/squirrel` | core 自绘（NSPanel **未实现**） | core 可编译运行，无候选窗 |
+| Android | IMS | 未建 | 原生 View | 未开始 |
+| iOS | Custom Keyboard Extension | 未建 | 原生 UIKit | 未开始 |
+| 鸿蒙 | IME Kit | 未建 | 原生 ArkUI | 未开始 |
 
 Windows 与 macOS 的外壳是**上游 C++ 改造**，源码在 gitignored 目录里，
 改动靠 `patches/*.patch` 固化。**改完必须重生成补丁**，否则改动不入库。
+Linux 外壳为自研 fcitx5 addon；Android / iOS / 鸿蒙三端外壳尚未建目录，
+计划均自研（Android 参考 Trime 的 IMS 骨架但数据源换成内嵌 heng_core，
+iOS 走 Custom Keyboard Extension 直链 C 静态库，鸿蒙走 NAPI）。
 
 ---
 

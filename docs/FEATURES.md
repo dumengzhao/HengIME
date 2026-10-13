@@ -19,10 +19,10 @@
 
 以下四条是所有功能需满足的约束，不属于功能项。任一功能在某端表现不同即为缺陷。
 
-1. **行为一致**：组词、候选排序、翻页、开关语义、方案切换在五端相同。
-2. **视觉一致**：候选窗与设置窗均由 core 自绘，不使用宿主框架渲染。
-3. **设置一致**：配置读写集中在 core，UI 层不含配置知识。
-4. **数据一致**：词库、用户词频、配置真源在五端共享，依赖 §4 的同步能力。
+1. **行为一致**：组词、候选排序、翻页、开关语义、方案切换在六端相同。
+2. **视觉一致**：桌面三端（Windows/Linux/macOS）候选窗由 core 的 Slint 软渲染统一产出，逐像素一致；移动三端（Android/iOS/鸿蒙）候选窗与键盘 UI 各用宿主原生框架渲染，颜色/字号/间距通过 `config-center/shared/heng.yaml` 的 tokens 对齐，观感一致但不逐像素一致。
+3. **设置一致**：配置读写集中在 core，UI 层不含配置知识。桌面用 core 内置 Slint 七页设置窗；移动端各端原生设置页面调同一套 config API。
+4. **数据一致**：词库、用户词频、配置真源在六端共享，依赖 §4 的同步能力。
 
 ---
 
@@ -102,15 +102,21 @@
 - [ ] 认证范围：只同步数据，还是也要同步开关记忆（架构已知天花板，见 `ARCHITECTURE.md`）
 - [ ] 五端各自的 user_dir 路径不同 → core 需暴露统一的同步目录
 
-## 5. 五端外壳
+## 5. 六端外壳
 
-| 端 | 宿主 | 候选窗 | 状态 | 剩余工作 |
-|---|---|---|---|---|
-| Windows | TSF（Weasel 改造） | Win32 分层窗口 | 🟡 可用 | 补丁固化；正式版从未编译过 |
-| Linux | Fcitx5 addon | X11/XWayland | 🟡 可用 | 光标跟随 / DirtyRegion 局部刷新 / addon 集成收尾 |
-| macOS | IMK（Squirrel 改造） | NSPanel | 🟡 core 可编译运行 | **NSPanel 后端未实现**（`create_backend()` 返回 `None`）；需要 macOS 机器 |
-| Android | IMS | Slint | ⬜ | aarch64 交叉编译 + JNI；触屏键盘形态决策；焦点事件流需试验 |
-| 鸿蒙 | IME Kit | Slint | ⬜ | librime 交叉编译 + NAPI；最重的一端 |
+| 端 | 宿主 | 候选窗 | 键盘 UI | 状态 | 剩余工作 |
+|---|---|---|---|---|---|
+| Windows | TSF（Weasel 改造） | core 自绘（Win32 分层窗口） | 不需要（物理键盘） | 🟡 可用 | 补丁固化；正式版从未编译过 |
+| Linux | Fcitx5 addon | core 自绘（X11/XWayland） | 不需要（物理键盘） | 🟡 可用 | 光标跟随 / DirtyRegion 局部刷新 / addon 集成收尾 |
+| macOS | IMK（Squirrel 改造） | core 自绘（NSPanel） | 不需要（物理键盘） | 🟡 core 可编译运行 | NSPanel 后端未实现（`create_backend()` 返回 `None`）；需要 macOS 机器 |
+| Android | IMS | Android 原生 View | Android 原生 View / Compose | ⬜ | librime + heng-core aarch64 交叉编译；JNI 桥接层；IMS 骨架 + 单线程调度器；26 键布局 + 候选栏 |
+| iOS | Custom Keyboard Extension | UIKit 原生 | UIKit / SwiftUI 原生 | ⬜ | librime + heng-core aarch64 交叉编译；Apple Developer 账号（$99/年）；Extension 直接链 C 静态库，无需 JNI |
+| 鸿蒙 | IME Kit | ArkUI 原生 | ArkUI 原生 | ⬜ | librime + heng-core aarch64 交叉编译；NAPI 桥接层；Panel + ArkUI 键盘布局 |
+
+移动端三端的候选窗与键盘 UI 均用宿主原生框架渲染，不经过 Slint。`heng_ui_sync` /
+`heng_ui_hide` / `heng_settings_show` 等 Slint UI ABI 在移动端编译时不链接平台后端，
+`create_backend()` 返回 `None`，这些调用静默 no-op——与 macOS 当前无后端时的行为一致。
+移动端外壳通过 `heng_get_context` 取候选快照后直接填入原生 UI 组件。
 
 ## 6. 更新与分发（⬜）
 
@@ -138,6 +144,7 @@
 | 4 | 真机验证本轮 UI 改动 | 服务页三动作 / 托盘三项 / HSV 拖拽跟手度，需交互桌面 |
 | 5 | 账号 + 服务端方案设计 | 依赖 §4 的五个问题定论 |
 | 6 | macOS NSPanel 后端 | 需 macOS 机器 |
+| 7 | iOS 评估 | Apple Developer 账号成本 vs 自用价值 |
 
 ---
 
