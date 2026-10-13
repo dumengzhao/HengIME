@@ -182,7 +182,10 @@ jobs:
           # 也不该入库 —— 它们跟着上游走，直接取 full.zip。入库会与上游脱节，
           # 而且那批文件里没有任何本项目的改动（实测与本机逐文件 md5 相同）。
           # 词典是持续更新的（上游一个月至少两次增改词汇与权重），锁版本反而是错的。
-          set -euo pipefail
+          #
+          # 这步原来没有日志，Windows 上失败时看不到是哪一条断言不成立。
+          # 失败时把目录清单和 default.yaml 的实际内容送进 artifact。
+          set -o pipefail
           mkdir -p ci-runtime/rime-shared ci-runtime/rime-user
           curl -fL --retry 3 -o rime-full.zip \
             "https://github.com/iDvel/rime-ice/releases/latest/download/full.zip"
@@ -198,9 +201,6 @@ jobs:
           # 本项目改过的三个配置覆盖在雾凇原版之上。
           # schema_list 只留 rime_ice：其余 8 个方案（t9 + 7 个双拼）本机在用但
           # 未入库，librime 遇到缺失的 schema 会让整个部署以 failure 收场。
-          # runner 上 python 可能是 python3 也可能只是 python（Windows 上是后者）。
-          PY=python3
-          command -v "$PY" >/dev/null 2>&1 || PY=python
           "$PY" tools/ci/make_ci_default.py \
             ci-runtime/rime-shared/default.yaml \
             ci-runtime/rime-shared/default.yaml
@@ -208,11 +208,27 @@ jobs:
           cp patches/rime-weasel.yaml        ci-runtime/rime-shared/weasel.yaml
           cp config-center/shared/heng.yaml  ci-runtime/rime-shared/heng.yaml
 
-          ls ci-runtime/rime-shared/
-          test -d ci-runtime/rime-shared/lua
-          test -d ci-runtime/rime-shared/cn_dicts
-          test -f ci-runtime/rime-shared/rime_ice.dict.yaml
-          grep -v '^#' ci-runtime/rime-shared/default.yaml | grep -c 'schema: rime_ice'
+          {
+            echo "### rime-shared 内容"
+            ls ci-runtime/rime-shared/
+            echo "### cn_dicts 前10 项"
+            ls ci-runtime/rime-shared/cn_dicts/ | head -10
+            echo "### default.yaml 的 schema_list"
+            grep -n -A14 'schema_list' ci-runtime/rime-shared/default.yaml
+          } > runtime-setup.log 2>&1
+          cat runtime-setup.log
+
+          # 断言逐条给消息，不让 test -f 静默退出。
+          for d in lua cn_dicts opencc; do
+            [ -d "ci-runtime/rime-shared/$d" ] || { echo "缺目录 $d"; exit 1; }
+          done
+          for f in rime_ice.dict.yaml rime_ice.schema.yaml default.yaml weasel.yaml heng.yaml; do
+            [ -f "ci-runtime/rime-shared/$f" ] || { echo "缺文件 $f"; exit 1; }
+          done
+          # 不能用 grep -c：计数为 0 时它 exit 1，在 pipefail 下会把整步带崩，
+          # 而「一条都没留」与「文件读不出来」需要不同的消息。
+          grep -v '^#' ci-runtime/rime-shared/default.yaml | grep 'schema: rime_ice' \
+            || { echo "default.yaml 里没有未注释的 schema: rime_ice"; exit 1; }
 
       - name: ABI 全链路
         env:
@@ -221,10 +237,9 @@ jobs:
           set -o pipefail
           {
             echo "### 运行时目录"
-            echo '```'
             ls -R "$HENG_RUNTIME" | head -40
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } > abitest-setup.log 2>&1
+          cat abitest-setup.log
           cargo run --release -p heng-cli -- abitest 2>&1 | tee abitest.log
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then
             {
@@ -348,6 +363,9 @@ jobs:
           $dll = (Resolve-Path target/release/heng_core.dll).Path
           $libDir = "third_party/src/weasel/lib64"
           New-Item -ItemType Directory -Force -Path $libDir | Out-Null
+          # 诊断落盘：artifact 上传是外部唯一能读到这个步骤细节的途径，
+          # 只写 $GITHUB_STEP_SUMMARY 的话外部看不到。
+          $diag = New-Object System.Collections.Generic.List[string]
 
           # 读 PE 导出表。不依赖仓库内的工具脚本 —— .workbuddy/ 是 gitignored 的，
           # CI 上不存在。导出名在 PE 里是 ASCII，长度前缀后跟名字，以 NUL 结尾。
@@ -444,13 +462,13 @@ jobs:
             "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           )
           $vcvars = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          {
-            echo "### vcvars 候选"
-            echo '```'
-            $candidates | ForEach-Object { "$_ => $(Test-Path $_)" }
-            echo "选中: $vcvars"
-            echo '```'
-          } | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          # 诊断同时写摘要和文件：artifact 上传是外部唯一能读到这个步骤细节的途径。
+          $diag = New-Object System.Collections.Generic.List[string]
+          $diag.Add("### vcvars 候选")
+          $candidates | ForEach-Object { $diag.Add("$_ => $(Test-Path $_)") }
+          $diag.Add("选中: $vcvars")
+          $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $diag | Out-File -Encoding utf8 heng-lib-diag.log
           if (-not $vcvars) { throw "找不到 vcvars64.bat" }
 
           # build-x64.bat 第 15 行调的是本机固定路径
@@ -459,15 +477,26 @@ jobs:
           # 那是本机日常构建脚本，不为 CI 改它—— 在该路径放一个转发到 runner
           # 真实 vcvarsall 的 shim，脚本即可原样运行。
           $vcall = Join-Path (Split-Path (Split-Path $vcvars -Parent) -Parent) "vcvarsall.bat"
-          if (-not (Test-Path $vcall)) { throw "vcvarsall.bat 不在 $vcall" }
+          $diag.Add("vcvarsall: $vcall => $(Test-Path $vcall)")
           $shimDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
           New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
           "@echo off`r`ncall `"$vcall`" %*`r`n" | Set-Content -Path "$shimDir\vcvarsall.bat" -Encoding ASCII
-          "### vcvarsall shim -> $vcall" | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $diag.Add("shim -> $shimDir\vcvarsall.bat")
 
-          & cmd /c "call `"$vcvars`" >nul && cd /d `"$libDir`" && lib /def:heng.def /machine:X64 /out:heng.lib 2>&1"
-          if ($LASTEXITCODE -ne 0) { throw "lib.exe 失败，退出码 $LASTEXITCODE" }
-          if (-not (Test-Path "$libDir/heng.lib")) { throw "heng.lib 未生成" }
+          $diag.Add("导出符号 $($names.Count) 项，def 首行 $($def[1])")
+          $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
+
+          $libOut = & cmd /c "call `"$vcvars`" >nul && cd /d `"$libDir`" && lib /def:heng.def /machine:X64 /out:heng.lib 2>&1"
+          $libOut | Out-File -Append heng-lib-diag.log -Encoding utf8
+          if ($LASTEXITCODE -ne 0) {
+            "lib.exe 退出码 $LASTEXITCODE" | Out-File -Append heng-lib-diag.log -Encoding utf8
+            throw "lib.exe 失败，退出码 $LASTEXITCODE"
+          }
+          if (-not (Test-Path "$libDir/heng.lib")) {
+            "lib.exe 跑完但没有 heng.lib" | Out-File -Append heng-lib-diag.log -Encoding utf8
+            throw "heng.lib 未生成"
+          }
 
       - name: 编译 weasel
         shell: cmd
@@ -482,7 +511,10 @@ jobs:
             exit /b 1
           )
 
-      - name: 收集产物
+      - name: 收集产物与日志
+        # 合并成一步：upload-artifact@v4 在同一 job 内并发上传会互相取消，
+        # 拆成「收集产物」+「上传日志」两步时后者静默变成no-op，
+        # 表现为步骤 success 但 artifact 列表里没有它。
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -494,14 +526,6 @@ jobs:
             third_party/src/weasel/output/heng_core.dll
             third_party/src/weasel/output/rime.dll
             third_party/src/weasel/output/WinSparkle.dll
-          if-no-files-found: ignore
-
-      - name: 上传日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs-shell-windows
-          path: |
             third_party/src/weasel/msbuild-x64.log
             *.log
           if-no-files-found: ignore
@@ -549,7 +573,7 @@ jobs:
            ldd build/libheng.so | grep -q "not found" \
              && { echo "有未解析的动态库依赖"; exit 1; } || true
 
-      - name: 收集产物
+      - name: 收集产物与日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -557,14 +581,7 @@ jobs:
           path: |
             build/libheng.so
             target/release/libheng_core.so
-          if-no-files-found: ignore
-
-      - name: 上传日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs-shell-linux
-          path: "*.log"
+            *.log
           if-no-files-found: ignore
 
   # macOS 外壳：squirrel 改造。改动固化在 patches/squirrel-heng.patch。
@@ -640,12 +657,24 @@ jobs:
 
       - name: 准备 plum 数据与 Sparkle
         run: |
-          set -euo pipefail
+          set -o pipefail
           cd third_party/src/squirrel
+          # 诊断落盘，artifact 上传是外部唯一能读到这个步骤细节的途径。
+          {
+            echo "### plum 子模块"
+            ls plum/ | head -20
+            echo "### Sparkle 子模块"
+            ls Sparkle/ | head -10
+          } > "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
+          cat "$GITHUB_WORKSPACE/mac-setup.log"
+
           # make plum-data 而不是 copy-plum-data：后者只是 cp 一个已构建好的
           # plum/output，不负责构建 plum，源在但没产物时它会失败。
           # plum-data 自己会链到 copy-plum-data。
-          make plum-data
+          if ! make plum-data >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1; then
+            echo "### make plum-data 失败" >> "$GITHUB_WORKSPACE/mac-setup.log"
+            exit 1
+          fi
           # 不能用 make opencc-data：它跑的是 $(MAKE) -C librime deps/opencc，
           # 那是 librime submodule —— 而 CI 刻意不初始化它（编译用的是仓库
           # third_party/librime 下的官方预编译包）。opencc 数据那份包里已带。
@@ -654,8 +683,9 @@ jobs:
           test -f data/opencc/TSCharacters.ocd2
           test -f data/opencc/t2s.json
           # Sparkle.framework 是 DEPS_CHECK 的一项
-          make copy-sparkle-framework
-          ls data/opencc data/plum Frameworks
+          make copy-sparkle-framework >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
+          ls data/opencc data/plum Frameworks >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
+          cat "$GITHUB_WORKSPACE/mac-setup.log"
 
       - name: 编译 Squirrel
         run: |
@@ -673,20 +703,14 @@ jobs:
             exit 1
           fi
 
-      - name: 收集产物
+      - name: 收集产物与日志
+        # 与 shell-windows 同理：v4 在同一 job 内并发上传会互相取消。
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: heng-macos
-          path: third_party/src/squirrel/build/Build/Products/Debug/Squirrel.app
-          if-no-files-found: ignore
-
-      - name: 上传日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs-shell-macos
           path: |
+            third_party/src/squirrel/build/Build/Products/Debug/Squirrel.app
             third_party/src/squirrel/xcodebuild.log
             *.log
           if-no-files-found: ignore
