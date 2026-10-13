@@ -1,14 +1,17 @@
-# weasel 补丁
+# 外壳补丁
 
-`weasel-0.17.4-heng-m1.patch` 是 Windows 外壳的改动固化。
+本目录固化两端的第三方外壳改动：`weasel-0.17.4-heng-m1.patch`（Windows）与
+`squirrel-heng.patch`（macOS）。两者形态不同：weasel 已在主仓库跑通重新生成与验证
+脚本，squirrel 目前是一次性产出，重生成需在 mac 上手工执行（见文末）。
 
 ## 为什么需要补丁
 
-`third_party/src/weasel/` 是 gitignored 的上游源码树（ime/weasel 0.17.4 + 一个
-托盘刷新修复 commit `d73f629`）。改动只存在于本地工作树，不入库就等于不存在 ——
-换机器重拉会全部丢失。
+`third_party/src/weasel/` 与 `third_party/src/squirrel/` 都是 gitignored 的上游源码树。
+改动只存在于本地工作树，不入库就等于不存在——换机器重拉会全部丢失。
 
-## 基线
+Linux 外壳不走这条路径：`shells/linux/fcitx5/` 是自研代码，直接入库。
+
+## weasel 基线
 
 | 项 | 值 |
 |---|---|
@@ -19,13 +22,24 @@
 **不是 0.17.4 tag**。tag `0.17.4` 指向 `9cc96e2`，用它做基线会导致补丁 context
 对不上、`git apply` 失败。
 
-## 重新生成
+## squirrel 基线
+
+| 项 | 值 |
+|---|---|
+| 上游 | https://github.com/rime/squirrel |
+| 基线 commit | `6ad0e45bcf53b770474100c02cec43912f0da502`（2026-10-08） |
+| 该 commit 说明 | style: 品牌图标定型——印章风 |
+
+该commit 由本项目作者推送到上游，内容只有 `Rime.icon/Assets/logo.svg` 一个文件。
+因此基线里已含品牌图标，**补丁不必重复固化它**。
+
+## 重新生成（weasel）
 
 ```bash
 python .workbuddy/tools/gen_weasel_patch.py patches/weasel-0.17.4-heng-m1.patch
 ```
 
-当前补丁 47 个文件 / 446 KB。
+当前补丁 47 个文件 / 452 KB。
 
 脚本在 `.workbuddy/`（gitignored），逻辑要点：
 
@@ -100,3 +114,54 @@ Windows 检出为 CRLF。新增文件若写成 LF，git 会当成新文件，补
 ```bash
 python -c "import pathlib;b=pathlib.Path('X').read_bytes();print('CRLF',b.count(b'\r\n'),'LF',b.count(b'\n')-b.count(b'\r\n'))"
 ```
+
+## squirrel 补丁
+
+`squirrel-heng.patch` 是 macOS 外壳的改动固化，6 个文件 / 56739 字节：
+
+| 文件 | 内容 |
+|---|---|
+| `sources/HengWindowRenderer.swift` | 新增。NSPanel 贴帧层（29533 字节），core 只出帧、窗口操作在主线程执行 |
+| `sources/SquirrelApplicationDelegate.swift` | 接线贴帧层 |
+| `sources/SquirrelInputController.swift` | 按键/触摸事件转 core 调用 |
+| `sources/BridgingFunctions.swift` | C 桥接结构与回调 |
+| `Squirrel.xcodeproj/project.pbxproj` | 注册新文件、HEADER_SEARCH_PATHS、链接 `libheng_core.dylib` |
+| `resources/Localizable.xcstrings` | 三语言文案 |
+
+贴帧层调用的 core ABI：`heng_set_window_handler`、`heng_set_commit_handler`、
+`heng_set_screen_info`、`heng_set_work_area`、`heng_push_pointer_event` ——
+全部在 `core/include/heng.h` 中有声明。
+
+### 不入补丁的文件
+
+squirrel 的 `.gitignore` 已排除以下路径，它们是构建产物或运行时数据，
+`tools/squirrel-dev-install.sh` 每次运行会重新同步：
+
+| 路径 | 来源 |
+|---|---|
+| `lib/libheng_core.dylib` | `target/release/libheng_core.dylib` |
+| `librime/include/heng.h` | `core/include/heng.h` |
+| `Frameworks/`、`build/`、`data/opencc/`、`data/plum/`、`package/`、`download/` | 构建与打包中间物 |
+
+### 重新生成（mac）
+
+改动只在 mac 那台机器上，Windows 侧的 `third_party/src/squirrel` 是干净的上游树。
+在 mac 上执行：
+
+```bash
+cd <衡仓库>/third_party/src/squirrel
+
+# 新增文件先标intent-to-add，否则不进 diff
+git add -N <新增文件>
+
+# --text 必需（.strings/.plist/.xcassets 会被判二进制）；不能加 --binary
+git diff HEAD --text > /tmp/squirrel-heng.patch
+
+# 自检
+grep -c '^diff --git' /tmp/squirrel-heng.patch   # 文件数
+grep -n '\^@' /tmp/squirrel-heng.patch           # 必须无输出
+```
+
+验证方式与 weasel 相同：在 `6ad0e45b` 的干净基线树上 `git apply`，再比对文件内容
+md5。mac 工作树不在 Windows 侧，无法用 `verify_patch_result.py` 直接比对，
+需在 mac 上按文件逐个 `md5 -q` 对照。

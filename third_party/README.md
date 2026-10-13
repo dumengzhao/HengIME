@@ -11,6 +11,7 @@
 | `externals/` | 运行时外部依赖（WinSparkle.dll / rime.dll / 雾凇 data） | 否 |
 | `librime/dist/` | librime 发行包（编译期链接 `rime.lib`） | 否 |
 | `src/weasel/` | weasel 源码 + `deps/boost_1_84_0/` | 否 |
+| `src/squirrel/` | squirrel 源码（macOS 外壳） | 否 |
 
 ## externals —— 运行时依赖的归位处
 
@@ -86,6 +87,25 @@ git clone --depth 1 -b 0.17.4 https://github.com/rime/weasel third_party/src/wea
 ```
 
 克隆后按「src/weasel 树内改动清单」（见文末）重放我们的修改。
+
+## squirrel 源码（macOS 外壳）
+
+```bash
+git clone --depth 1 https://github.com/rime/squirrel third_party/src/squirrel
+cd third_party/src/squirrel
+git fetch --depth 1 origin 6ad0e45bcf53b770474100c02cec43912f0da502
+git checkout 6ad0e45bcf53b770474100c02cec43912f0da502
+git apply ../../../patches/squirrel-heng.patch
+```
+
+基线 commit `6ad0e45b` 含品牌图标（作者为本项目），补丁只含贴帧层相关的 6 个文件。
+
+`librime/` 与 `lib/` 下的 dylib、`librime/include/heng.h` 是构建产物不入库，
+由 `tools/squirrel-dev-install.sh` 在部署时从 `target/release/` 与
+`core/include/` 同步。
+
+编译与部署：`make debug`（产物在 `build/Build/Products/Debug/Squirrel.app`），
+再跑 `tools/squirrel-dev-install.sh` 装成 dev 版。
 
 ## output/ 与 output-dev/ 的内容构成
 
