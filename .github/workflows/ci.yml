@@ -328,14 +328,17 @@ jobs:
           $bytes = [System.IO.File]::ReadAllBytes($dll)
           $peOff = [BitConverter]::ToInt32($bytes, 0x3C)
           $magic = [BitConverter]::ToUInt16($bytes, $peOff + 24)
-          $dirOff = if ($magic -eq 0x20B) { $peOff + 112 } else { $peOff + 96 }
-          # DataDirectory[0] = Export Table：RVA + Size，各 4 字节
-          $expRva = [BitConverter]::ToUInt32($bytes, $dirOff)
-          if ($expRva -eq 0) { throw "dll 无导出表" }
-
           $nSections = [BitConverter]::ToUInt16($bytes, $peOff + 6)
           $optSize = [BitConverter]::ToUInt16($bytes, $peOff + 20)
           $secOff = $peOff + 24 + $optSize
+          # DataDirectory[0] = Export Table。
+          # 可选头从 peOff+24 开始，数据目录在可选头内的偏移是 112(PE32+)/96(PE32)，
+          # 所以绝对偏移是 peOff+24+112 —— 少加这 24 字节会读到某个节的 Size 字段，
+          # 值看着像RVA（0x100000），后续按节映射得到垃圾偏移而不报错。
+          $dirOff = if ($magic -eq 0x20B) { $peOff + 24 + 112 } else { $peOff + 24 + 96 }
+          $expRva = [BitConverter]::ToUInt32($bytes, $dirOff)
+          if ($expRva -eq 0) { throw "dll 无导出表" }
+
           $raw = $null
           for ($i = 0; $i -lt $nSections; $i++) {
             $s = $secOff + $i * 40
@@ -386,11 +389,20 @@ jobs:
           if ($names.Count -eq 0) { throw "导出名表为空" }
 
           # 排序规则与 sync_heng_def.py 一致：非 heng_ 前缀按原样（Slint 的 *VTable
-          # 等大写符号自然排在 heng_ 之后），heng_* 按字典序
-          $sorted = $names | Sort-Object @{ Expression = {
-            if ($_ -like 'heng_*') { $_.ToLower() } else { $_ }
-          } }
-          $def = @("LIBRARY heng_core", "EXPORTS") + ($sorted | ForEach-Object { "    $_" })
+          # 等大写符号自然排在 heng_ 之后），heng_* 按字典序。
+          # 用 CompareOrdinal 而非 Sort-Object：后者走区域性比较且不区分大小写，
+          # 生成的顺序与入库的 patches/heng.df 不同（ClipVTable 会排到 CheckBoxVTable 之后）。
+          # 顺序对 lib.exe 无影响，但一致才能直接 diff 出「dll 多了哪个导出」。
+          $list = [System.Collections.Generic.List[string]]::new()
+          $list.AddRange([string[]]$names)
+          $cmp = [System.Comparison[string]]{
+            param($a, $b)
+            $ka = if ($a.StartsWith('heng_')) { $a.ToLowerInvariant() } else { $a }
+            $kb = if ($b.StartsWith('heng_')) { $b.ToLowerInvariant() } else { $b }
+            [string]::CompareOrdinal($ka, $kb)
+          }
+          $list.Sort($cmp)
+          $def = @("LIBRARY heng_core", "EXPORTS") + ($list | ForEach-Object { "    $_" })
           [System.IO.File]::WriteAllLines("$libDir/heng.def", $def)
           Write-Host "导出符号 $($names.Count) 项"
 
