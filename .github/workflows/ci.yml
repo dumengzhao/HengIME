@@ -314,6 +314,36 @@ jobs:
             throw "boost 解压后未见 version.hpp"
           }
 
+      - name: bootstrap b2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 官方 7z 源码包只含 bootstrap.bat，不含 b2.exe（7z l 里只有
+          # bootstrap.bat / bootstrap.sh / tools\build\bootstrap.bat），
+          # b2 要自己编。weasel 自带的 build.bat 走的就是
+          # `if not exist b2.exe call bootstrap.bat`。
+          #
+          # 少了这一步的后果不是「b2 报找不到」而是整个步骤静默结束：
+          # pwsh 调用不存在的可执行文件抛 CommandNotFoundException，
+          # 而 $ErrorActionPreference=Stop 让它当场终止，b2 输出全空，
+          # 看起来像 b2 自己没说话。
+          $root = "third_party/src/weasel/deps/boost_1_84_0"
+          $log = "$env:GITHUB_WORKSPACE\boost-bootstrap.log"
+          function Log($m) { $m | Tee-Object -FilePath $log -Append }
+
+          Log "cl.exe 在 PATH => $([bool](Get-Command cl.exe -ErrorAction SilentlyContinue))"
+          Push-Location $root
+          # bootstrap.bat 是 cmd 脚本，pwsh 直接调用会另起一个 cmd.exe 跑它。
+          $out = & ".\bootstrap.bat" 2>&1
+          $rc = $LASTEXITCODE
+          Pop-Location
+          $out | Out-File -FilePath "$env:GITHUB_WORKSPACE\b2-bootstrap-out.log" -Encoding utf8
+          Log "bootstrap 退出码 $rc"
+          $out | Select-Object -Last 40 | ForEach-Object { Log "$_" }
+          if ($rc -ne 0) { throw "bootstrap.bat 失败，退出码 $rc" }
+          if (-not (Test-Path "$root\b2.exe")) { throw "bootstrap 后未见 b2.exe" }
+          Log ("b2.exe 大小 = {0}" -f (Get-Item "$root\b2.exe").Length)
+
       - name: 编译 boost 静态库
         shell: pwsh
         run: |
@@ -341,13 +371,23 @@ jobs:
           "@ | Set-Content -Path "$root/project-config.jam" -Encoding ASCII
 
           # 官方 7z 包只有 boost 源码，没有编好的 .lib，而 weasel 要链
-          # libboost_wserialization / libboost_filesystem / libboost_iostreams /
-          # libboost_chrono。链接期报 LNK1104 cannot open file 就是缺这一步。
+          # boost::serialization / boost::thread / boost::chrono。
+          # 参数照抄 weasel 自带 build.bat 的 BJAM_OPTIONS_X64（那边编 x86 +
+          # x64 两轮，CI 只要 x64）。--with-serialization 会自动带上
+          # thread / chrono / wserialization，四个正是本机 stage/lib 里
+          # 实际产出、且 weasel 实际链接的那几个。
+          # 不加 --with-iostreams：它要 zlib / bzip2，源码包里没有。
+          $nproc = [int]$env:NUMBER_OF_PROCESSORS
+          if ($nproc -le 0) { $nproc = 2 }
           $b2args = @(
-            "toolset=msvc-14.3", "address-model=64", "link=static",
-            "runtime-link=shared", "variant=release", "-j4",
-            "--with-serialization", "--with-filesystem",
-            "--with-iostreams", "--with-chrono", "stage-lib"
+            "-j$nproc",
+            "architecture=x86", "address-model=64",
+            "toolset=msvc-14.3",
+            "define=BOOST_USE_WINAPI_VERSION=0x0603",
+            "link=static", "runtime-link=static",
+            "--with-serialization",
+            "--build-type=complete",
+            "stage"
           )
           #
           # 输出先进变量再落盘：b2 编译 boost 要几分钟，输出上千行，
@@ -826,6 +866,13 @@ jobs:
             echo "### make plum-data 失败" >> "$GITHUB_WORKSPACE/mac-setup.log"
             exit 1
           fi
+          # 基线 commit 6ad0e45b 的 pbxproj 里有 3 处 heng.yaml 注册
+          # （PBXBuildFile / PBXFileReference / Copy Shared Support Files），
+          # path 写死为 data/plum/heng.yaml。文件本身不在 squirrel 仓库里，
+          # 也不在 plum 预置包里，要从本项目 config-center 铺过去。
+          # 少了这一步 xcodebuild 报 "The file "heng.yaml" couldn't be opened"。
+          cp "$GITHUB_WORKSPACE/config-center/shared/heng.yaml" data/plum/
+          test -f data/plum/heng.yaml
           # 不能用 make opencc-data：它跑的是 $(MAKE) -C librime deps/opencc，
           # 那是 librime submodule —— 而 CI 刻意不初始化它（编译用的是仓库
           # third_party/librime 下的官方预编译包）。opencc 数据在
