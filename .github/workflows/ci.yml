@@ -771,7 +771,7 @@ jobs:
           $candidates | ForEach-Object { $diag.Add("$_ => $(Test-Path $_)") }
           $diag.Add("选中: $vcvars")
           $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
-          $diag | Out-File -Encoding utf8 heng-lib-diag.log
+          $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
           if (-not $vcvars) { throw "找不到 vcvars64.bat" }
 
           # build-x64.bat 第 15 行调的是本机固定路径
@@ -806,11 +806,33 @@ jobs:
           $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
           $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
 
-          $libOut = & cmd /c "call `"$vcvars`" >nul && cd /d `"$libDir`" && lib /def:heng.def /machine:X64 /out:heng.lib 2>&1"
-          $libOut | Out-File -Append heng-lib-diag.log -Encoding utf8
-          if ($LASTEXITCODE -ne 0) {
-            "lib.exe 退出码 $LASTEXITCODE" | Out-File -Append heng-lib-diag.log -Encoding utf8
-            throw "lib.exe 失败，退出码 $LASTEXITCODE"
+          # 落盘 def 前 40 行与总行数：lib.exe 的失败原因几乎都指向 def 内容，
+          # 而 CI 上这份 def 由当轮编出的 dll 生成，本机无法预先复现。
+          $defLines = [System.IO.File]::ReadAllLines("$libDir/heng.def")
+          $diag.Add("def 行数 = $($defLines.Count)")
+          $diag.Add("def 前 40 行:")
+          $defLines[0..([Math]::Min(39, $defLines.Count - 1))] |
+            ForEach-Object { $diag.Add("  [$_]") }
+          # 展开后真正交给 cmd 的命令行：路径含空格且用 && 串联时，
+          # 引号或重定向位置写错会整条失效，而症状只是退出码非零。
+          $libCmd = "call `"$vcvars`" >nul && cd /d `"$libDir`" && lib /def:heng.def /machine:X64 /out:heng.lib 2>&1"
+          $diag.Add("cmd 命令行: $libCmd")
+          $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
+
+          $ErrorActionPreference = 'Continue'
+          $libOut = & cmd /c $libCmd 2>&1 | Out-String
+          $libExit = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          "=== lib.exe 输出（退出码 $libExit）===" | Out-File -Append heng-lib-diag.log -Encoding utf8
+          if ($libOut) { $libOut | Out-File -Append heng-lib-diag.log -Encoding utf8 }
+          "libDir 内容:" | Out-File -Append heng-lib-diag.log -Encoding utf8
+          Get-ChildItem $libDir | ForEach-Object {
+            "  $($_.Name)  $($_.Length)" | Out-File -Append heng-lib-diag.log -Encoding utf8
+          }
+          if ($libExit -ne 0) {
+            "lib.exe 退出码 $libExit" | Out-File -Append heng-lib-diag.log -Encoding utf8
+            throw "lib.exe 失败，退出码 $libExit"
           }
           if (-not (Test-Path "$libDir/heng.lib")) {
             "lib.exe 跑完但没有 heng.lib" | Out-File -Append heng-lib-diag.log -Encoding utf8
