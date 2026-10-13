@@ -38,6 +38,9 @@ shells/windows/x64/
 shells/windows/Release/
 shells/macos/build/
 shells/linux/build/
+# dev 隔离构建的 CMake 输出目录。conf-dev/ 是真实源码（dev-install.sh 直接
+# cp 到 fcitx5 配置目录），不要一并忽略。
+shells/linux/*/build-dev/
 
 # 编辑器与系统
 .vscode/
