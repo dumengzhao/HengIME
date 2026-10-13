@@ -1,0 +1,406 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # librime 发行包对应的源码点，见 third_party/librime/version-info.txt
+  LIBRIME_VERSION: 1.17.0
+  LIBRIME_HASH: 33e7814
+
+jobs:
+  # 三平台共用：编 core、跑单测、过 ABI 全链路。
+  # 各job 唯一的差别是「librime 从哪来」——core 的 build.rs 按 target_os 分三条路：
+  #   Windows/macOS 强制要求 third_party/librime/dist/lib 里有官方预编译产物；
+  #   Linux 有本地产物就用，没有则链发行版包 librime-dev。
+  core:
+    name: core (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+          - name: Windows
+            os: windows-2022
+          - name: macOS
+            os: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 librime（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://github.com/rime/librime/releases/download/$env:LIBRIME_VERSION/rime-$env:LIBRIME_HASH-Windows-msvc-x64.7z"
+          Invoke-WebRequest -Uri $url -OutFile rime.7z
+          # 7z 在windows-2022 runner 上已预装
+          &7z x rime.7z "-othird_party/librime" -y | Out-Null
+          if (-not (Test-Path third_party/librime/dist/lib/rime.lib)) {
+            throw "rime.lib 缺失，官方包结构与预期不符"
+          }
+
+      - name: 安装 librime（macOS）
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          url="https://github.com/rime/librime/releases/download/${LIBRIME_VERSION}/rime-${LIBRIME_HASH}-macOS-universal.tar.bz2"
+          curl -sL "$url" -o rime.tar.bz2
+          mkdir -p third_party/librime
+          tar xjf rime.tar.bz2 -C third_party/librime
+          test -f third_party/librime/dist/lib/librime.dylib
+
+      - name: 安装 librime（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librime-dev cmake pkg-config
+
+      - name: 安装 Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 编译 core
+        run: cargo build --release -p heng-core
+
+      - name: 单测
+        run: cargo test --release -p heng-core --lib
+
+      - name: ABI 全链路
+        run: cargo run --release -p heng-cli -- abitest
+
+      - name: 编译 heng-cli
+        run: cargo build --release -p heng-cli
+
+  # Windows 外壳：weasel改造。链条最长——补丁重放 + boost + MSBuild + 导入库重建。
+  shell-windows:
+    name: 外壳 Windows (weasel)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 librime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://github.com/rime/librime/releases/download/$env:LIBRIME_VERSION/rime-$env:LIBRIME_HASH-Windows-msvc-x64.7z"
+          Invoke-WebRequest -Uri $url -OutFile rime.7z
+          & 7z x rime.7z "-othird_party/librime" -y | Out-Null
+          Copy-Item third_party/librime/dist/lib/rime.dll third_party/externals/ -Force
+
+      - name: 克隆 weasel 并重放补丁
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 基线是托盘刷新修复 commit d73f629，在 tag 0.17.4 之后。用tag 会 context 对不上。
+          git clone --depth 1 https://github.com/rime/weasel third_party/src/weasel
+          cd third_party/src/weasel
+          git fetch --depth 1 origin d73f6295e8252ed2f7b9c12bae32e9001b1afdaa
+          git checkout d73f6295e8252ed2f7b9c12bae32e9001b1afdaa
+          git apply --whitespace=nowarn ../../../patches/weasel-0.17.4-heng-m1.patch
+          Copy-Item ../../../patches/env.bat .
+
+      - name: 安装 boost 1.84
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://archives.boost.io/release/1.84.0/source/boost_1_84_0.7z"
+          Invoke-WebRequest -Uri $url -OutFile boost.7z
+          & 7z x boost.7z "-othird_party/src/weasel/deps" -y | Out-Null
+
+      - name: 生成 weasel.props
+        shell: pwsh
+        run: |
+          # weasel.props 被上游 .gitignore 忽略，补丁里没有它，
+          # 而入库的模板里 BOOST_ROOT 是本机绝对路径 —— CI 必须按实际路径重写。
+          $ErrorActionPreference = 'Stop'
+          $boost = (Resolve-Path third_party/src/weasel/deps/boost_1_84_0).Path
+          $props = Get-Content patches/weasel.props -Raw
+          $props = $props -replace '<BOOST_ROOT>[^<]*</BOOST_ROOT>', "<BOOST_ROOT>$boost</BOOST_ROOT>"
+          Set-Content -Path third_party/src/weasel/weasel.props -Value $props -Encoding UTF8
+          Copy-Item patches/boost-project-config.jam third_party/src/weasel/deps/boost_1_84_0/project-config.jam -Force
+          if (-not (Select-String -Path third_party/src/weasel/weasel.props -Pattern ([regex]::Escape($boost)) -Quiet)) {
+            throw "BOOST_ROOT 未写入 weasel.props"
+          }
+
+      - name: 铺共享数据
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path third_party/externals | Out-Null
+          # WinSparkle：官方 weasel installer 里的是 32 位，x64 必须从上游 release 自取。
+          # 资产是按平台分的 zip，解压后在 x64/ 子目录里。
+          Invoke-WebRequest -Uri "https://github.com/vslavik/winsparkle/releases/download/v0.9.4/WinSparkle-0.9.4.zip" -OutFile wsp.zip
+          Expand-Archive wsp.zip -DestinationPath wsp -Force
+          $x64 = Get-ChildItem wsp -Recurse -Filter WinSparkle.dll | Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          if (-not $x64) { throw "WinSparkle x64 版未找到，请核对 release 目录结构" }
+          Copy-Item $x64.FullName third_party/externals/WinSparkle.dll -Force
+          # 雾凇词库。latest release 的 tag 是 nightly，资产按语言分包；
+          # 解压后顶层即 cn_dicts/，正是 sync-deps.bat 的存在性判据。
+          Invoke-WebRequest -Uri "https://github.com/iDvel/rime-ice/releases/latest/download/cn_dicts.zip" -OutFile rime.zip
+          Expand-Archive rime.zip -DestinationPath third_party/externals/data -Force
+          if (-not (Test-Path third_party/externals/data/cn_dicts)) {
+            throw "词库解压后未见 cn_dicts，资产结构与预期不符"
+          }
+
+      - name: 叠加本项目配置
+        shell: pwsh
+        run: |
+          # 雾凇原版之外有四个文件是本项目自己的，在主仓库留底。
+          # 少了它们编译仍能过，但行为与本地不一致（配色方案 / 左右键切换候选）。
+          $ErrorActionPreference = 'Stop'
+          $data = "third_party/externals/data"
+          Copy-Item patches/rime-default.yaml   "$data/default.yaml" -Force
+          Copy-Item patches/rime-weasel.yaml    "$data/weasel.yaml" -Force
+          Copy-Item patches/rime-ice.schema.yaml "$data/rime_ice.schema.yaml" -Force
+          Copy-Item config-center/shared/heng.yaml "$data/heng.yaml" -Force
+
+      - name: 编译 core
+        run: cargo build --release -p heng-core
+
+      - name: 重建 heng.lib 导入库
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # core 每新增导出后 lib64/heng.lib 不会自动更新，链接期报 LNK2001。
+          # 从新 dll 的导出表生成 .def 再 lib /def。这一步必须在 core 与 msbuild 之间。
+          $dll = (Resolve-Path target/release/heng_core.dll).Path
+          $libDir = "third_party/src/weasel/lib64"
+          New-Item -ItemType Directory -Force -Path $libDir | Out-Null
+
+          # 读 PE 导出表。不依赖仓库内的工具脚本 —— .workbuddy/ 是 gitignored 的，
+          # CI 上不存在。导出名在 PE 里是 ASCII，长度前缀后跟名字，以 NUL 结尾。
+          $bytes = [System.IO.File]::ReadAllBytes($dll)
+          $peOff = [BitConverter]::ToInt32($bytes, 0x3C)
+          $magic = [BitConverter]::ToUInt16($bytes, $peOff + 24)
+          $dirOff = if ($magic -eq 0x20B) { $peOff + 112 } else { $peOff + 96 }
+          # DataDirectory[0] = Export Table：RVA + Size，各 4 字节
+          $expRva = [BitConverter]::ToUInt32($bytes, $dirOff)
+          if ($expRva -eq 0) { throw "dll 无导出表" }
+
+          $nSections = [BitConverter]::ToUInt16($bytes, $peOff + 6)
+          $optSize = [BitConverter]::ToUInt16($bytes, $peOff + 20)
+          $secOff = $peOff + 24 + $optSize
+          $raw = $null
+          for ($i = 0; $i -lt $nSections; $i++) {
+            $s = $secOff + $i * 40
+            $va = [BitConverter]::ToUInt32($bytes, $s + 12)
+            $vs = [BitConverter]::ToUInt32($bytes, $s + 8)
+            $ptr = [BitConverter]::ToUInt32($bytes, $s + 20)
+            if ($expRva -ge $va -and $expRva -lt ($va + [Math]::Max($vs, 1))) {
+              $raw = $ptr + ($expRva - $va)
+              break
+            }
+          }
+          if ($null -eq $raw) { throw "未定位到导出表所在节" }
+
+          $nNames = [BitConverter]::ToUInt32($bytes, $raw + 24)
+          $namesRva = [BitConverter]::ToUInt32($bytes, $raw + 32)
+          $namesOff = $null
+          for ($i = 0; $i -lt $nSections; $i++) {
+            $s = $secOff + $i * 40
+            $va = [BitConverter]::ToUInt32($bytes, $s + 12)
+            $vs = [BitConverter]::ToUInt32($bytes, $s + 8)
+            $ptr = [BitConverter]::ToUInt32($bytes, $s + 20)
+            if ($namesRva -ge $va -and $namesRva -lt ($va + [Math]::Max($vs, 1))) {
+              $namesOff = $ptr + ($namesRva - $va)
+              break
+            }
+          }
+          if ($null -eq $namesOff) { throw "未定位到导出名表" }
+
+          $names = @()
+          for ($i = 0; $i -lt $nNames; $i++) {
+            $rva = [BitConverter]::ToUInt32($bytes, $namesOff + $i * 4)
+            $fo = $null
+            for ($j = 0; $j -lt $nSections; $j++) {
+              $s2 = $secOff + $j * 40
+              $va2 = [BitConverter]::ToUInt32($bytes, $s2 + 12)
+              $vs2 = [BitConverter]::ToUInt32($bytes, $s2 + 8)
+              $ptr2 = [BitConverter]::ToUInt32($bytes, $s2 + 20)
+              if ($rva -ge $va2 -and $rva -lt ($va2 + [Math]::Max($vs2, 1))) {
+                $fo = $ptr2 + ($rva - $va2)
+                break
+              }
+            }
+            if ($null -eq $fo) { continue }
+            $end = $fo
+            while ($bytes[$end] -ne 0) { $end++ }
+            $names += [System.Text.Encoding]::ASCII.GetString($bytes, $fo, $end - $fo)
+          }
+          if ($names.Count -eq 0) { throw "导出名表为空" }
+
+          # 排序规则与 sync_heng_def.py 一致：非 heng_ 前缀按原样（Slint 的 *VTable
+          # 等大写符号自然排在 heng_ 之后），heng_* 按字典序
+          $sorted = $names | Sort-Object @{ Expression = {
+            if ($_ -like 'heng_*') { $_.ToLower() } else { $_ }
+          } }
+          $def = @("LIBRARY heng_core", "EXPORTS") + ($sorted | ForEach-Object { "    $_" })
+          [System.IO.File]::WriteAllLines("$libDir/heng.def", $def)
+          Write-Host "导出符号 $($names.Count) 项"
+
+          $vcvars = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) {
+            $vcvars = (Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\VC\Auxiliary\Build\vcvars64.bat" | Select-Object -First 1).FullName
+          }
+          & cmd /c "call `"$vcvars`" >nul && cd /d `"$libDir`" && lib /def:heng.def /machine:X64 /out:heng.lib"
+          if ($LASTEXITCODE -ne 0) { throw "lib.exe 失败，退出码 $LASTEXITCODE" }
+          if (-not (Test-Path "$libDir/heng.lib")) { throw "heng.lib 未生成" }
+
+      - name: 编译 weasel
+        shell: cmd
+        run: |
+          cd third_party\src\weasel
+          build-x64.bat
+
+      - name: 收集产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: heng-windows
+          path: |
+            third_party/src/weasel/output/WeaselServer.exe
+            third_party/src/weasel/output/WeaselDeployer.exe
+            third_party/src/weasel/output/weaselx64.dll
+            third_party/src/weasel/output/heng_core.dll
+            third_party/src/weasel/output/rime.dll
+            third_party/src/weasel/output/WinSparkle.dll
+
+  # Linux 外壳：自研 fcitx5 addon，源码已入库，无需补丁重放。
+  shell-linux:
+    name: 外壳 Linux (fcitx5)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake pkg-config librime-dev \
+            libfcitx5core-dev libfcitx5config-dev libfcitx5utils-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 编译 core
+        run: cargo build --release -p heng-core
+
+      - name: 编译 addon
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release shells/linux/fcitx5
+          cmake --build build
+
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+           test -f build/libheng.so || { echo "addon 未产出"; exit 1; }
+           # addon 通过 C ABI 调 core，链接期没报错即说明符号解析成功；
+           # 这里再确认它确实指向 core 导出的入口
+           nm -D build/libheng.so | grep -q heng_create \
+             || { echo "addon 未引用 heng_create"; exit 1; }
+           ldd build/libheng.so | grep -q "not found" \
+             && { echo "有未解析的动态库依赖"; exit 1; } || true
+
+      - name: 收集产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: heng-linux
+          path: |
+            build/libheng.so
+            target/release/libheng_core.so
+
+  # macOS 外壳：squirrel 改造。改动固化在 patches/squirrel-heng.patch。
+  shell-macos:
+    name: 外壳 macOS (squirrel)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 librime
+        run: |
+          set -euo pipefail
+          url="https://github.com/rime/librime/releases/download/${LIBRIME_VERSION}/rime-${LIBRIME_HASH}-macOS-universal.tar.bz2"
+          curl -sL "$url" -o rime.tar.bz2
+          mkdir -p third_party/librime
+          tar xjf rime.tar.bz2 -C third_party/librime
+          test -f third_party/librime/dist/lib/librime.dylib
+
+      - name: 克隆 squirrel 并重放补丁
+        run: |
+          set -euo pipefail
+          # 基线是品牌图标定型 commit 6ad0e45b（作者为本项目），含 logo.svg
+          git clone --depth 1 https://github.com/rime/squirrel third_party/src/squirrel
+          cd third_party/src/squirrel
+          git fetch --depth 1 origin 6ad0e45bcf53b770474100c02cec43912f0da502
+          git checkout 6ad0e45bcf53b770474100c02cec43912f0da502
+          git apply ../../../patches/squirrel-heng.patch
+          git submodule update --init --recursive Sparkle plum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 编译 core
+        run: cargo build --release -p heng-core
+
+      - name: 同步 core 产物到 squirrel
+        run: |
+          set -euo pipefail
+          cd third_party/src/squirrel
+          mkdir -p lib librime/include
+          # Makefile 的 DEPS_CHECK 要 lib/librime.1.dylib；官方包里的文件名一致
+          cp -L librime/dist/lib/librime.1.dylib lib/
+          cp -pR librime/dist/lib/rime-plugins lib/
+          cp librime/dist/bin/rime_deployer bin/
+          cp librime/dist/bin/rime_dict_manager bin/
+          xcrun install_name_tool -add_rpath @loader_path/../Frameworks bin/rime_deployer
+          xcrun install_name_tool -add_rpath @loader_path/../Frameworks bin/rime_dict_manager
+          # 贴帧层经 bridging header 调这些符号，dylib 与头文件都要同步
+          cp ../../../target/release/libheng_core.dylib lib/
+          cp ../../../core/include/heng.h librime/include/heng.h
+
+      - name: 准备 plum 数据与 Sparkle
+        run: |
+          set -euo pipefail
+          cd third_party/src/squirrel
+          make copy-plum-data || make plum-data
+          make opencc-data
+          # Sparkle.framework 是 DEPS_CHECK 的一项
+          make copy-sparkle-framework
+
+      - name: 编译 Squirrel
+        run: |
+          cd third_party/src/squirrel
+          mkdir -p build
+          xcodebuild -project Squirrel.xcodeproj \
+            -configuration Debug -scheme Squirrel \
+            -derivedDataPath build \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build |xcbeautify || {
+              # xcbeautify 不在时退回原始输出
+              xcodebuild -project Squirrel.xcodeproj \
+                -configuration Debug -scheme Squirrel \
+                -derivedDataPath build \
+                COMPILER_INDEX_STORE_ENABLE=NO build
+            }
+
+      - name: 收集产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: heng-macos
+          path: third_party/src/squirrel/build/Build/Products/Debug/Squirrel.app

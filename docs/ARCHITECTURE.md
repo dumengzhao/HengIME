@@ -235,6 +235,32 @@ core 的 `heng_sync_user_data()` 导出当前无 UI 入口，是「服务端 + �
 | Windows 外壳 | `third_party/src/weasel/build-x64.bat`（正式）/ `build-x64-dev.bat`（dev） |
 | Windows dev 部署 | `tools/weasel-dev-install.ps1`（注册需管理员） |
 
+## 9.1 GitHub Actions
+
+`.github/workflows/ci.yml` 四个 job，`push` 与 `pull_request` 到 `main` 时触发。
+
+| job | runner | 内容 |
+|---|---|---|
+| `core` | ubuntu / windows / macos 三平台矩阵 | 编 core、跑单测、过 ABI 全链路 |
+| `shell-windows` | windows-2022 | 重放 weasel 补丁、装 boost 1.84、编 weasel 全链 |
+| `shell-linux` | ubuntu-24.04 | 编 fcitx5 addon |
+| `shell-macos` | macos-15 | 重放 squirrel 补丁、`xcodebuild` 编 Squirrel.app |
+
+**librime 的获取三条路**（`core/build.rs` 按target_os 分支）：Windows 与 macOS
+强制要求 `third_party/librime/dist/lib` 下有官方预编译产物，CI 从 librime release
+下载对应平台的包；Linux 有本地产物就用，没有则链发行版包 `librime-dev`。
+
+**Windows job 里导入库必须重建**：`lib64/heng.lib` 是 core 的导入库，core 每新增
+导出后它不会自动更新，链接期报 `LNK2001`。CI 在编完 core 之后、msbuild 之前从
+dll 的 PE 导出表生成 `.def` 再 `lib /def`，这一步不能用仓库内的工具脚本
+（`.workbuddy/` 是 gitignored 的）。
+
+**`weasel.props` 由 CI 生成**：该文件被上游 `.gitignore` 忽略，不在补丁里，
+入库的模板中 `BOOST_ROOT` 是绝对路径，CI 按 runner 上的实际路径重写。
+
+产物以 artifact 形式上传（`heng-windows` / `heng-linux` / `heng-macos`），
+不做发布——项目自用不上架。
+
 **两套工具链不自动同步。** cargo 与 msbuild 互不知晓对方的存在，
 `heng_core.dll` 由 cargo 产出、由 msbuild 链接进 exe，两者之间靠
 `build-core.bat` 显式拷贝。该脚本由两个 `build-x64*.bat` 在 msbuild 之前调用，
