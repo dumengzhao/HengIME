@@ -524,12 +524,17 @@ jobs:
         run: |
           cd third_party\src\weasel
           rem build-x64.bat 里有三处 pause，靠重定向 stdin 让它立即返回而不是等输入。
-          rem 它自己把 msbuild 输出写进 msbuild-x64.log。
-          build-x64.bat < NUL
-          if errorlevel 1 (
-            echo ### build-x64.bat failed, ExitCode=%ERRORLEVEL%>> %GITHUB_STEP_SUMMARY%
-            type msbuild-x64.log >> %GITHUB_STEP_SUMMARY%
-            exit /b 1
+          rem 它自己把 msbuild 输出写进 msbuild-x64.log，但脚本在前置步骤
+          rem （build-core / vcvarsall / unlock-tsf）失败时那个文件还不存在，
+          rem 所以把脚本的全部 stdout 也落盘，否则上传的 artifact 里什么都没有。
+          rem build-x64.bat < NUL 的 1> 2> 重定向会把 pause 的提示也吃掉，无妨。
+          build-x64.bat < NUL > weasel-build.log 2>&1
+          set RC=%ERRORLEVEL%
+          type weasel-build.log
+          if exist msbuild-x64.log type msbuild-x64.log
+          if %RC% neq 0 (
+            echo ### build-x64.bat failed, ExitCode=%RC%>> %GITHUB_STEP_SUMMARY%
+            exit /b %RC%
           )
 
       - name: 收集产物与日志
@@ -548,6 +553,7 @@ jobs:
             third_party/src/weasel/output/rime.dll
             third_party/src/weasel/output/WinSparkle.dll
             third_party/src/weasel/msbuild-x64.log
+            third_party/src/weasel/weasel-build.log
             *.log
           if-no-files-found: ignore
 
@@ -729,8 +735,17 @@ jobs:
             cp "$GITHUB_WORKSPACE/third_party/librime-deps/lib/$a.a" librime/lib/
           done
           ls librime/lib
-          # Sparkle.framework 是 DEPS_CHECK 的一项
-          make copy-sparkle-framework >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
+          # Sparkle.framework 是 DEPS_CHECK 的一项。
+          # 用 make Frameworks/Sparkle.framework 而不是 make copy-sparkle-framework：
+          # 后者只做 `cp -RP Sparkle/build/Release/Sparkle.framework Frameworks/`，
+          # 不负责编译，而 Sparkle 的产物要 xcodebuild 才会出现。
+          # 目标名（$(SPARKLE_FRAMEWORK)）那条规则还会自己 git submodule update，
+          # 比 make sparkle 更完整。
+          if ! make Frameworks/Sparkle.framework >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1; then
+            echo "### make Frameworks/Sparkle.framework 失败" >> "$GITHUB_WORKSPACE/mac-setup.log"
+            exit 1
+          fi
+          test -d Frameworks/Sparkle.framework
           ls data/opencc data/plum Frameworks >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
           cat "$GITHUB_WORKSPACE/mac-setup.log"
 
