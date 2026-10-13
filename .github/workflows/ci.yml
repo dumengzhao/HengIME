@@ -24,16 +24,25 @@ jobs:
   core:
     name: core (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # Windows runner 上 run 的默认 shell 是 pwsh，而这个 job 的步骤统一用 bash 语法
+    # （set -o pipefail / PIPESTATUS / { } >> $GITHUB_STEP_SUMMARY）。
+    # 不显式声明的话，Windows 会把 `set -o pipefail` 当成 PowerShell 命令而报错。
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Linux
             os: ubuntu-24.04
+            rust-target: x86_64-unknown-linux-gnu
           - name: Windows
             os: windows-2022
+            rust-target: x86_64-pc-windows-msvc
           - name: macOS
             os: macos-15
+            rust-target: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +62,10 @@ jobs:
           if (-not (Test-Path third_party/librime/dist/lib/rime.lib)) {
             throw "rime.lib 缺失，官方包结构与预期不符"
           }
+          # core 链的是 rime.lib（导入库），产物 heng_core.dll 与单测 exe 运行时
+          # 仍要加载 rime.dll。测试 exe 落在 target/release/deps/，那里没有 rime.dll，
+          # 只能在 PATH 里补一份，否则 cargo test 报「找不到依赖」。
+          "$env:GITHUB_WORKSPACE\third_party\librime\dist\lib" | Out-File -Append $env:GITHUB_PATH
 
       - name: 安装 librime（macOS）
         if: runner.os == 'macOS'
@@ -75,6 +88,10 @@ jobs:
           [ -e "$LIB/librime.1.dylib" ] || ln -s "$REAL" "$LIB/librime.1.dylib"
           [ -e "$LIB/librime.dylib" ] || ln -s librime.1.dylib "$LIB/librime.dylib"
           test -f "$LIB/librime.dylib"
+          # 官方包的 dylib install_name 不是 @rpath，测试二进制与 heng-cli 运行时
+          # 找不到它就会 dyld 报错。写进 GITHUB_ENV 让后续步骤都带上。
+          echo "DYLD_LIBRARY_PATH=$GITHUB_WORKSPACE/third_party/librime/dist/lib:${DYLD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$GITHUB_WORKSPACE/third_party/librime/dist/lib" >> "$GITHUB_ENV"
 
       - name: 安装 librime（Linux）
         if: runner.os == 'Linux'
@@ -88,14 +105,28 @@ jobs:
 
       - name: 安装 Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        # librime 的官方 Windows 产物是 MSVC 的 rime.lib。windows-2022 runner 的
+        # 默认 host 就是 msvc，这里把三个平台的 host 显式写进 job 摘要——
+        # 失败时能确认工具链是不是预期的那个（targets 参数只装额外 target，
+        # 不切host）。
+        with:
+          targets: ${{ matrix.rust-target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - name: 记录工具链
+        run: |
+          {
+            echo "### host 与target"
+            echo '```'
+            rustc -vV
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 编译 core
         run: |
           set -o pipefail
-          # 工具链信息写进摘要：MSVC 与 GNU 工具链在链接 librime 时行为不同，
-          # 失败时需要知道 runner 用的是哪个
+          # 工具链写进 job 摘要：MSVC 与 GNU 工具链在链接 librime 时行为不同，
+          # 失败时需要知道 runner 用的是哪个。librime 的官方 Windows 产物是
+          # MSVC 的 rime.lib，用 GNU 工具链会链接失败。
           {
             echo "### toolchain"
             echo '```'
@@ -110,12 +141,17 @@ jobs:
               tail -60 build.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # 再打一遍到 stdout：job 摘要只能从 UI 看，
+            # 而拉取 CI 日志需要仓库 admin 权限
+            echo "::error::cargo build 失败，详见 job summary 与末尾 60 行"
             exit 1
           fi
 
       - name: 单测
         run: |
           set -o pipefail
+          # core/src/ui.rs 里 5 个测试涉UI 后端。macOS runner 是无头环境，
+          # 没有窗口系统可用，失败时需要看到具体是哪个断言。
           cargo test --release -p heng-core --lib 2>&1 | tee test.log
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then
             {
@@ -124,6 +160,7 @@ jobs:
               tail -60 test.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            grep -E "^(test |failures:|---- )" test.log | head -40 || true
             exit 1
           fi
 
@@ -357,11 +394,27 @@ jobs:
           [System.IO.File]::WriteAllLines("$libDir/heng.def", $def)
           Write-Host "导出符号 $($names.Count) 项"
 
-          $vcvars = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          if (-not (Test-Path $vcvars)) {
-            $vcvars = (Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\VC\Auxiliary\Build\vcvars64.bat" | Select-Object -First 1).FullName
-          }
-          & cmd /c "call `"$vcvars`" >nul && cd /d `"$libDir`" && lib /def:heng.def /machine:X64 /out:heng.lib"
+          # runner 上的 VS 装在哪个 edition 目录不固定（Enterprise / Community /
+          # BuildTools 都可能），且 ProgramFiles 与 ProgramW6432 在 pwsh 里取值不稳。
+          # 逐个候选路径找，找到即用；都找不到就把搜过的路径写进摘要。
+          $candidates = @(
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramW6432}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          $vcvars = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          {
+            echo "### vcvars 候选"
+            echo '```'
+            $candidates | ForEach-Object { "$_ => $(Test-Path $_)" }
+            echo "选中: $vcvars"
+            echo '```'
+          } | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          if (-not $vcvars) { throw "找不到 vcvars64.bat" }
+          & cmd /c "call `"$vcvars`" >nul && cd /d `"$libDir`" && lib /def:heng.def /machine:X64 /out:heng.lib 2>&1"
           if ($LASTEXITCODE -ne 0) { throw "lib.exe 失败，退出码 $LASTEXITCODE" }
           if (-not (Test-Path "$libDir/heng.lib")) { throw "heng.lib 未生成" }
 
@@ -488,22 +541,30 @@ jobs:
 
       - name: 同步 core 产物到 squirrel
         run: |
-          set -euo pipefail
           # librime 解压在仓库的 third_party/librime（core/build.rs 从这里找），
           # squirrel 树内那个 librime/ 是它自己的 submodule 位置，两者不是同一份。
-          LR="$(cd ../../../third_party/librime/dist && pwd)"
+          #
+          # 每个 run 步骤都从工作区根目录起算，之前的 cd 不跨步骤保留，
+          # 所以这里必须用 $GITHUB_WORKSPACE 定位，不能写 ../../../。
+          LR="$GITHUB_WORKSPACE/third_party/librime/dist"
+          {
+            echo "### librime dist: $LR"
+            ls -l "$LR/lib" "$LR/bin"
+          } >> "$GITHUB_STEP_SUMMARY" 2>&1
           cd third_party/src/squirrel
-          mkdir -p lib librime/include
+          mkdir -p lib librime/include bin
           # Makefile 的 DEPS_CHECK 要 lib/librime.1.dylib
           cp -L "$LR/lib/librime.1.dylib" lib/
-          cp -pR "$LR/lib/rime-plugins" lib/
+          # BSD cp（macOS 自带）没有 -pR 参数，用 cp -R 兼容两边
+          cp -R "$LR/lib/rime-plugins" lib/
           cp "$LR/bin/rime_deployer" bin/
           cp "$LR/bin/rime_dict_manager" bin/
           xcrun install_name_tool -add_rpath @loader_path/../Frameworks bin/rime_deployer
           xcrun install_name_tool -add_rpath @loader_path/../Frameworks bin/rime_dict_manager
           # 贴帧层经 bridging header 调这些符号，dylib 与头文件都要同步
-          cp ../../../target/release/libheng_core.dylib lib/
-          cp ../../../core/include/heng.h librime/include/heng.h
+          cp "$GITHUB_WORKSPACE/target/release/libheng_core.dylib" lib/
+          cp "$GITHUB_WORKSPACE/core/include/heng.h" librime/include/heng.h
+          ls -l lib/ librime/include/heng.h
 
       - name: 准备 plum 数据与 Sparkle
         run: |
