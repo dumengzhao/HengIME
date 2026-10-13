@@ -11,6 +11,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 拉取 Actions 运行日志需要仓库 admin 权限，外部只能看到每个步骤的成败。
+# 步骤失败时把日志尾部写进 $GITHUB_STEP_SUMMARY（UI 上可见），
+# 同时整个工作区的 *.log 作为一个 artifact 上传——artifact 走公开 API，
+# 不需要 admin，是外部唯一能拿到失败细节的途径。
+#
+# 注意：$GITHUB_STEP_SUMMARY 的内容不会出现在 check-run 的 output.summary 字段里
+#（那个字段对应 Actions toolkit 的 core.summary，是另一套机制），别指望从 API 读它。
+
 # librime 的下载地址在各步骤里写死：1.17.0 release，源码点 33e7814。
 # 写成变量曾导致三个平台的安装步骤一起失败，而拉取 CI 日志需要仓库 admin
 # 权限、看不到变量展开后的实际值，不如直接内联。
@@ -165,10 +173,10 @@ jobs:
           fi
 
       - name: 铺运行时配置
-        if: runner.os == 'Linux'
         run: |
           # runtime/ 被 gitignore，CI 上不存在，而 abitest 的断言要读配置与词库。
-          # 用 HENG_RUNTIME 指向现铺的目录。
+          # 用 HENG_RUNTIME 指向现铺的目录。三个平台都要铺——ABI 全链路那步
+          # 不按平台跳过，缺目录时 librime 部署直接 failure。
           #
           # 雾凇的部分（词典、lua 模块、符号表、opencc、7 个双拼 schema）不在仓库里，
           # 也不该入库 —— 它们跟着上游走，直接取 full.zip。入库会与上游脱节，
@@ -178,12 +186,22 @@ jobs:
           mkdir -p ci-runtime/rime-shared ci-runtime/rime-user
           curl -fL --retry 3 -o rime-full.zip \
             "https://github.com/iDvel/rime-ice/releases/latest/download/full.zip"
-          unzip -q rime-full.zip -d ci-runtime/rime-shared
+          # Windows runner 上没有 unzip，python 也不一定叫 python3。
+          PY=python3
+          command -v "$PY" >/dev/null 2>&1 || PY=python
+          if command -v unzip >/dev/null 2>&1; then
+            unzip -q rime-full.zip -d ci-runtime/rime-shared
+          else
+            "$PY" -c "import zipfile;zipfile.ZipFile('rime-full.zip').extractall('ci-runtime/rime-shared')"
+          fi
 
           # 本项目改过的三个配置覆盖在雾凇原版之上。
           # schema_list 只留 rime_ice：其余 8 个方案（t9 + 7 个双拼）本机在用但
           # 未入库，librime 遇到缺失的 schema 会让整个部署以 failure 收场。
-          python3 tools/ci/make_ci_default.py \
+          # runner 上 python 可能是 python3 也可能只是 python（Windows 上是后者）。
+          PY=python3
+          command -v "$PY" >/dev/null 2>&1 || PY=python
+          "$PY" tools/ci/make_ci_default.py \
             ci-runtime/rime-shared/default.yaml \
             ci-runtime/rime-shared/default.yaml
           cp patches/rime-ice.schema.yaml    ci-runtime/rime-shared/rime_ice.schema.yaml
@@ -220,6 +238,14 @@ jobs:
 
       - name: 编译 heng-cli
         run: cargo build --release -p heng-cli
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-core-${{ matrix.name }}
+          path: "*.log"
+          if-no-files-found: ignore
 
   # Windows 外壳：weasel改造。链条最长——补丁重放 + boost + MSBuild + 导入库重建。
   shell-windows:
@@ -426,6 +452,19 @@ jobs:
             echo '```'
           } | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
           if (-not $vcvars) { throw "找不到 vcvars64.bat" }
+
+          # build-x64.bat 第 15 行调的是本机固定路径
+          # C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\...\vcvarsall.bat，
+          # runner 上不存在，脚本会在 msbuild 之前就 exit /b 1。
+          # 那是本机日常构建脚本，不为 CI 改它—— 在该路径放一个转发到 runner
+          # 真实 vcvarsall 的 shim，脚本即可原样运行。
+          $vcall = Join-Path (Split-Path (Split-Path $vcvars -Parent) -Parent) "vcvarsall.bat"
+          if (-not (Test-Path $vcall)) { throw "vcvarsall.bat 不在 $vcall" }
+          $shimDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
+          New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+          "@echo off`r`ncall `"$vcall`" %*`r`n" | Set-Content -Path "$shimDir\vcvarsall.bat" -Encoding ASCII
+          "### vcvarsall shim -> $vcall" | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
           & cmd /c "call `"$vcvars`" >nul && cd /d `"$libDir`" && lib /def:heng.def /machine:X64 /out:heng.lib 2>&1"
           if ($LASTEXITCODE -ne 0) { throw "lib.exe 失败，退出码 $LASTEXITCODE" }
           if (-not (Test-Path "$libDir/heng.lib")) { throw "heng.lib 未生成" }
@@ -435,16 +474,16 @@ jobs:
         run: |
           cd third_party\src\weasel
           rem build-x64.bat 里有三处 pause，靠重定向 stdin 让它立即返回而不是等输入。
-          rem 它自己把 msbuild 输出写进 msbuild-x64.log，失败时把该文件送进 job 摘要——
-          rem 拉取 CI 日志需要仓库 admin 权限，外部只看得到 step 失败。
+          rem 它自己把 msbuild 输出写进 msbuild-x64.log。
           build-x64.bat < NUL
           if errorlevel 1 (
-            echo ### build-x64.bat failed>> %GITHUB_STEP_SUMMARY%
+            echo ### build-x64.bat failed, ExitCode=%ERRORLEVEL%>> %GITHUB_STEP_SUMMARY%
             type msbuild-x64.log >> %GITHUB_STEP_SUMMARY%
             exit /b 1
           )
 
       - name: 收集产物
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: heng-windows
@@ -455,6 +494,17 @@ jobs:
             third_party/src/weasel/output/heng_core.dll
             third_party/src/weasel/output/rime.dll
             third_party/src/weasel/output/WinSparkle.dll
+          if-no-files-found: ignore
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-shell-windows
+          path: |
+            third_party/src/weasel/msbuild-x64.log
+            *.log
+          if-no-files-found: ignore
 
   # Linux 外壳：自研 fcitx5 addon，源码已入库，无需补丁重放。
   shell-linux:
@@ -500,12 +550,22 @@ jobs:
              && { echo "有未解析的动态库依赖"; exit 1; } || true
 
       - name: 收集产物
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: heng-linux
           path: |
             build/libheng.so
             target/release/libheng_core.so
+          if-no-files-found: ignore
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-shell-linux
+          path: "*.log"
+          if-no-files-found: ignore
 
   # macOS 外壳：squirrel 改造。改动固化在 patches/squirrel-heng.patch。
   shell-macos:
@@ -582,10 +642,20 @@ jobs:
         run: |
           set -euo pipefail
           cd third_party/src/squirrel
-          make copy-plum-data || make plum-data
-          make opencc-data
+          # make plum-data 而不是 copy-plum-data：后者只是 cp 一个已构建好的
+          # plum/output，不负责构建 plum，源在但没产物时它会失败。
+          # plum-data 自己会链到 copy-plum-data。
+          make plum-data
+          # 不能用 make opencc-data：它跑的是 $(MAKE) -C librime deps/opencc，
+          # 那是 librime submodule —— 而 CI 刻意不初始化它（编译用的是仓库
+          # third_party/librime 下的官方预编译包）。opencc 数据那份包里已带。
+          mkdir -p data/opencc
+          cp "$GITHUB_WORKSPACE/third_party/librime/dist/share/opencc/"* data/opencc/
+          test -f data/opencc/TSCharacters.ocd2
+          test -f data/opencc/t2s.json
           # Sparkle.framework 是 DEPS_CHECK 的一项
           make copy-sparkle-framework
+          ls data/opencc data/plum Frameworks
 
       - name: 编译 Squirrel
         run: |
@@ -609,3 +679,14 @@ jobs:
         with:
           name: heng-macos
           path: third_party/src/squirrel/build/Build/Products/Debug/Squirrel.app
+          if-no-files-found: ignore
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-shell-macos
+          path: |
+            third_party/src/squirrel/xcodebuild.log
+            *.log
+          if-no-files-found: ignore
