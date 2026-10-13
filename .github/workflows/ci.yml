@@ -44,10 +44,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # 7-Zip 预装在 windows-2022 上但不在 PATH 里，必须用完整路径。
+          # 内置的 tar.exe 不支持 7z 的 LZMA 编码，替代不了。
+          $7z = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $7z)) { throw "runner 上找不到 7z.exe" }
           $url = "https://github.com/rime/librime/releases/download/$env:LIBRIME_VERSION/rime-$env:LIBRIME_HASH-Windows-msvc-x64.7z"
           Invoke-WebRequest -Uri $url -OutFile rime.7z
-          # 7z 在windows-2022 runner 上已预装
-          &7z x rime.7z "-othird_party/librime" -y | Out-Null
+          & $7z x rime.7z "-othird_party/librime" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z 解压失败，退出码 $LASTEXITCODE" }
           if (-not (Test-Path third_party/librime/dist/lib/rime.lib)) {
             throw "rime.lib 缺失，官方包结构与预期不符"
           }
@@ -57,16 +61,36 @@ jobs:
         run: |
           set -euo pipefail
           url="https://github.com/rime/librime/releases/download/${LIBRIME_VERSION}/rime-${LIBRIME_HASH}-macOS-universal.tar.bz2"
-          curl -sL "$url" -o rime.tar.bz2
+          curl -fL --retry 3 -o rime.tar.bz2 "$url"
+          # bzip2 不能假设可用（Apple 自带 tar 依赖 libarchive 的 bz2 支持），
+          # 缺了就用 python 解，runner 上一定有 python3
           mkdir -p third_party/librime
-          tar xjf rime.tar.bz2 -C third_party/librime
-          test -f third_party/librime/dist/lib/librime.dylib
+          if ! tar xjf rime.tar.bz2 -C third_party/librime 2>/dev/null; then
+            echo "tar 解压失败，改用 python3"
+            python3 -c "
+          import tarfile
+          with tarfile.open('rime.tar.bz2') as t:
+              t.extractall('third_party/librime')
+          "
+          fi
+          # 包里 librime.dylib 与 librime.1.dylib 都是符号链接，实体是
+          # librime.<版本>.dylib。core/build.rs 检查的是 librime.dylib，
+          # 符号链接没建出来时要手工补，否则 cargo build 直接 panic。
+          cd third_party/librime/dist/lib
+          ls librime.1.*.dylib
+          [ -e librime.1.dylib ] || ln -s "$(ls librime.1.*.dylib)" librime.1.dylib
+          [ -e librime.dylib ] || ln -s librime.1.dylib librime.dylib
+          test -f librime.dylib
 
       - name: 安装 librime（Linux）
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y librime-dev cmake pkg-config
+          # librime-dev 提供 librime.so 与头文件；
+          # libfontconfig1-dev 是 yeslogic-fontconfig-sys 的构建期依赖，
+          # 由 slint 的 software-renderer-systemfonts feature 引入，缺它 cargo build 会失败。
+          # x11rb 是纯 Rust，不需要额外的 X11 开发包。
+          sudo apt-get install -y librime-dev cmake pkg-config libfontconfig1-dev
 
       - name: 安装 Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -74,7 +98,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: 编译 core
-        run: cargo build --release -p heng-core
+        run: |
+          set -o pipefail
+          cargo build --release -p heng-core 2>&1 | tee build.log
+          # 拉取 CI 日志需要仓库 admin 权限，失败时把关键行写进 job 摘要，
+          # 否则外部只能看到 step 失败、看不到原因
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            echo "### cargo build 失败，末尾 40 行" >> "$GITHUB_STEP_SUMMARY"
+            tail -40 build.log >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: 单测
         run: cargo test --release -p heng-core --lib
@@ -96,9 +129,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $7z = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $7z)) { throw "runner 上找不到 7z.exe" }
           $url = "https://github.com/rime/librime/releases/download/$env:LIBRIME_VERSION/rime-$env:LIBRIME_HASH-Windows-msvc-x64.7z"
           Invoke-WebRequest -Uri $url -OutFile rime.7z
-          & 7z x rime.7z "-othird_party/librime" -y | Out-Null
+          & $7z x rime.7z "-othird_party/librime" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z 解压失败，退出码 $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path third_party/externals | Out-Null
           Copy-Item third_party/librime/dist/lib/rime.dll third_party/externals/ -Force
 
       - name: 克隆 weasel 并重放补丁
@@ -117,9 +154,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $7z = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $7z)) { throw "runner 上找不到 7z.exe" }
           $url = "https://archives.boost.io/release/1.84.0/source/boost_1_84_0.7z"
           Invoke-WebRequest -Uri $url -OutFile boost.7z
-          & 7z x boost.7z "-othird_party/src/weasel/deps" -y | Out-Null
+          & $7z x boost.7z "-othird_party/src/weasel/deps" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "boost 解压失败，退出码 $LASTEXITCODE" }
+          if (-not (Test-Path third_party/src/weasel/deps/boost_1_84_0/boost/version.hpp)) {
+            throw "boost 解压后未见 version.hpp"
+          }
 
       - name: 生成 weasel.props
         shell: pwsh
@@ -264,7 +307,15 @@ jobs:
         shell: cmd
         run: |
           cd third_party\src\weasel
-          build-x64.bat
+          rem build-x64.bat 里有三处 pause，靠重定向 stdin 让它立即返回而不是等输入。
+          rem 它自己把 msbuild 输出写进 msbuild-x64.log，失败时把该文件送进 job 摘要——
+          rem 拉取 CI 日志需要仓库 admin 权限，外部只看得到 step 失败。
+          build-x64.bat < NUL
+          if errorlevel 1 (
+            echo ### build-x64.bat failed>> %GITHUB_STEP_SUMMARY%
+            type msbuild-x64.log >> %GITHUB_STEP_SUMMARY%
+            exit /b 1
+          )
 
       - name: 收集产物
         uses: actions/upload-artifact@v4
@@ -289,7 +340,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake pkg-config librime-dev \
+            cmake pkg-config librime-dev libfontconfig1-dev \
             libfcitx5core-dev libfcitx5config-dev libfcitx5utils-dev
 
       - uses: dtolnay/rust-toolchain@stable
@@ -301,8 +352,14 @@ jobs:
 
       - name: 编译 addon
         run: |
+          set -o pipefail
           cmake -B build -DCMAKE_BUILD_TYPE=Release shells/linux/fcitx5
-          cmake --build build
+          cmake --build build 2>&1 | tee cmake.log
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            echo "### cmake --build 失败，末尾 40 行" >> "$GITHUB_STEP_SUMMARY"
+            tail -40 cmake.log >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: 校验产物
         run: |
@@ -334,10 +391,22 @@ jobs:
         run: |
           set -euo pipefail
           url="https://github.com/rime/librime/releases/download/${LIBRIME_VERSION}/rime-${LIBRIME_HASH}-macOS-universal.tar.bz2"
-          curl -sL "$url" -o rime.tar.bz2
+          curl -fL --retry 3 -o rime.tar.bz2 "$url"
           mkdir -p third_party/librime
-          tar xjf rime.tar.bz2 -C third_party/librime
-          test -f third_party/librime/dist/lib/librime.dylib
+          if ! tar xjf rime.tar.bz2 -C third_party/librime 2>/dev/null; then
+            echo "tar 解压失败，改用 python3"
+            python3 -c "
+          import tarfile
+          with tarfile.open('rime.tar.bz2') as t:
+              t.extractall('third_party/librime')
+          "
+          fi
+          # librime.dylib / librime.1.dylib 是符号链接，实体是 librime.<版本>.dylib。
+          # squirrel 的 Makefile 要 lib/librime.1.dylib，core/build.rs 要 librime.dylib。
+          cd third_party/librime/dist/lib
+          [ -e librime.1.dylib ] || ln -s "$(ls librime.1.*.dylib)" librime.1.dylib
+          [ -e librime.dylib ] || ln -s librime.1.dylib librime.dylib
+          test -f librime.dylib
 
       - name: 克隆 squirrel 并重放补丁
         run: |
@@ -348,6 +417,9 @@ jobs:
           git fetch --depth 1 origin 6ad0e45bcf53b770474100c02cec43912f0da502
           git checkout 6ad0e45bcf53b770474100c02cec43912f0da502
           git apply ../../../patches/squirrel-heng.patch
+          # 只拉 Sparkle 与 plum。librime 那个 submodule 不初始化——
+          # 编译用的是仓库 third_party/librime 下的官方预编译包，
+          # 拉源码既慢又与core/build.rs 找的位置冲突。
           git submodule update --init --recursive Sparkle plum
 
       - uses: dtolnay/rust-toolchain@stable
@@ -360,13 +432,16 @@ jobs:
       - name: 同步 core 产物到 squirrel
         run: |
           set -euo pipefail
+          # librime 解压在仓库的 third_party/librime（core/build.rs 从这里找），
+          # squirrel 树内那个 librime/ 是它自己的 submodule 位置，两者不是同一份。
+          LR="$(cd ../../../third_party/librime/dist && pwd)"
           cd third_party/src/squirrel
           mkdir -p lib librime/include
-          # Makefile 的 DEPS_CHECK 要 lib/librime.1.dylib；官方包里的文件名一致
-          cp -L librime/dist/lib/librime.1.dylib lib/
-          cp -pR librime/dist/lib/rime-plugins lib/
-          cp librime/dist/bin/rime_deployer bin/
-          cp librime/dist/bin/rime_dict_manager bin/
+          # Makefile 的 DEPS_CHECK 要 lib/librime.1.dylib
+          cp -L "$LR/lib/librime.1.dylib" lib/
+          cp -pR "$LR/lib/rime-plugins" lib/
+          cp "$LR/bin/rime_deployer" bin/
+          cp "$LR/bin/rime_dict_manager" bin/
           xcrun install_name_tool -add_rpath @loader_path/../Frameworks bin/rime_deployer
           xcrun install_name_tool -add_rpath @loader_path/../Frameworks bin/rime_dict_manager
           # 贴帧层经 bridging header 调这些符号，dylib 与头文件都要同步
@@ -384,19 +459,19 @@ jobs:
 
       - name: 编译 Squirrel
         run: |
+          set -o pipefail
           cd third_party/src/squirrel
           mkdir -p build
+          # xcbeautify 不在 runner 上预装，直接用原始 xcodebuild 输出
           xcodebuild -project Squirrel.xcodeproj \
             -configuration Debug -scheme Squirrel \
             -derivedDataPath build \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            build |xcbeautify || {
-              # xcbeautify 不在时退回原始输出
-              xcodebuild -project Squirrel.xcodeproj \
-                -configuration Debug -scheme Squirrel \
-                -derivedDataPath build \
-                COMPILER_INDEX_STORE_ENABLE=NO build
-            }
+            COMPILER_INDEX_STORE_ENABLE=NO build 2>&1 | tee xcodebuild.log
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            echo "### xcodebuild 失败，末尾 60 行" >> "$GITHUB_STEP_SUMMARY"
+            tail -60 xcodebuild.log >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: 收集产物
         if: always()
