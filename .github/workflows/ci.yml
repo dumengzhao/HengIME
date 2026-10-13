@@ -298,6 +298,11 @@ jobs:
           Copy-Item ../../../patches/env.bat .
 
       - name: 安装 boost 1.84
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: 解压 boost 1.84
         shell: pwsh
         run: |
           $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
@@ -308,6 +313,47 @@ jobs:
           if (-not (Test-Path third_party/src/weasel/deps/boost_1_84_0/boost/version.hpp)) {
             throw "boost 解压后未见 version.hpp"
           }
+
+      - name: 编译 boost 静态库
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 入库的 boost-project-config.jam 里 `using msvc` 带的是本机绝对路径
+          # （BuildTools 14.44），runner 上是 Enterprise，路径不同。这里按
+          # msvc-dev-cmd 注入的环境变量重写，让 b2 用 runner 真实的工具链。
+          $root = "third_party/src/weasel/deps/boost_1_84_0"
+          $cl = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\cl.exe"
+          $lib = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\lib.exe"
+          $vcvars = Join-Path (Split-Path $env:VCToolsInstallDir -Parent | Split-Path -Parent) "Auxiliary\Build\vcvarsall.bat"
+          if (-not (Test-Path $cl)) { throw "找不到 cl.exe: $cl" }
+          if (-not (Test-Path $vcvars)) { throw "找不到 vcvarsall.bat: $vcvars" }
+          @"
+          import option ;
+          using msvc : 14.3 : "$($cl -replace '\\','/')" : <setup>"$($vcvars -replace '\\','/')" <archiver>"$($lib -replace '\\','/')" ;
+          option.set keep-going : false ;
+          "@ | Set-Content -Path "$root/project-config.jam" -Encoding ASCII
+          Get-Content "$root/project-config.jam"
+
+          # 官方 7z 包只有 boost 源码，没有编好的 .lib，而 weasel 要链
+          # libboost_wserialization / libboost_filesystem / libboost_iostreams /
+          # libboost_chrono。链接期报 LNK1104 cannot open file 就是缺这一步。
+          Push-Location $root
+          & ".\b2.exe" `
+            toolset=msvc-14.3 `
+            address-model=64 `
+            link=static `
+            runtime-link=shared `
+            variant=release `
+            -j4 `
+            --with-serialization `
+            --with-filesystem `
+            --with-iostreams `
+            --with-chrono `
+            stage-lib
+          $rc = $LASTEXITCODE
+          Pop-Location
+          if ($rc -ne 0) { throw "b2 失败，退出码 $rc" }
+          Get-ChildItem "$root/stage/lib" -Filter "*1_84.lib" | Select-Object -ExpandProperty Name
 
       - name: 生成 weasel.props
         shell: pwsh
@@ -355,6 +401,26 @@ jobs:
           Copy-Item patches/rime-weasel.yaml    "$data/weasel.yaml" -Force
           Copy-Item patches/rime-ice.schema.yaml "$data/rime_ice.schema.yaml" -Force
           Copy-Item config-center/shared/heng.yaml "$data/heng.yaml" -Force
+
+      - name: 铺 librime 头文件与导入库
+        shell: pwsh
+        run: |
+          # weasel 的 vcxproj 里写的是 $(SolutionDir)\librime\include 与
+          # $(SolutionDir)\lib64（rime.lib），那是 librime submodule 的形状——
+          # 而 weasel 补丁把 rime_levers_api.h 移到了 include\，
+          # 导入库也从 submodule 换成了 lib64\。CI 不初始化 submodule，
+          # 所以按补丁后的实际期望位置铺官方预编译产物。
+          # 缺了会报 error C1083 (rime_levers_api.h) 与
+          # LINK fatal error LNK1104 (rime.lib)。
+          $ErrorActionPreference = 'Stop'
+          $ws = "third_party/src/weasel"
+          $dist = "third_party/librime/dist"
+          Copy-Item "$dist/include/*" "$ws/include/" -Force
+          New-Item -ItemType Directory -Force -Path "$ws/lib64" | Out-Null
+          Copy-Item "$dist/lib/rime.lib" "$ws/lib64/" -Force
+          if (-not (Test-Path "$ws/include/rime_levers_api.h")) { throw "rime_levers_api.h 未铺到位" }
+          if (-not (Test-Path "$ws/lib64/rime.lib")) { throw "lib64/rime.lib 未铺到位" }
+          Get-ChildItem "$ws/include" -Filter "rime*.h" | Select-Object -ExpandProperty Name
 
       - name: 编译 core
         run: cargo build --release -p heng-core
@@ -656,8 +722,30 @@ jobs:
           git apply ../../../patches/squirrel-heng.patch
           # 只拉 Sparkle 与 plum。librime 那个 submodule 不初始化——
           # 编译用的是仓库 third_party/librime 下的官方预编译包，
-          # 拉源码既慢又与core/build.rs 找的位置冲突。
+          # 拉源码既慢且与core/build.rs 找的位置冲突。
           git submodule update --init --recursive Sparkle plum
+
+      # squirrel 的 HEADER_SEARCH_PATHS 里写了 $(SRCROOT)/librime/include，
+      # 而 sources/Squirrel-Bridging-Header.h 要 #import <rime/key_table.h>。
+      # 那个 submodule 不初始化（编译用仓库 third_party/librime 的官方包），
+      # 但 key_table.h 是 librime 的内部头，两个官方预编译包里都没有——
+      # 只有源码树 src/rime/ 下有，所以按 squirrel .gitmodules 记的
+      # 那个 revision（33e7814）从 raw 取那一个文件。
+      # 它的依赖只有 <X11/keysym.h> 与 <rime_api.h>：
+      # 前者在 rime-deps 包的 include/X11/，后者在主包 dist/include/。
+      - name: 铺 librime 头文件到 squirrel
+        run: |
+          set -euo pipefail
+          SQ="$GITHUB_WORKSPACE/third_party/src/squirrel"
+          mkdir -p "$SQ/librime/include/rime"
+          # 公开 API 头（rime_api.h 等）—— 主包 dist/include/ 直接给
+          cp "$GITHUB_WORKSPACE/third_party/librime/dist/include/"*.h "$SQ/librime/include/"
+          # key_table.h 是内部头，只存在于源码树
+          curl -fL --retry 3 -o "$SQ/librime/include/rime/key_table.h" \
+            "https://raw.githubusercontent.com/rime/librime/33e7814/src/rime/key_table.h"
+          test -f "$SQ/librime/include/rime/key_table.h"
+          test -f "$SQ/librime/include/rime_api.h"
+          ls "$SQ/librime/include" "$SQ/librime/include/rime"
 
       - uses: dtolnay/rust-toolchain@stable
 
