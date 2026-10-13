@@ -315,8 +315,10 @@ jobs:
         shell: pwsh
         run: |
           $diagPath = Join-Path $env:GITHUB_WORKSPACE "msvc-env-diag.log"
-          "### 进入配置 MSVC 工具链环境步骤" |
-            Out-File -FilePath $diagPath -Encoding utf8
+          # 单行写，不用 "..." | Out-File 的换行续接写法：
+          # runner 把 run block 交给 pwsh -Command 执行，管道的跨行解析
+          # 与在本机 -File 下观察到的行为不一定一致。
+          Set-Content -Path $diagPath -Value "entered step" -Encoding utf8
           $ErrorActionPreference = 'Stop'
           $diag = New-Object System.Collections.Generic.List[string]
           function Log($m) { $diag.Add($m); Write-Host $m }
@@ -836,14 +838,19 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path _ci-logs | Out-Null
+          # 日志拷进 output/，让上传清单里的所有路径都落在同一个目录下。
+          # 清单里混工作区根与 third_party/src/weasel/output/ 时，
+          # upload-artifact v6 的「least common ancestor 作根目录」规则
+          # 会让除最深目录那一个文件外全部落空——实测 artifact 里
+          # 只剩 output/WinSparkle.dll 一个，日志一个都没进去。
+          $dst = "third_party/src/weasel/output"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
           $n = 0
-          Get-ChildItem -Path . -Filter *.log -File -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName _ci-logs/ -Force; $n++ }
-          Get-ChildItem -Path third_party/src/weasel -Filter *.log -File -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName _ci-logs/ -Force; $n++ }
-          Write-Host "收集到 $n 个日志文件"
-          Get-ChildItem _ci-logs | ForEach-Object { Write-Host "  $($_.Name) $($_.Length)" }
+          Get-ChildItem -Path . -Filter *.log -File -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $dst -Force; $n++ }
+          Get-ChildItem -Path third_party/src/weasel -Filter *.log -File -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $dst -Force; $n++ }
+          "collected=$n" | Out-File -FilePath "$dst/collect.log" -Encoding utf8
+          Write-Host "收集到 $n 个日志文件 -> $dst"
+          Get-ChildItem $dst -Filter *.log | ForEach-Object { Write-Output "  $($_.Name) $($_.Length)" }
 
       - name: 收集产物与日志
         # 合并成一步：upload-artifact 在同一 job 内并发上传会互相取消，
@@ -853,14 +860,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: heng-windows
-          path: |
-            third_party/src/weasel/output/WeaselServer.exe
-            third_party/src/weasel/output/WeaselDeployer.exe
-            third_party/src/weasel/output/weaselx64.dll
-            third_party/src/weasel/output/heng_core.dll
-            third_party/src/weasel/output/rime.dll
-            third_party/src/weasel/output/WinSparkle.dll
-            _ci-logs/
+          path: third_party/src/weasel/output/
           if-no-files-found: ignore
 
   # Linux 外壳：自研 fcitx5 addon，源码已入库，无需补丁重放。
