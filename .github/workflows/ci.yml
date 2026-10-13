@@ -407,20 +407,30 @@ jobs:
               throw "vcvars64 没有带来任何环境变量变化"
             }
             # 必须真的写文件：写在磁盘上的才跨步骤生效，写 $env: 只在本步骤有效。
+            # 用 [System.IO.File]::AppendAllLines 而不是 Add-Content：
+            # Add-Content 的参数名是 -Path / -LiteralPath，没有 -FilePath
+            # （-FilePath 是 Out-File / Export-Csv 的），写成 -FilePath 会抛
+            # ParameterBindingException，在 Stop 下直接终止整个步骤。
             if ($envFile.Count -gt 0) {
-              Add-Content -FilePath $env:GITHUB_ENV -Value $envFile -Encoding utf8
+              [System.IO.File]::AppendAllLines($env:GITHUB_ENV, $envFile)
+              Log "已写 GITHUB_ENV：$((Get-Item $env:GITHUB_ENV).Length) 字节 / $($envFile.Count) 行"
             }
             foreach ($p in $pathAdds) {
-              Add-Content -FilePath $env:GITHUB_PATH -Value $p -Encoding utf8
+              [System.IO.File]::AppendAllText($env:GITHUB_PATH, $p + "`n")
+              Log "已写 GITHUB_PATH：单行长度 $($p.Length)"
             }
+            Log "环境变量写入完成"
           }
           finally {
             # Append 而不是 Out-File：前面的进入快照已经写了首行。
-            # 用绝对路径，且两条都包 ErrorAction 覆盖——finally 里再抛异常
-            # 会替换掉真正的失败原因。
+            # 落盘失败也要写回 diag 文件，否则唯一的线索也丢了。
             try {
-              $diag | Out-File -Append -FilePath $diagPath -Encoding utf8
               $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            } catch {
+              Add-Content -Path $diagPath -Value "step summary 写入失败: $_" -Encoding utf8
+            }
+            try {
+              $diag | Out-File -Append -FilePath $diagPath -Encoding utf8 -ErrorAction SilentlyContinue
             } catch {
               Write-Host "诊断落盘失败: $_"
             }
