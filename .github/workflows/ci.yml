@@ -189,19 +189,24 @@ jobs:
           mkdir -p ci-runtime/rime-shared ci-runtime/rime-user
           curl -fL --retry 3 -o rime-full.zip \
             "https://github.com/iDvel/rime-ice/releases/latest/download/full.zip"
-          # Windows runner 上没有 unzip，python 也不一定叫 python3。
-          PY=python3
-          command -v "$PY" >/dev/null 2>&1 || PY=python
+          # 解压不能依赖 python：Windows Git Bash 里的 `python` 可能是
+          # Microsoft Store 的占位符（存在但执行即失败），而 runner 上没有 unzip。
+          # pwsh 的 Expand-Archive 是 Windows 上唯一稳的路径。
           if command -v unzip >/dev/null 2>&1; then
             unzip -q rime-full.zip -d ci-runtime/rime-shared
           else
-            "$PY" -c "import zipfile;zipfile.ZipFile('rime-full.zip').extractall('ci-runtime/rime-shared')"
+            powershell -NoProfile -Command "Expand-Archive -Path rime-full.zip -DestinationPath ci-runtime/rime-shared -Force"
           fi
+          test -f ci-runtime/rime-shared/default.yaml || {
+            echo "解压失败：没有 default.yaml"; ls -la rime-full.zip; exit 1; }
 
           # 本项目改过的三个配置覆盖在雾凇原版之上。
           # schema_list 只留 rime_ice：其余 8 个方案（t9 + 7 个双拼）本机在用但
           # 未入库，librime 遇到缺失的 schema 会让整个部署以 failure 收场。
-          "$PY" tools/ci/make_ci_default.py \
+          # 用 shell 版而不是 python 版：Windows Git Bash 里的 `python` 可能是
+          # Microsoft Store 的占位符，且 python 版在 Windows 上会把这个 CRLF 文件
+          # 的行尾改掉。shell 版内容与 python 版等价（已用真实 full.zip 比对）。
+          bash tools/ci/make_ci_default.sh \
             ci-runtime/rime-shared/default.yaml \
             ci-runtime/rime-shared/default.yaml
           cp patches/rime-ice.schema.yaml    ci-runtime/rime-shared/rime_ice.schema.yaml
@@ -475,13 +480,27 @@ jobs:
           # C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\...\vcvarsall.bat，
           # runner 上不存在，脚本会在 msbuild 之前就 exit /b 1。
           # 那是本机日常构建脚本，不为 CI 改它—— 在该路径放一个转发到 runner
-          # 真实 vcvarsall 的 shim，脚本即可原样运行。
-          $vcall = Join-Path (Split-Path (Split-Path $vcvars -Parent) -Parent) "vcvarsall.bat"
-          $diag.Add("vcvarsall: $vcall => $(Test-Path $vcall)")
+          # 真实环境脚本的 shim，脚本即可原样运行。
+          #
+          # 转发目标按存在性挑：runner 的 Enterprise 安装里有 vcvars64.bat，
+          # vcvarsall.bat 未必存在（实测本机 Enterprise 就没有）。
+          # shim 收到的参数是 build-x64.bat 传的 x64，两者都接受。
+          $aux = Split-Path (Split-Path $vcvars -Parent) -Parent
+          $fwd = @(
+            (Join-Path $aux "vcvarsall.bat")
+            (Join-Path $aux "vcvars64.bat")
+            (Join-Path $aux "vsdevcmd.bat")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $diag.Add("转发目标候选:")
+          $fwd | ForEach-Object { $diag.Add("  $_") }
+          if (-not $fwd) {
+            $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
+            throw "VC\Auxiliary 下找不到 vcvarsall/vcvars64/vsdevcmd"
+          }
           $shimDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
           New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
-          "@echo off`r`ncall `"$vcall`" %*`r`n" | Set-Content -Path "$shimDir\vcvarsall.bat" -Encoding ASCII
-          $diag.Add("shim -> $shimDir\vcvarsall.bat")
+          "@echo off`r`ncall `"$fwd`" %*`r`n" | Set-Content -Path "$shimDir\vcvarsall.bat" -Encoding ASCII
+          $diag.Add("shim $shimDir\vcvarsall.bat -> $fwd")
 
           $diag.Add("导出符号 $($names.Count) 项，def 首行 $($def[1])")
           $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
@@ -671,6 +690,11 @@ jobs:
           # make plum-data 而不是 copy-plum-data：后者只是 cp 一个已构建好的
           # plum/output，不负责构建 plum，源在但没产物时它会失败。
           # plum-data 自己会链到 copy-plum-data。
+          #
+          # bin/ 要先建：copy-plum-data 里的 `cp plum/rime-install bin/` 假定它
+          # 已存在（上游由 make librime 建），而 CI 刻意跳过 make librime——
+          # 编译用的是仓库 third_party/librime 下的官方预编译包。
+          mkdir -p bin
           if ! make plum-data >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1; then
             echo "### make plum-data 失败" >> "$GITHUB_WORKSPACE/mac-setup.log"
             exit 1

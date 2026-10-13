@@ -1,0 +1,12 @@
+# Windows 上开发，仓库里跑的脚本按 LF 入库。
+# core.autocrlf 会把 LF 转成 CRLF，CI 里 bash 执行带 CR 的脚本会出现
+# 不可见的解析问题（`syntax error near unexpected token`）。
+*.sh text eol=lf
+
+# 二进制
+*.dll binary
+*.exe binary
+*.so binary
+*.dylib binary
+*.lib binary
+*.zip binary
