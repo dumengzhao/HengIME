@@ -4514,10 +4514,10 @@ index 7b3bafe..b5227c4 100644
    <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
 diff --git a/build-core.bat b/build-core.bat
 new file mode 100644
-index 0000000..7a5a1d4
+index 0000000..b84a3a2
 --- /dev/null
 +++ b/build-core.bat
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,92 @@
 +@echo off
 +rem ============================================================================
 +rem build-core.bat - build heng_core.dll with cargo and deploy to weasel output
@@ -4586,12 +4586,21 @@ index 0000000..7a5a1d4
 +
 +rem Stop any server still running from this output directory, otherwise the
 +rem rename below fails. Other identities (dev vs release) keep running.
++rem TSF clients relaunch it as soon as an editor takes focus, so this only
++rem buys a moment — unlock-tsf.bat parks the exes before msbuild links.
 +for /f "tokens=2 delims==" %%P in ('wmic process where "name='WeaselServer.exe'" get ExecutablePath^,ProcessId /format:csv 2^>nul ^| findstr /i "%DEPLOY_DIR%"') do (
 +  echo [core] stopping WeaselServer running from %TARGET_DIR%...
 +  taskkill /PID %%~P /F >nul 2>&1
 +)
 +
-+if exist "%DEPLOY_DIR%\heng_core.dll" move /y "%DEPLOY_DIR%\heng_core.dll" "%DEPLOY_DIR%\heng_core.dll.old" >nul 2>&1
++rem Random suffix rather than a fixed .old name: the previous occupant stays
++rem mapped for as long as its host runs, and a fixed name cannot be reused
++rem while that is the case. Leftovers are swept each run — del succeeds for
++rem the ones already unmapped and fails for the rest.
++for %%F in ("%DEPLOY_DIR%\heng_core.dll.parked*") do del /q "%%~fF" >nul 2>&1
++if exist "%DEPLOY_DIR%\heng_core.dll" (
++  move "%DEPLOY_DIR%\heng_core.dll" "%DEPLOY_DIR%\heng_core.dll.parked%RANDOM%" >nul 2>&1
++)
 +copy /y "%BUILT%" "%DEPLOY_DIR%\heng_core.dll" >nul
 +if errorlevel 1 (
 +  echo ERROR: failed to copy core dll into %DEPLOY_DIR%
@@ -4930,10 +4939,10 @@ index 742f157..7ee8937 100755
  inline LONG RegGetStringValue(HKEY key,
 diff --git a/include/heng.h b/include/heng.h
 new file mode 100644
-index 0000000..f65f89d
+index 0000000..90c5715
 --- /dev/null
 +++ b/include/heng.h
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,461 @@
 +/*
 + * heng.h —— HengIME 统一能力模块 C ABI（M0）
 + *
@@ -5157,6 +5166,27 @@ index 0000000..f65f89d
 +HENG_API int heng_ui_sync_ex(heng_session_t session, int x, int caret_bottom,
 +                             int caret_top);
 +
++/* ---- macOS 外壳专用入口（其他平台不调用）----
++ *
++ * 为什么不复用 heng_process_key_ex：那是 Windows/Linux 的热路径，一次调用完成
++ * 「导航 + 按键 + 取 commit + 取 context」，签名与调用时机都绑在那套请求-响应
++ * 模型上。macOS 的 IMK 是主线程同步回调、方向键走 didCommand(by:) 而非
++ * handle(_:)，塞进 _ex 会让两端时序耦合。内部逻辑与 _ex 共用同一实现
++ * （ui_nav_key），两端行为不会漂移。 */
++
++/* 候选窗键盘导航：←/→ 切换预选词，↓ 展开面板，↑/空格/回车/数字按现有语义处理。
++ * 返回 HENG_TRUE = 已被候选窗消费（调用方不应再交给 librime）；
++ * HENG_FALSE = 未消费，按键应继续走普通输入流程。
++ * mask 的 keyup 位（ibus RELEASE_MASK / bit30）非 0 时一律返回 HENG_FALSE，
++ * 否则一次按键 = keydown+keyup 两次导航。 */
++HENG_API int heng_ui_nav_key(heng_session_t session, int keysym, int mask);
++
++/* 候选格点击选中：index 为**全局候选下标**（与 UI 线程格子模型一致，
++ * 横条与展开面板通用）。返回 HENG_TRUE = 已提交上屏。
++ * 上屏文本经 heng_take_ui_commit 取走，或由已注册的 heng_set_commit_handler
++ * 回调送达 —— 二者必须有一个，否则候选窗关了但字不上屏。 */
++HENG_API int heng_ui_click_candidate(heng_session_t session, int index);
++
 +/* 隐藏候选窗（焦点离开时调用）。 */
 +HENG_API int heng_ui_hide(void);
 +
@@ -5173,6 +5203,61 @@ index 0000000..f65f89d
 +/* 打开设置窗口（v9；page = 初始页索引 0-6：0=输入方案 1=外观 2=快捷键
 + * 3=标点符号 4=词库 5=服务 6=关于）。窗口运行于 core 内部 UI 线程（宿主进程内）。 */
 +HENG_API int heng_settings_show(int page);
++
++/* ---- macOS 窗口后端（M-P4）----
++ *
++ * core 只负责 slint 渲染（算出「这一帧长什么样」），窗口的创建/定位/贴帧
++ * 交给外壳在**主线程**执行。原因：AppKit 的窗口调用必须在主线程，而 core 的
++ * UI 线程是自己 spawn 的 Rust 线程，不能直接碰 NSPanel。
++ * 另两端由core 各自的 x11_backend / win_backend 直连平台，无此需求。
++ *
++ * 窗口编号 win：0 = 候选窗，1 = 设置窗口，2 = 顶部字母区。
++ * 操作 op：
++ *   0 = CONFIGURE  buf 指向 4 个 i32{x, y, w, h}，buf_len = 4。
++ *                坐标系为**左上原点**（三端统一），与鼠标坐标系一致。
++ *                AppKit 是左下原点，实现方需自行翻 y：
++ *                    y_flipped = screenHeight - (y + h)
++ *   1 = SHOW       贴帧由 op=3 完成。
++ *   2 = HIDE
++ *   3 = BLIT       buf 指向 w*h 个预乘 BGRA 像素（内存序即 BGRA，与 macOS
++ *                  CGBitmapContext(kCGImageAlphaPremultipliedFirst) 一致，
++ *                  可直接 memcpy，无需逐像素转换）。
++ *                  logical_w/logical_h 为逻辑尺寸，缓冲为物理像素。
++ *   4 = BEGIN_DRAG 设置窗口进入系统拖动（对应 X11 grab_pointer /
++ *                  Win32 HTCAPTION）。仅 win=1 会发。
++ *
++ * 语义约定：cb 在 core UI 线程被调用，实现方**必须**立即切回主线程
++ * （如 DispatchQueue.main.async）再碰 AppKit，不得阻塞，也不要持有 core 锁。
++ * buf 仅在本次调用期间有效，需自存副本。传 NULL 注销。 */
++typedef void (*heng_window_handler_fn)(void* ctx, unsigned char win, unsigned char op,
++                                       const void* buf, size_t buf_len,
++                                       unsigned int logical_w, unsigned int logical_h);
++HENG_API int heng_set_window_handler(heng_window_handler_fn cb, void* ctx);
++
++/* 外壳上报主屏尺寸与缩放（设备像素 / backingScaleFactor）。
++ * core 的 ui_scale() 与 screen_size() 靠它拿到真实值—— AppKit 只能在
++ * 主线程查屏幕，而这必须在外壳注册窗口回调时一并喂进来（早于首次布局）。
++ * 建议在显示器插拔 / 缩放变化时重新上报。 */
++HENG_API void heng_set_screen_info(unsigned int width, unsigned int height, float scale);
++
++/* 外壳上报所在显示器的工作区上下边界（设备像素，**左上原点**，与 core
++ * 三端统一坐标系一致）。仅 macOS 需要——另两端能直接查系统 API。
++ *
++ * 展开候选面板时用它判断「光标下方还放不放下」：放不下就向上翻转。
++ * Windows 用 MonitorFromPoint + GetMonitorInfoW 的 rcWork，Linux 用 x11rb
++ * randr 查 CRTC；macOS 的等价信息只能在主线程从 AppKit 取，故由外壳喂。
++ *
++ * 应上报 NSScreen.visibleFrame（已排除 Dock 与菜单栏），不要上报 frame：
++ * 整屏高度会让光标贴底时误判「下方还有空间」，面板实际被 Dock 盖住。
++ * 显示器插拔 / Dock 显隐 / 菜单栏高度变化时应重新上报。 */
++HENG_API void heng_set_work_area(int top, int bottom);
++
++/* 外壳在主线程收到指针事件后调用，core 排空队列转成 Slint 事件。
++ * x/y/dx/dy 均为**逻辑像素**（DPI 换算由 core 统一做）。
++ * kind 取值：0=移动 1=按下 2=抬起 3=滚轮 4=指针离开 5=窗口关闭请求。
++ * 仅 win=1 的kind=5 会被转成 CloseRequested（关闭设置窗口）。 */
++HENG_API void heng_push_pointer_event(unsigned char win, unsigned char kind,
++                                      float x, float y, float dx, float dy);
 +
 +/* 关闭设置窗口（v9）。 */
 +HENG_API int heng_settings_hide(void);
@@ -6150,10 +6235,10 @@ index eb773d4..0f98744 100644
    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
 diff --git a/unlock-tsf.bat b/unlock-tsf.bat
 new file mode 100644
-index 0000000..f6a633b
+index 0000000..a16f367
 --- /dev/null
 +++ b/unlock-tsf.bat
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,74 @@
 +@echo off
 +rem ============================================================================
 +rem unlock-tsf.bat - move the registered weaselx64.dll aside before relinking
@@ -6191,31 +6276,41 @@ index 0000000..f6a633b
 +  exit /b 1
 +)
 +
-+set DLL=%WEASEL_ROOT%%TARGET_DIR%\weaselx64.dll
++set OUT=%WEASEL_ROOT%%TARGET_DIR%
 +
-+rem Sweep leftovers from earlier runs. Failures are expected and ignored: a
-+rem parked file still mapped by a live host cannot be removed yet.
-+for %%F in ("%WEASEL_ROOT%%TARGET_DIR%\weaselx64.dll.parked*") do (
-+  del /q "%%~fF" >nul 2>&1
-+)
++rem Park one file aside. Renaming works where deleting does not: hosts that
++rem already mapped it keep using the renamed file's mapping, and link.exe finds
++rem the name free. A fixed parked name cannot be reused while the previous
++rem occupant is still mapped, so it carries a random suffix. Leftovers are
++rem swept on every run: del succeeds for the ones whose hosts exited and fails
++rem for the rest, which is exactly the desired behaviour.
++call :park "%OUT%\weaselx64.dll" "weaselx64.dll"
++if errorlevel 1 endlocal & exit /b 1
 +
-+rem Nothing to unlock on a first build.
-+if not exist "%DLL%" (
-+  echo [unlock] no existing weaselx64.dll in %TARGET_DIR%, nothing to do
-+  endlocal
-+  exit /b 0
-+)
++rem WeaselServer.exe is locked the same way, by the running service process.
++rem build-core.bat already stops that process before deploying the core dll,
++rem but TSF clients relaunch it as soon as an editor takes focus, so by the
++rem time msbuild gets here it may be back. Park it for the same reason.
++call :park "%OUT%\WeaselServer.exe" "WeaselServer.exe"
++if errorlevel 1 endlocal & exit /b 1
 +
-+set PARK=%WEASEL_ROOT%%TARGET_DIR%\weaselx64.dll.parked!RANDOM!
-+move "%DLL%" "!PARK!" >nul 2>&1
++call :park "%OUT%\WeaselDeployer.exe" "WeaselDeployer.exe"
++if errorlevel 1 endlocal & exit /b 1
++
++endlocal
++exit /b 0
++
++:park
++rem %1 = full path, %2 = display name
++if not exist "%~1" exit /b 0
++for %%F in ("%~1.parked*") do del /q "%%~fF" >nul 2>&1
++set PARK=%~1.parked!RANDOM!
++move "%~1" "!PARK!" >nul 2>&1
 +if errorlevel 1 (
-+  echo [unlock] cannot move %DLL% aside - another process is writing it.
++  echo [unlock] cannot move %~2 aside - another process is writing it.
 +  echo         Close the apps using the IME and retry.
-+  endlocal
 +  exit /b 1
 +)
-+
-+echo [unlock] parked previous weaselx64.dll, path is free for relink
-+endlocal
++echo [unlock] parked %~2, path is free for relink
 +exit /b 0
 \ No newline at end of file

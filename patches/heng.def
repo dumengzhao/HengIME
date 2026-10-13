@@ -62,26 +62,32 @@ EXPORTS
     heng_hello
     heng_highlight_candidate_on_current_page
     heng_last_error
+    heng_open_dir
     heng_process_key
     heng_process_key_ex
+    heng_push_pointer_event
     heng_select_candidate_on_current_page
     heng_set_caret_pos
-    heng_set_option
     heng_set_commit_handler
+    heng_set_option
     heng_set_propagation_policy
-    heng_set_session_owner
+    heng_set_screen_info
     heng_set_service_handler
+    heng_set_session_owner
+    heng_set_window_handler
+    heng_set_work_area
     heng_settings_hide
     heng_settings_show
-    heng_open_dir
     heng_simulate_key_sequence
     heng_start_session
     heng_style_flag
     heng_sync_user_data
     heng_take_ui_commit
+    heng_ui_click_candidate
     heng_ui_hide
     heng_ui_mode_hint
     heng_ui_mode_hint_ex
+    heng_ui_nav_key
     heng_ui_sync
     heng_ui_sync_ex
     heng_version
