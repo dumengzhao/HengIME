@@ -482,20 +482,22 @@ jobs:
           # 那是本机日常构建脚本，不为 CI 改它—— 在该路径放一个转发到 runner
           # 真实环境脚本的 shim，脚本即可原样运行。
           #
-          # 转发目标按存在性挑：runner 的 Enterprise 安装里有 vcvars64.bat，
-          # vcvarsall.bat 未必存在（实测本机 Enterprise 就没有）。
-          # shim 收到的参数是 build-x64.bat 传的 x64，两者都接受。
-          $aux = Split-Path (Split-Path $vcvars -Parent) -Parent
+          # 转发目标与 vcvars64.bat 同级（都在 VC\Auxiliary\Build\ 下），只是名字不同。
+          # 实测 runner 的 Enterprise 安装里有 vcvars64.bat 而没有 vcvarsall.bat，
+          # 所以按存在性挑一个能用的，不能写死名字。
+          $buildDir = Split-Path $vcvars -Parent
           $fwd = @(
-            (Join-Path $aux "vcvarsall.bat")
-            (Join-Path $aux "vcvars64.bat")
-            (Join-Path $aux "vsdevcmd.bat")
+            (Join-Path $buildDir "vcvarsall.bat")
+            (Join-Path $buildDir "vcvars64.bat")
+            (Join-Path $buildDir "vsdevcmd.bat")
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-          $diag.Add("转发目标候选:")
-          $fwd | ForEach-Object { $diag.Add("  $_") }
+          $diag.Add("Build 目录: $buildDir")
+          $diag.Add("转发目标: $fwd")
           if (-not $fwd) {
+            $diag.Add("Build 目录内容:")
+            Get-ChildItem $buildDir -Filter "*.bat" | ForEach-Object { $diag.Add("  " + $_.Name) }
             $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
-            throw "VC\Auxiliary 下找不到 vcvarsall/vcvars64/vsdevcmd"
+            throw "VC\Auxiliary\Build 下找不到 vcvarsall/vcvars64/vsdevcmd"
           }
           $shimDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
           New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
@@ -626,6 +628,17 @@ jobs:
           [ -e "$LIB/librime.dylib" ] || ln -s librime.1.dylib "$LIB/librime.dylib"
           test -f "$LIB/librime.dylib"
 
+          # opencc 数据与静态库在另一个资产里：主包只有 lib/(dylib) 与 bin/
+          # (rime_deployer 等)，share/opencc/*.ocd2 和 lib/*.a 都在 rime-deps 包。
+          # squirrel Makefile 的 RIME_DEPS 与 OPENCC_DATA 都指向后者。
+          curl -fL --retry 3 -o rime-deps.tar.bz2 \
+            "https://github.com/rime/librime/releases/download/1.17.0/rime-deps-33e7814-macOS-universal.tar.bz2"
+          mkdir -p third_party/librime-deps
+          tar xjf rime-deps.tar.bz2 -C third_party/librime-deps
+          test -d third_party/librime-deps/share/opencc
+          test -f third_party/librime-deps/share/opencc/TSCharacters.ocd2
+          ls third_party/librime-deps/share/opencc | head -5
+
       - name: 克隆 squirrel 并重放补丁
         run: |
           set -euo pipefail
@@ -701,11 +714,21 @@ jobs:
           fi
           # 不能用 make opencc-data：它跑的是 $(MAKE) -C librime deps/opencc，
           # 那是 librime submodule —— 而 CI 刻意不初始化它（编译用的是仓库
-          # third_party/librime 下的官方预编译包）。opencc 数据那份包里已带。
+          # third_party/librime 下的官方预编译包）。opencc 数据在
+          # rime-deps 包里，已解压到 third_party/librime-deps。
           mkdir -p data/opencc
-          cp "$GITHUB_WORKSPACE/third_party/librime/dist/share/opencc/"* data/opencc/
+          cp "$GITHUB_WORKSPACE/third_party/librime-deps/share/opencc/"* data/opencc/
           test -f data/opencc/TSCharacters.ocd2
           test -f data/opencc/t2s.json
+          # RIME_DEPS 也要这几个静态库（libmarisa/libleveldb/libopencc/
+          # libyaml-cpp.a）。它们在 librime submodule 里，而那个不初始化，
+          # 所以从 rime-deps 包补到 librime/lib/—— 位置与上游一致，
+          # 万一以后要跑 make librime 也不会缺料。
+          mkdir -p librime/lib
+          for a in libmarisa libleveldb libopencc libyaml-cpp; do
+            cp "$GITHUB_WORKSPACE/third_party/librime-deps/lib/$a.a" librime/lib/
+          done
+          ls librime/lib
           # Sparkle.framework 是 DEPS_CHECK 的一项
           make copy-sparkle-framework >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
           ls data/opencc data/plum Frameworks >> "$GITHUB_WORKSPACE/mac-setup.log" 2>&1
