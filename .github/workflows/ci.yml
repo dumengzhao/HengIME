@@ -780,12 +780,15 @@ jobs:
           # 那是本机日常构建脚本，不为 CI 改它—— 在该路径放一个转发到 runner
           # 真实环境脚本的 shim，脚本即可原样运行。
           #
-          # 转发目标与 vcvars64.bat 同级（都在 VC\Auxiliary\Build\ 下），只是名字不同。
-          # 实测 runner 的 Enterprise 安装里有 vcvars64.bat 而没有 vcvarsall.bat，
-          # 所以按存在性挑一个能用的，不能写死名字。
+          # shim 转发到 vcvars64.bat 而不是 vcvarsall.bat。两者在本机都可用，
+          # 但 vcvarsall.bat 会按参数选择工具集并调用同目录的其它 bat
+          # （%~dp0 相对定位），经过 shim 的 call 转发后这条链在
+          # Enterprise 安装下断掉，cmd 报的是
+          # "The input line is too long." + "The syntax of the command is incorrect."。
+          # vcvars64.bat 自包含且不需要参数（x64 目标本就是默认值），
+          # build-x64.bat 传的 x64 被 %* 转发过去也一并忽略。
           $buildDir = Split-Path $vcvars -Parent
           $fwd = @(
-            (Join-Path $buildDir "vcvarsall.bat")
             (Join-Path $buildDir "vcvars64.bat")
             (Join-Path $buildDir "vsdevcmd.bat")
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -795,12 +798,26 @@ jobs:
             $diag.Add("Build 目录内容:")
             Get-ChildItem $buildDir -Filter "*.bat" | ForEach-Object { $diag.Add("  " + $_.Name) }
             $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
-            throw "VC\Auxiliary\Build 下找不到 vcvarsall/vcvars64/vsdevcmd"
+            throw "VC\Auxiliary\Build 下找不到 vcvars64/vsdevcmd"
           }
           $shimDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
           New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
-          "@echo off`r`ncall `"$fwd`" %*`r`n" | Set-Content -Path "$shimDir\vcvarsall.bat" -Encoding ASCII
+          [System.IO.File]::WriteAllText(
+            (Join-Path $shimDir "vcvarsall.bat"),
+            ((@("@echo off", "call `"$fwd`" %*", "exit /b %ERRORLEVEL%") -join "`r`n") + "`r`n"))
           $diag.Add("shim $shimDir\vcvarsall.bat -> $fwd")
+          # shim 自身先自测一次：这一步失败时 build-x64.bat 会在 msbuild 之前
+          # exit /b 1，而那之后的日志全在 bat 里不易定位。
+          $shimProbe = & cmd /c "call `"$shimDir\vcvarsall.bat`" x64 >nul && set VCToolsInstallDir" 2>&1 | Out-String
+          $shimExit = $LASTEXITCODE
+          $diag.Add("shim 自测退出码 $shimExit，输出长度 $($shimProbe.Length)")
+          if ($shimExit -ne 0 -or $shimProbe -notmatch 'VCToolsInstallDir=') {
+            $diag.Add("shim 自测输出:")
+            ($shimProbe -split "`r?`n" | Select-Object -First 10) | ForEach-Object { $diag.Add("  $_") }
+            $diag | Out-File -Append heng-lib-diag.log -Encoding utf8
+            throw "shim 自测失败，vcvars 环境未就绪"
+          }
+          $diag.Add("shim 自测 VCToolsInstallDir 已就绪")
 
           $diag.Add("导出符号 $($names.Count) 项，def 首行 $($def[1])")
           $diag | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
