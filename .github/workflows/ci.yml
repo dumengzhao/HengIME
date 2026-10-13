@@ -11,11 +11,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-  # librime 发行包对应的源码点，见 third_party/librime/version-info.txt
-  LIBRIME_VERSION: 1.17.0
-  LIBRIME_HASH: 33e7814
+# librime 的下载地址在各步骤里写死：1.17.0 release，源码点 33e7814。
+# 写成变量曾导致三个平台的安装步骤一起失败，而拉取 CI 日志需要仓库 admin
+# 权限、看不到变量展开后的实际值，不如直接内联。
+# 对应关系见 third_party/librime/version-info.txt。
 
 jobs:
   # 三平台共用：编 core、跑单测、过 ABI 全链路。
@@ -43,14 +42,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
           # 7-Zip 预装在 windows-2022 上但不在 PATH 里，必须用完整路径。
           # 内置的 tar.exe 不支持 7z 的 LZMA 编码，替代不了。
-          $7z = 'C:\Program Files\7-Zip\7z.exe'
-          if (-not (Test-Path $7z)) { throw "runner 上找不到 7z.exe" }
-          $url = "https://github.com/rime/librime/releases/download/$env:LIBRIME_VERSION/rime-$env:LIBRIME_HASH-Windows-msvc-x64.7z"
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $sevenZip)) { throw "runner 上找不到 7z.exe" }
+          $url = 'https://github.com/rime/librime/releases/download/1.17.0/rime-33e7814-Windows-msvc-x64.7z'
           Invoke-WebRequest -Uri $url -OutFile rime.7z
-          & $7z x rime.7z "-othird_party/librime" -y | Out-Null
+          & $sevenZip x rime.7z "-othird_party/librime" -y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "7z 解压失败，退出码 $LASTEXITCODE" }
           if (-not (Test-Path third_party/librime/dist/lib/rime.lib)) {
             throw "rime.lib 缺失，官方包结构与预期不符"
@@ -59,28 +57,24 @@ jobs:
       - name: 安装 librime（macOS）
         if: runner.os == 'macOS'
         run: |
-          set -euo pipefail
-          url="https://github.com/rime/librime/releases/download/${LIBRIME_VERSION}/rime-${LIBRIME_HASH}-macOS-universal.tar.bz2"
-          curl -fL --retry 3 -o rime.tar.bz2 "$url"
-          # bzip2 不能假设可用（Apple 自带 tar 依赖 libarchive 的 bz2 支持），
-          # 缺了就用 python 解，runner 上一定有 python3
+          curl -fL --retry 3 -o rime.tar.bz2 \
+            "https://github.com/rime/librime/releases/download/1.17.0/rime-33e7814-macOS-universal.tar.bz2"
           mkdir -p third_party/librime
-          if ! tar xjf rime.tar.bz2 -C third_party/librime 2>/dev/null; then
-            echo "tar 解压失败，改用 python3"
-            python3 -c "
-          import tarfile
-          with tarfile.open('rime.tar.bz2') as t:
-              t.extractall('third_party/librime')
-          "
+          # 不用 set -e：出错时要自己给消息。bzip2 支持在 runner 上是有的，
+          # 但留python3 兜底以防镜像差异。
+          if ! tar xjf rime.tar.bz2 -C third_party/librime; then
+            echo "tar xjf 失败，改用 python3"
+            python3 -c "import tarfile; tarfile.open('rime.tar.bz2').extractall('third_party/librime')"
           fi
-          # 包里 librime.dylib 与 librime.1.dylib 都是符号链接，实体是
-          # librime.<版本>.dylib。core/build.rs 检查的是 librime.dylib，
-          # 符号链接没建出来时要手工补，否则 cargo build 直接 panic。
-          cd third_party/librime/dist/lib
-          ls librime.1.*.dylib
-          [ -e librime.1.dylib ] || ln -s "$(ls librime.1.*.dylib)" librime.1.dylib
-          [ -e librime.dylib ] || ln -s librime.1.dylib librime.dylib
-          test -f librime.dylib
+          LIB=third_party/librime/dist/lib
+          ls -l "$LIB"
+          # 包里 librime.dylib 与 librime.1.dylib 是指向 librime.<版本>.dylib 的符号链接。
+          # core/build.rs 检查 librime.dylib，缺符号链接时 cargo build 直接 panic。
+          REAL=$(cd "$LIB" && ls librime.1.*.dylib | head -1)
+          echo "实体库: $REAL"
+          [ -e "$LIB/librime.1.dylib" ] || ln -s "$REAL" "$LIB/librime.1.dylib"
+          [ -e "$LIB/librime.dylib" ] || ln -s librime.1.dylib "$LIB/librime.dylib"
+          test -f "$LIB/librime.dylib"
 
       - name: 安装 librime（Linux）
         if: runner.os == 'Linux'
@@ -112,7 +106,29 @@ jobs:
       - name: 单测
         run: cargo test --release -p heng-core --lib
 
+      - name: 铺运行时配置
+        if: runner.os == 'Linux'
+        run: |
+          # runtime/ 被 gitignore，CI 上不存在，而 abitest 的多数断言要读配置
+          # （schema 列表、配色方案数、config API）。用 HENG_RUNTIME 指向现铺的目录。
+          set -euo pipefail
+          mkdir -p ci-runtime/rime-shared ci-runtime/rime-user
+          cp patches/rime-default.yaml   ci-runtime/rime-shared/default.yaml
+          cp patches/rime-weasel.yaml    ci-runtime/rime-shared/weasel.yaml
+          cp patches/rime-ice.schema.yaml ci-runtime/rime-shared/rime_ice.schema.yaml
+          cp config-center/shared/heng.yaml ci-runtime/rime-shared/heng.yaml
+          # schema 依赖词典才能真正分词，词典取雾凇 cn_dicts.zip
+          if [ ! -d ci-runtime/rime-shared/cn_dicts ]; then
+            curl -fL --retry 3 -o cn.zip \
+              "https://github.com/iDvel/rime-ice/releases/latest/download/cn_dicts.zip"
+            unzip -q cn.zip -d ci-runtime/rime-shared/
+          fi
+          ls ci-runtime/rime-shared/
+          test -f ci-runtime/rime-shared/cn_dicts/base.dict.yaml
+
       - name: ABI 全链路
+        env:
+          HENG_RUNTIME: ${{ github.workspace }}/ci-runtime
         run: cargo run --release -p heng-cli -- abitest
 
       - name: 编译 heng-cli
@@ -128,12 +144,10 @@ jobs:
       - name: 安装 librime
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $7z = 'C:\Program Files\7-Zip\7z.exe'
-          if (-not (Test-Path $7z)) { throw "runner 上找不到 7z.exe" }
-          $url = "https://github.com/rime/librime/releases/download/$env:LIBRIME_VERSION/rime-$env:LIBRIME_HASH-Windows-msvc-x64.7z"
-          Invoke-WebRequest -Uri $url -OutFile rime.7z
-          & $7z x rime.7z "-othird_party/librime" -y | Out-Null
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $sevenZip)) { throw "runner 上找不到 7z.exe" }
+          Invoke-WebRequest -Uri 'https://github.com/rime/librime/releases/download/1.17.0/rime-33e7814-Windows-msvc-x64.7z' -OutFile rime.7z
+          & $sevenZip x rime.7z "-othird_party/librime" -y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "7z 解压失败，退出码 $LASTEXITCODE" }
           New-Item -ItemType Directory -Force -Path third_party/externals | Out-Null
           Copy-Item third_party/librime/dist/lib/rime.dll third_party/externals/ -Force
@@ -153,12 +167,10 @@ jobs:
       - name: 安装 boost 1.84
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $7z = 'C:\Program Files\7-Zip\7z.exe'
-          if (-not (Test-Path $7z)) { throw "runner 上找不到 7z.exe" }
-          $url = "https://archives.boost.io/release/1.84.0/source/boost_1_84_0.7z"
-          Invoke-WebRequest -Uri $url -OutFile boost.7z
-          & $7z x boost.7z "-othird_party/src/weasel/deps" -y | Out-Null
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $sevenZip)) { throw "runner 上找不到 7z.exe" }
+          Invoke-WebRequest -Uri "https://archives.boost.io/release/1.84.0/source/boost_1_84_0.7z" -OutFile boost.7z
+          & $sevenZip x boost.7z "-othird_party/src/weasel/deps" -y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "boost 解压失败，退出码 $LASTEXITCODE" }
           if (-not (Test-Path third_party/src/weasel/deps/boost_1_84_0/boost/version.hpp)) {
             throw "boost 解压后未见 version.hpp"
@@ -389,24 +401,19 @@ jobs:
 
       - name: 安装 librime
         run: |
-          set -euo pipefail
-          url="https://github.com/rime/librime/releases/download/${LIBRIME_VERSION}/rime-${LIBRIME_HASH}-macOS-universal.tar.bz2"
-          curl -fL --retry 3 -o rime.tar.bz2 "$url"
+          curl -fL --retry 3 -o rime.tar.bz2 \
+            "https://github.com/rime/librime/releases/download/1.17.0/rime-33e7814-macOS-universal.tar.bz2"
           mkdir -p third_party/librime
-          if ! tar xjf rime.tar.bz2 -C third_party/librime 2>/dev/null; then
-            echo "tar 解压失败，改用 python3"
-            python3 -c "
-          import tarfile
-          with tarfile.open('rime.tar.bz2') as t:
-              t.extractall('third_party/librime')
-          "
+          if ! tar xjf rime.tar.bz2 -C third_party/librime; then
+            echo "tar xjf 失败，改用 python3"
+            python3 -c "import tarfile; tarfile.open('rime.tar.bz2').extractall('third_party/librime')"
           fi
-          # librime.dylib / librime.1.dylib 是符号链接，实体是 librime.<版本>.dylib。
-          # squirrel 的 Makefile 要 lib/librime.1.dylib，core/build.rs 要 librime.dylib。
-          cd third_party/librime/dist/lib
-          [ -e librime.1.dylib ] || ln -s "$(ls librime.1.*.dylib)" librime.1.dylib
-          [ -e librime.dylib ] || ln -s librime.1.dylib librime.dylib
-          test -f librime.dylib
+          LIB=third_party/librime/dist/lib
+          REAL=$(cd "$LIB" && ls librime.1.*.dylib | head -1)
+          # squirrel 的 Makefile 要 lib/librime.1.dylib，core/build.rs 要 librime.dylib
+          [ -e "$LIB/librime.1.dylib" ] || ln -s "$REAL" "$LIB/librime.1.dylib"
+          [ -e "$LIB/librime.dylib" ] || ln -s librime.1.dylib "$LIB/librime.dylib"
+          test -f "$LIB/librime.dylib"
 
       - name: 克隆 squirrel 并重放补丁
         run: |
