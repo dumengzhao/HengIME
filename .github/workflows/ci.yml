@@ -318,26 +318,35 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # b2 的输出可能很长，全部落盘：artifact 上传是外部唯一能读到它的途径。
+          $log = "$env:GITHUB_WORKSPACE\boost-build.log"
+          function Log($m) { $m | Tee-Object -FilePath $log -Append }
+
           # 入库的 boost-project-config.jam 里 `using msvc` 带的是本机绝对路径
-          # （BuildTools 14.44），runner 上是 Enterprise，路径不同。这里按
+          # （BuildTools 14.44），runner 上是Enterprise，路径不同。这里按
           # msvc-dev-cmd 注入的环境变量重写，让 b2 用 runner 真实的工具链。
           $root = "third_party/src/weasel/deps/boost_1_84_0"
           $cl = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\cl.exe"
           $lib = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\lib.exe"
-          $vcvars = Join-Path (Split-Path $env:VCToolsInstallDir -Parent | Split-Path -Parent) "Auxiliary\Build\vcvarsall.bat"
-          if (-not (Test-Path $cl)) { throw "找不到 cl.exe: $cl" }
-          if (-not (Test-Path $vcvars)) { throw "找不到 vcvarsall.bat: $vcvars" }
+          $vcAux = Split-Path (Split-Path $env:VCToolsInstallDir -Parent) -Parent
+          $vcvars = Join-Path $vcAux "Auxiliary\Build\vcvarsall.bat"
+          Log "VCToolsInstallDir = $env:VCToolsInstallDir"
+          Log "cl.exe  = $cl => $(Test-Path $cl)"
+          Log "lib.exe = $lib => $(Test-Path $lib)"
+          Log "vcvars  = $vcvars => $(Test-Path $vcvars)"
+          if (-not (Test-Path $cl)) { throw "找不到 cl.exe" }
+          if (-not (Test-Path $vcvars)) { throw "找不到 vcvarsall.bat" }
           @"
           import option ;
           using msvc : 14.3 : "$($cl -replace '\\','/')" : <setup>"$($vcvars -replace '\\','/')" <archiver>"$($lib -replace '\\','/')" ;
           option.set keep-going : false ;
           "@ | Set-Content -Path "$root/project-config.jam" -Encoding ASCII
-          Get-Content "$root/project-config.jam"
 
           # 官方 7z 包只有 boost 源码，没有编好的 .lib，而 weasel 要链
           # libboost_wserialization / libboost_filesystem / libboost_iostreams /
           # libboost_chrono。链接期报 LNK1104 cannot open file 就是缺这一步。
           Push-Location $root
+          Log "--- b2 开始 ---"
           & ".\b2.exe" `
             toolset=msvc-14.3 `
             address-model=64 `
@@ -349,11 +358,12 @@ jobs:
             --with-filesystem `
             --with-iostreams `
             --with-chrono `
-            stage-lib
+            stage-lib 2>&1 | Tee-Object -FilePath $log -Append
           $rc = $LASTEXITCODE
           Pop-Location
+          Log "--- b2 退出码 $rc ---"
           if ($rc -ne 0) { throw "b2 失败，退出码 $rc" }
-          Get-ChildItem "$root/stage/lib" -Filter "*1_84.lib" | Select-Object -ExpandProperty Name
+          Get-ChildItem "$root/stage/lib" -Filter "*1_84.lib" | ForEach-Object { Log $_.Name }
 
       - name: 生成 weasel.props
         shell: pwsh
@@ -680,7 +690,10 @@ jobs:
   # macOS 外壳：squirrel 改造。改动固化在 patches/squirrel-heng.patch。
   shell-macos:
     name: 外壳 macOS (squirrel)
-    runs-on: macos-15
+    # macos-26 而不是 macos-15：上游 squirrel 的 SquirrelPanel.swift 用了
+    # NSGlassEffectView（macOS 26 新增），虽有 #available(macOS 26.0, *) 保护，
+    # 但那只在运行时分支，编译期所有分支都要过——SDK 里没有这个类就编不过。
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
