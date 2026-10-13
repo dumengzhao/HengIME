@@ -343,24 +343,32 @@ jobs:
           # 官方 7z 包只有 boost 源码，没有编好的 .lib，而 weasel 要链
           # libboost_wserialization / libboost_filesystem / libboost_iostreams /
           # libboost_chrono。链接期报 LNK1104 cannot open file 就是缺这一步。
-          Push-Location $root
-          Log "--- b2 开始 ---"
-          & ".\b2.exe" `
-            toolset=msvc-14.3 `
-            address-model=64 `
-            link=static `
-            runtime-link=shared `
-            variant=release `
-            -j4 `
-            --with-serialization `
-            --with-filesystem `
-            --with-iostreams `
-            --with-chrono `
-            stage-lib 2>&1 | Tee-Object -FilePath $log -Append
-          $rc = $LASTEXITCODE
-          Pop-Location
-          Log "--- b2 退出码 $rc ---"
-          if ($rc -ne 0) { throw "b2 失败，退出码 $rc" }
+          #
+          # 用 Start-Process 而不是 `& b2.exe 2>&1 | Tee-Object`：
+          # 管道 + Tee-Object 在 pwsh 里会把 b2 的输出吞掉（实测日志里
+          # 只有「--- b2 开始 ---」，后面什么都没有，也看不到退出码），
+          # 而 b2 的失败信息全在它自己的 stdout/stderr 里。
+          $b2args = @(
+            "toolset=msvc-14.3", "address-model=64", "link=static",
+            "runtime-link=shared", "variant=release", "-j4",
+            "--with-serialization", "--with-filesystem",
+            "--with-iostreams", "--with-chrono", "stage-lib"
+          )
+          Log "--- b2 开始: b2.exe $($b2args -join ' ') ---"
+          $p = Start-Process -FilePath "$root\b2.exe" -ArgumentList $b2args `
+               -WorkingDirectory $root -NoNewWindow -Wait -PassThru `
+               -RedirectStandardOutput "$env:GITHUB_WORKSPACE\b2-out.log" `
+               -RedirectStandardError "$env:GITHUB_WORKSPACE\b2-err.log"
+          Log "--- b2 退出码 $($p.ExitCode) ---"
+          Log "--- b2 stdout 末尾 ---"
+          if (Test-Path "$env:GITHUB_WORKSPACE\b2-out.log") {
+            Get-Content "$env:GITHUB_WORKSPACE\b2-out.log" | ForEach-Object { Log $_ }
+          }
+          if (Test-Path "$env:GITHUB_WORKSPACE\b2-err.log") {
+            Log "--- b2 stderr 末尾 ---"
+            Get-Content "$env:GITHUB_WORKSPACE\b2-err.log" | ForEach-Object { Log $_ }
+          }
+          if ($p.ExitCode -ne 0) { throw "b2 失败，退出码 $($p.ExitCode)" }
           Get-ChildItem "$root/stage/lib" -Filter "*1_84.lib" | ForEach-Object { Log $_.Name }
 
       - name: 生成 weasel.props
@@ -855,11 +863,13 @@ jobs:
             "https://github.com/iDvel/rime-ice/releases/latest/download/full.zip"
           unzip -q -o "$GITHUB_WORKSPACE/rime-ice-full.zip" -d rime-ice
           for f in t9.schema.yaml symbols_v.yaml symbols_caps_v.yaml \
-                   cn_dicts en_dicts lua opencc others; do
+                   cn_dicts en_dicts lua opencc; do
             test -e "rime-ice/$f" || { echo "雾凇包缺 $f" >> "$GITHUB_WORKSPACE/mac-setup.log"; exit 1; }
           done
+          # 注意 fog 雾凇 full.zip 里没有 others/ 目录（本机 runtime 里有，
+          # 那是另一次安装补的），所以不列进必需项。
           cp rime-ice/*.yaml data/plum/ 2>/dev/null || true
-          cp -R rime-ice/cn_dicts rime-ice/en_dicts rime-ice/lua rime-ice/opencc rime-ice/others data/plum/
+          cp -R rime-ice/cn_dicts rime-ice/en_dicts rime-ice/lua rime-ice/opencc data/plum/
           # 雾凇的 default.yaml 列了 9 个方案，但 squirrel 的 Squirrel.app 里
           # 只随包带了 rime_ice 那套，其余 8 个（t9 + 7 个双拼）没有对应
           # schema 文件的话 librime 部署会以failure 收场。裁到只留 rime_ice。
