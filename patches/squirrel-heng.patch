@@ -1,0 +1,1118 @@
+diff --git a/Squirrel.xcodeproj/project.pbxproj b/Squirrel.xcodeproj/project.pbxproj
+index d805aa7..0f7eaaa 100644
+--- a/Squirrel.xcodeproj/project.pbxproj
++++ b/Squirrel.xcodeproj/project.pbxproj
+@@ -128,6 +128,7 @@
+ 		B35D2FE82BF00839009D156B /* BridgingFunctions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B35D2FE72BF00839009D156B /* BridgingFunctions.swift */; };
+ 		B3A001022F260100009D156B /* ReservedProperty.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A001012F260100009D156B /* ReservedProperty.swift */; };
+ 		B38E9B912BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B38E9B902BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift */; };
++		HENG0002000000000000000002 /* HengWindowRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = HENG0001000000000000000001 /* HengWindowRenderer.swift */; };
+ 		B38E9B952BEAFEFD0036ABEF /* SquirrelInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B38E9B942BEAFEFD0036ABEF /* SquirrelInputController.swift */; };
+ 		B39771232BECEA150093A49B /* MacOSKeyCodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B39771222BECEA150093A49B /* MacOSKeyCodes.swift */; };
+ 		B39771252BED899F0093A49B /* SquirrelConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = B39771242BED899F0093A49B /* SquirrelConfig.swift */; };
+@@ -370,6 +371,7 @@
+ 		B3A001012F260100009D156B /* ReservedProperty.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ReservedProperty.swift; path = sources/ReservedProperty.swift; sourceTree = "<group>"; };
+ 		B38E9B8F2BE9AE1E0036ABEF /* Squirrel-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "Squirrel-Bridging-Header.h"; path = "sources/Squirrel-Bridging-Header.h"; sourceTree = "<group>"; };
+ 		B38E9B902BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelApplicationDelegate.swift; path = sources/SquirrelApplicationDelegate.swift; sourceTree = "<group>"; };
++		HENG0001000000000000000001 /* HengWindowRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = HengWindowRenderer.swift; path = sources/HengWindowRenderer.swift; sourceTree = "<group>"; };
+ 		B38E9B942BEAFEFD0036ABEF /* SquirrelInputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelInputController.swift; path = sources/SquirrelInputController.swift; sourceTree = "<group>"; };
+ 		B39771222BECEA150093A49B /* MacOSKeyCodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MacOSKeyCodes.swift; path = sources/MacOSKeyCodes.swift; sourceTree = "<group>"; };
+ 		B39771242BED899F0093A49B /* SquirrelConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelConfig.swift; path = sources/SquirrelConfig.swift; sourceTree = "<group>"; };
+@@ -406,6 +408,7 @@
+ 			isa = PBXGroup;
+ 			children = (
+ 				B38E9B902BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift */,
++				HENG0001000000000000000001 /* HengWindowRenderer.swift */,
+ 				B38E9B942BEAFEFD0036ABEF /* SquirrelInputController.swift */,
+ 				B39771222BECEA150093A49B /* MacOSKeyCodes.swift */,
+ 				B397712C2BEEB39D0093A49B /* InputSource.swift */,
+@@ -684,6 +687,7 @@
+ 				B397712D2BEEB39D0093A49B /* InputSource.swift in Sources */,
+ 				B397712B2BEE4C160093A49B /* SquirrelPanel.swift in Sources */,
+ 				B38E9B912BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift in Sources */,
++				HENG0002000000000000000002 /* HengWindowRenderer.swift in Sources */,
+ 				B39771272BED9B250093A49B /* SquirrelTheme.swift in Sources */,
+ 				B35D2FE82BF00839009D156B /* BridgingFunctions.swift in Sources */,
+ 				B3A001022F260100009D156B /* ReservedProperty.swift in Sources */,
+diff --git a/resources/Localizable.xcstrings b/resources/Localizable.xcstrings
+index eb96d08..96b0321 100644
+--- a/resources/Localizable.xcstrings
++++ b/resources/Localizable.xcstrings
+@@ -1,6 +1,29 @@
+ {
+   "sourceLanguage" : "en",
+   "strings" : {
++    "About..." : {
++      "comment" : "Menu item",
++      "localizations" : {
++        "en" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "About"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "关于"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "關於"
++          }
++        }
++      }
++    },
+     "A new update is available" : {
+       "comment" : "Update",
+       "localizations" : {
+diff --git a/sources/BridgingFunctions.swift b/sources/BridgingFunctions.swift
+index 4ce2c7b..0f97e89 100644
+--- a/sources/BridgingFunctions.swift
++++ b/sources/BridgingFunctions.swift
+@@ -18,13 +18,13 @@ typealias RimeSessionId = UInt64
+ /// 读取会话选项（heng_get_option）。
+ func hengGetOption(_ session: RimeSessionId, _ option: String) -> Bool {
+   guard session != 0 else { return false }
+-  return option.withCString { heng_get_option(session, $0) } != 0
++  return option.withCString { heng_get_option(session, $0) != 0 }
+ }
+ 
+ /// 设置会话选项（heng_set_option；传播/持久化策略由 core 统一处理）。
+ func hengSetOption(_ session: RimeSessionId, _ option: String, _ value: Bool) {
+   guard session != 0 else { return }
+-  option.withCString { heng_set_option(session, $0, value ? 1 : 0) }
++  _ = option.withCString { heng_set_option(session, $0, value ? 1 : 0) }
+ }
+ 
+ /// 取待上屏文本（消费语义）。
+@@ -36,6 +36,19 @@ func hengTakeCommit(_ session: RimeSessionId) -> String? {
+   return String(cString: text)
+ }
+ 
++/// 取「鼠标点选候选」产生的上屏文本（消费语义）。
++///
++/// 与 hengTakeCommit 分开：按键路径的 commit 由 rimeUpdate 开头统一取，
++/// 而点选候选没有任何按键事件伴随，必须在点击处理里显式取一次，
++/// 否则候选窗关了但字不上屏。
++func hengTakeUiCommit(_ session: RimeSessionId) -> String? {
++  guard session != 0 else { return nil }
++  var ptr: UnsafeMutablePointer<CChar>?
++  guard heng_take_ui_commit(session, &ptr) != 0, let text = ptr else { return nil }
++  defer { heng_free_string(text) }
++  return String(cString: text)
++}
++
+ /// 取组合串原始输入（如拼音串）。nil = 无组合。
+ func hengGetInput(_ session: RimeSessionId) -> String? {
+   guard session != 0 else { return nil }
+@@ -104,3 +117,32 @@ extension NSPoint {
+     sqrt(pow(self.x, 2) + pow(self.y, 2))
+   }
+ }
++
++// MARK: - 上屏回调（点击选词）
++
++/// core 选词完成后回调这个 C 函数（经 heng_set_commit_handler 注册）。
++///
++/// 为什么必须用回调而不是轮询：点击事件从 Swift 主线程发给 core UI 线程，
++/// core 要跨两轮循环（poll_events 收点击 → 下一轮 try_recv 才拿到 BarSelect）
++/// 才处理完并产出 commit，实测比主线程的下一轮**晚约 9ms**。
++/// 外壳在 mouseUp 里 DispatchQueue.main.async 取的话必定取空
++/// —— 实测 takeUiCommit 返回 nil，而 9ms 后 map 里才出现文本。
++/// 回调则由 core 在文本就绪的同一刻发起，时序天然正确。
++private let commitCallback: @convention(c) (UnsafeMutableRawPointer?, UInt64, UnsafePointer<CChar>?) -> Void = {
++  _, _, text in
++  guard let text else { return }
++  let s = String(cString: text)
++  DispatchQueue.main.async {
++    NotificationCenter.default.post(
++      name: .hengCoreCommitReady, object: nil, userInfo: ["text": s])
++  }
++}
++
++extension Notification.Name {
++  static let hengCoreCommitReady = Notification.Name("HengCoreCommitReady")
++}
++
++/// 注册上屏回调（进程级，只需一次）。幂等。
++func hengRegisterCommitHandler() {
++  heng_set_commit_handler(commitCallback, nil)
++}
+diff --git a/sources/HengWindowRenderer.swift b/sources/HengWindowRenderer.swift
+new file mode 100644
+index 0000000..d217224
+--- /dev/null
++++ b/sources/HengWindowRenderer.swift
+@@ -0,0 +1,595 @@
++//
++//  HengWindowRenderer.swift
++//  Squirrel
++//
++//  HengIME M-P4：macOS 窗口后端的外壳侧。
++//
++//  为什么这一层存在：
++//  core 只负责 slint 渲染（算出「这一帧长什么样」），窗口的创建/定位/贴帧交给
++//  外壳在**主线程**执行。原因：AppKit 的窗口调用必须在主线程，而 core 的 UI 线程
++//  是它自己 spawn 的 Rust 线程，直接碰 NSPanel 会崩或无响应。
++//  这一层就是那「最后一公里」—— 而且外壳本来就知道 macOS 的窗口长什么样。
++//
++//  三个关键点：
++//  1. 透明：NSPanel 默认 opaque，会刷一层系统灰底 → 圆角外变黑方块。
++//     必须 opaque=NO + backgroundColor=clear + hasShadow=NO。
++//  2. 不抢焦点：候选窗/字母区用 .nonactivatingPanel，显示与点击都不夺用户焦点
++//     （否则候选窗一弹出，用户正在编辑的应用就被踢失焦）。设置窗不加，可激活。
++//  3. 坐标系：core 三端统一传**左上原点**（X11 原生如此，Win 在后端里翻），
++//     AppKit 是**左下原点**，这里翻：y_flipped = screenH - (y + h)。
++//     漏翻会让窗口出现在屏幕垂直镜像的位置。
++//
++
++import AppKit
++import CoreGraphics
++import Foundation
++
++final class HengWindowRenderer: NSObject {
++  static let shared = HengWindowRenderer()
++
++  ///窗口编号，与 core 的 win 参数一一对应
++  private enum Win: Int {
++    case candidate = 0   // 候选窗
++    case settings = 1   // 设置窗口
++    case letters = 2    // 顶部字母区
++  }
++
++  /// 操作类型，与 core 的 op 参数一一对应
++  private enum Op {
++    static let configure = 0
++    static let show = 1
++    static let hide = 2
++    static let blit = 3
++    static let beginDrag = 4
++  }
++
++  /// 窗口池。惰性创建 —— 候选窗先到，设置窗按需。
++  private var panels: [Int: NSPanel] = [:]
++  /// 承载帧的视图（与 panels 同生命周期）
++  private var layers: [Int: CALayer] = [:]
++  /// 各窗口当前尺寸，拖动带的 × 排除区要用
++  private var sizes: [Int: NSSize] = [:]
++  /// 设置窗拖动基准：(拖起时窗口原点, 拖起时指针屏幕坐标)
++  private var dragStart: (origin: NSPoint, pointer: NSPoint)?
++  /// 主屏高度（左上↔左下翻转要用）
++  private lazy var screenHeight: CGFloat = {
++    NSScreen.screens.first?.frame.height ?? 1080
++  }()
++  /// 主屏 backingScaleFactor：core 的几何/帧都是设备像素，AppKit 用点，换算靠它。
++  private lazy var screenScale: CGFloat = {
++    NSScreen.screens.first?.backingScaleFactor ?? 1
++  }()
++
++  private override init() {
++    super.init()
++  }
++
++  // MARK: - 注册到 core
++
++  /// 供 SquirrelApplicationDelegate.startRime 调用。
++  @discardableResult
++  func register() -> Int32 {
++    // 先把屏幕信息喂给 core：AppKit 只能在主线程查，而这必须在
++    // core 布局设置窗之前就绪。
++    reportScreenInfo()
++    let ctx = Unmanaged.passUnretained(self).toOpaque()
++    let rc = heng_set_window_handler({ ctx, win, op, buf, bufLen, logicalW, logicalH in
++      guard let ctx else { return }
++      let renderer = Unmanaged<HengWindowRenderer>.fromOpaque(ctx).takeUnretainedValue()
++      renderer.handle(win: win, op: op, buf: buf, bufLen: bufLen, logicalW: logicalW, logicalH: logicalH)
++    }, ctx)
++    Self.log("REGISTER window=\(rc > 0)")
++    return rc
++  }
++
++  /// 诊断日志落盘。输入法进程由系统按需拉起，stdout 拿不到，
++  /// 只能写文件。路径放 ~/Library/Logs/HengIME/。
++  private static let logURL: URL = {
++    let dir = FileManager.default.homeDirectoryForCurrentUser
++      .appendingPathComponent("Library/Logs/HengIME", isDirectory: true)
++    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
++    return dir.appendingPathComponent("window.log")
++  }()
++
++  static func log(_ s: String) {
++    let line = "\(Date().timeIntervalSince1970) \(s)\n"
++    if let fh = FileHandle(forWritingAtPath: logURL.path) {
++      fh.seekToEndOfFile()
++      fh.write(Data(line.utf8))
++      try? fh.close()
++    } else {
++      try? Data(line.utf8).write(to: logURL)
++    }
++  }
++
++  /// 调试用：当前感知到的屏幕信息
++  func debugScreenInfo() -> String {
++    guard let s = NSScreen.screens.first else { return "无屏幕" }
++    return "\(Int(s.frame.width))x\(Int(s.frame.height))@\(s.backingScaleFactor)x"
++  }
++
++  /// core 的 UI 线程调这个入口。所有 AppKit 操作切回主线程。
++  fileprivate func handle(
++    win: UInt8, op: UInt8, buf: UnsafeRawPointer?, bufLen: Int,
++    logicalW: UInt32, logicalH: UInt32
++  ) {
++    // 帧数据只在本次调用期间有效，必须拷贝出来再异步贴。
++    var copy: UnsafeMutableRawPointer?
++    var count = 0
++    if let buf, bufLen > 0, op == Op.blit {
++      copy = UnsafeMutableRawPointer.allocate(byteCount: bufLen, alignment: 4)
++      if let copy {
++        copy.copyMemory(from: buf, byteCount: bufLen)
++      }
++      count = bufLen
++    }
++    var geo = (x: 0, y: 0, w: 0, h: 0)
++    if let buf, op == Op.configure, bufLen >= 16 {
++      let p = buf.assumingMemoryBound(to: Int32.self)
++      geo = (Int(p[0]), Int(p[1]), Int(p[2]), Int(p[3]))
++    }
++    let lw = Int(logicalW), lh = Int(logicalH)
++
++    DispatchQueue.main.async {
++      defer { copy?.deallocate() }
++      self.applyOnMain(win: Int(win), op: Int(op), geo: geo, frame: copy,
++                       pixelW: lw, pixelH: lh, bufLen: count)
++    }
++  }
++
++  /// 主线程执行真正的 AppKit 调用。
++  private func applyOnMain(
++    win: Int, op: Int, geo: (x: Int, y: Int, w: Int, h: Int),
++    frame: UnsafeMutableRawPointer?, pixelW: Int, pixelH: Int, bufLen: Int
++  ) {
++    switch op {
++    case Op.configure:
++      sizes[win] = NSSize(width: geo.w, height: geo.h)
++      let panel = ensurePanel(win)
++      // 单位：core 传来的 geo.x/y/w/h **四个值全在设备像素域**
++      // （x/y 来自 AppKit 的光标矩形与 NSScreen.frame，本机实测同域；
++      //   w/h 是 core 按 scale 放大的渲染缓冲尺寸）。
++      // AppKit 的 frame 用点，所以四个值统一除 scale。
++      // 全链路统一用【点】：geo.x/y/w/h 直接就是 AppKit 的点制坐标，
++      // 不再除 screenScale（除了 width/height 来自设备像素的渲染缓冲）。
++      let sc = screenScale
++      let screenPt = CGFloat(screenHeight)
++      // ===== 单位域（实测钉死，勿再改）=====
++      // core 发来的 geo.y 已经是 **flip 坐标**（左上原点）：外壳把光标矩形按
++      // screenMaxY - rect.minY 换算后交给 core，core 沿用该值。
++      // 实测锚点 rect.minY=134、screenH=1200 → geo.y=1045，与 1200-134 吻合。
++      // 所以这里**不能再对 geo.y 翻一次**，只需把 flip 顶边换成 AppKit 底边：
++      //   AppKit 底边 = 屏高 - flip 顶边 - 点制窗口高
++      // geo.h 是**设备像素**（core 按 scale 放大的渲染缓冲），必须除 sc 才能
++      // 参与点域减法 —— 漏除会让窗口整体下移一个窗口高（实测 119px vs 59.5pt）。
++      let flippedY = screenPt - CGFloat(geo.y) - CGFloat(geo.h) / sc
++      panel.setFrame(
++        NSRect(x: CGFloat(geo.x),
++               y: flippedY,
++               width: CGFloat(geo.w) / sc,
++               height: CGFloat(geo.h) / sc),
++        display: false)
++      // contentView 建时是 .zero，必须跟着窗口拉一次，否则 frame 变了视图还是0×0。
++      // 改完必须**重新取 layer 存回layers[win]**：contentView 从 .zero 变成实际尺寸时
++      // AppKit 可能重建 backing layer，此时 layers[win] 指向的是已脱离视图树的孤儿
++      // layer —— blit 贴上去永远不显示。症状是「同一个字母第一次打没预览窗，
++      // 第二次才出来」（第一次 blit 贴到孤儿 layer，第二次重建后才生效）。
++      if let cv = panel.contentView {
++        cv.frame = panel.contentLayoutRect
++        cv.wantsLayer = true
++        cv.layer?.contentsGravity = .resize
++        layers[win] = cv.layer
++      }
++      // 候选窗通常早于设置窗出现（用户还没打开过设置），这里补装监听，
++      // 否则点选功能在「只输入没开过设置」时是死的。
++      installMouseTracking()
++
++    case Op.show:
++      let panel = ensurePanel(win)
++      // 上屏前把 layers[win] 强制对齐到窗口当前的 backing layer。
++      // 不信任任何缓存：AppKit 在contentView 尺寸变化/重建视图时会换 layer，
++      // 而 layers[win] 是建窗时缓存的旧引用 → blit 贴到孤儿 layer，
++      // 窗口在但内容永远空白。这里每次 show 都重新取一次，成本可忽略。
++      if let cv = panel.contentView {
++        cv.wantsLayer = true
++        if let live = cv.layer {
++          live.contentsGravity = .resize
++          if layers[win] !== live {
++            layers[win] = live
++          }
++        }
++      }
++      // **绝不能重建窗口** —— 重建会把 configure 设好的几何扔掉（frame 退回 200×200）。
++      panel.level = .init(Int(CGShieldingWindowLevel()))
++      if win == Win.settings.rawValue {
++        // 设置窗要参与焦点管理，属性每次同步；候选窗不设（照 SquirrelPanel）
++        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
++        panel.hidesOnDeactivate = false
++        // 输入法是 .accessory 进程，不激活的话它的窗口不显示
++        // （日志证据：visible=true / appActive=false / policy=1 却是看不见）。
++        // .accessory 不能用 activate(ignoringOtherApps: true)，那会抢用户焦点，
++        // 用 activate() 正常激活 —— 设置窗本来也要交互。
++        if #available(macOS 14.0, *) {
++          NSApp.activate()
++        } else {
++          NSApp.activate(ignoringOtherApps: true)
++        }
++        panel.makeKeyAndOrderFront(nil)
++        // 首次显示时才挂监听（panel 存在之后 monitor 才有意义）
++        installMouseTracking()
++      } else {
++        // 关键：不能用 orderFront —— 它要求进程处于活跃状态，而输入法是
++        // .accessory 进程（appActive=false），实测窗口压根不进 WindowServer
++        // 的屏幕列表（日志 sys=NOT_IN_LIST，AppKit 却报 visible=true）。
++        // orderFrontRegardless 跳过这个要求，不抢焦点也能强制上屏
++        //（微信/系统输入法同款）。
++        // 不用 orderFront：它要求进程活跃，而输入法是 .accessory 进程
++        // （appActive=false）。也**不能** activate：那会抢走用户正在输入的
++        // 应用的焦点，导致打字中断。orderFrontRegardless 两者都不需要。
++        panel.orderFrontRegardless()
++        // 曾按 querySystemWindow()=="sys=NOT_IN_LIST" 做 setFrame 抖动兜底，
++        // 已删 —— 实测该诊断 975/975 全是 NOT_IN_LIST（CGWindowListCopyWindowInfo
++        // 从输入法进程查不到自身窗口），与实际可见性无关，等于每帧空跑抖动。
++        // 判可见性要用 AppKit 的 isOnActiveSpace。
++        if !panel.isOnActiveSpace {
++          panel.collectionBehavior.insert(.moveToActiveSpace)
++          panel.orderFrontRegardless()
++        }
++        // ==== 兜底：.accessory 进程的面板会被系统悄悄收起 ====
++        // 输入法是 .accessory 进程（appActive=false / policy=1），
++        // 这种进程的 NSPanel 在宿主变化、Space 切换、或其他面板抢层级后
++        // 会被 WindowServer 直接摘掉，而 orderFrontRegardless 有时一次唤不醒。
++        // 症状：core 认为窗口该显示（已发 op=1），AppKit 侧 isVisible 却仍是
++        // false，用户看到「预览窗毫无规律地消失，再打字也不回来」。
++        // 这里用 AppKit 自己的 isVisible（可靠）复查一遍，不可见就再叫醒。
++        if !panel.isVisible {
++          panel.orderFrontRegardless()
++          panel.displayIfNeeded()
++        }
++        if !panel.isVisible {
++          panel.orderFront(nil)
++          panel.orderFrontRegardless()
++          panel.display()
++        }
++      }
++
++    case Op.hide:
++      panels[win]?.orderOut(nil)
++
++    case Op.blit:
++      guard let frame, pixelW > 0, pixelH > 0 else { return }
++      // blit 是最后一道路径，这里再兜一次layer 同步：configure/show 都可能被
++      // AppKit 的重建layer 绕过，只有真正贴帧这一刻拿到的引用才算数。
++      if let panel = panels[win], let live = panel.contentView?.layer, layers[win] !== live {
++        layers[win] = live
++      }
++      drawFrame(win: win, ptr: frame, pixelW: pixelW, pixelH: pixelH, bufLen: bufLen)
++
++    case Op.beginDrag:
++      beginDragSettingsWindow()
++
++    default:
++      break
++    }
++  }
++
++  /// 把主屏尺寸与缩放报给 core。
++  /// 单位：**点**（NSScreen.frame 原值）。core 侧的 geo 同样是点制，全链路一致。
++  private func reportScreenInfo() {
++    guard let screen = NSScreen.screens.first else { return }
++    let f = screen.frame
++    let scale = screen.backingScaleFactor
++    heng_set_screen_info(
++      UInt32(max(0, Int32(f.width))), UInt32(max(0, Int32(f.height))),
++      Float(scale))
++    reportWorkArea(screen: screen, scale: scale)
++  }
++
++  /// 上报工作区（候选面板向下放不下时据此向上翻转）。
++  ///
++  /// 取 `visibleFrame` —— 它已排除 Dock 与菜单栏，与 Windows 的 rcWork同语义。
++  /// 用 `frame`（整屏）会让光标贴底时误判「下方还有空间」，面板实际被 Dock 盖住。
++  ///
++  /// 坐标系换算（与 configure/blit 同一套）：
++  ///   - AppKit 左下原点 → core 左上原点：`coreTop = screenH - vf.maxY`
++  ///   - visibleFrame 是**点**，core 几何是**设备像素** → 乘 scale
++  /// 翻转后的定位（paint 里flip 分支的 last_caret_top/flip_top）也用这个
++  /// 上边界，口径必须一致，否则向上展开时会顶出屏幕。
++  private func reportWorkArea(screen: NSScreen, scale: CGFloat) {
++    let vf = screen.visibleFrame
++    let screenH = screen.frame.height
++    // 左下原点 → 左上原点
++    let top = (screenH - vf.maxY) * scale
++    let bottom = (screenH - vf.minY) * scale
++    heng_set_work_area(Int32(top.rounded()), Int32(bottom.rounded()))
++    Self.log("WA top=" + String(describing: Int32(top.rounded())) + " bottom=" + String(describing: Int32(bottom.rounded())) + " scale=" + String(describing: scale))
++  }
++
++  // MARK: - 窗口
++
++  private func ensurePanel(_ win: Int) -> NSPanel {
++    if let p = panels[win] { return p }
++
++    let kind = Win(rawValue: win) ?? .candidate
++    // 样式照抄能正常弹出的 SquirrelPanel（SquirrelPanel.swift:40）：
++    // 候选窗/字母区 = .nonactivatingPanel（仅此一个）；设置窗 = .borderless（可激活）。
++    // 之前给候选窗加 .fullSizeContentView + isFloatingPanel=false，WindowServer 直接不收
++    // （日志 sys=NOT_IN_LIST：AppKit 说 visible=true，系统窗口列表里根本没有）。
++    let style: NSWindow.StyleMask = (kind == .settings)
++      ? .borderless
++      : .nonactivatingPanel
++
++    let panel = NSPanel(
++      contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
++      styleMask: style,
++      backing: .buffered,
++      defer: false)
++    // 透明三件套：不设这些，圆角外就是系统灰底方块
++    panel.isOpaque = false
++    panel.backgroundColor = .clear
++    panel.hasShadow = false
++    // 必须用 CGShieldingWindowLevel，不能用 .popUpMenu(3)：后者低于输入法
++    // 宿主窗口的层级，窗口建好了也会被压到后面看不见。
++    // 参照能正常弹出的 SquirrelPanel（level = CGShieldingWindowLevel）。
++    panel.level = .init(Int(CGShieldingWindowLevel()))
++    panel.isReleasedWhenClosed = false
++
++    // ===== 候选窗要能点选，必须显式开这两项 =====
++    // nonactivatingPanel 默认 ignoresMouseEvents = true，点它等于点穿到下层应用，
++    // 候选格永远收不到点击。设置窗是 .borderless 不受影响，但统一开更安全。
++    if kind == .candidate {
++      panel.ignoresMouseEvents = false
++      // 不激活也能收点击：候选窗是 nonactivatingPanel，点击它不应抢走
++      // 宿主应用（TextEdit 等）的键盘焦点，否则用户点一下候选词就丢了编辑焦点。
++      // 绝不能设 becomesKeyOnlyIfNeeded：它让面板退出正常窗口管理流程，
++      // 首次 orderFrontRegardless 还能被 WindowServer 强行收一次（日志 visible=true），
++      // 但 orderOut 之后再 orderFrontRegardless 就不再入系统窗口列表
++      // （实测 sys=NOT_IN_LIST）→ 窗口从进程活着到死都再也上不来，
++      // 就是「打某个字母时预览窗消失、再打也不回来」的根因。
++      panel.hidesOnDeactivate = false
++      panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
++    }
++
++
++    let view = NSView(frame: .zero)
++    view.wantsLayer = true
++    view.layer?.contentsGravity = .resize
++    panel.contentView = view
++
++    panels[win] = panel
++    layers[win] = view.layer
++    return panel
++  }
++
++  // MARK: - 贴帧
++
++  /// 把预乘 BGRA 帧画进窗口 layer。
++  ///
++  /// core 的 `Argb` 是 `#[repr(C)]` 且字段序 b,g,r,a —— 内存序就是预乘 BGRA，
++  /// 与 `kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host` 一致，
++  /// 所以整块 memcpy 即可，零逐像素转换。
++  private func drawFrame(win: Int, ptr: UnsafeMutableRawPointer, pixelW: Int, pixelH: Int, bufLen: Int) {
++    guard let layer = layers[win] else { return }
++    let bytesPerRow = pixelW * 4
++    let need = bytesPerRow * pixelH
++    // 硬校验：CoreGraphics 会按 pixelW/pixelH 去读**need** 字节，
++    // 缓冲不足就直接踩内存（崩溃报告实锤：
++    // ERROR_CGDataProviderCreateWithData_BufferIsNotBigEnough → SIGBUS）。
++    // 这里宁可直接丢掉这一帧，也不能让它越界。
++    if bufLen < need {
++      Self.log("BLIT DROP win=\(win) bufLen=\(bufLen) need=\(need) px=\(pixelW)x\(pixelH)")
++      return
++    }
++
++    // ★ 必须拷贝一份，不能直接引用 ptr。
++    // core 侧 `render_buf` 是**复用的单一缓冲**（ui.rs:3452 声明，
++    // 只在尺寸变化时重建），每次 paint 都往同一块内存重绘，随后
++    // 把 `buf.as_ptr()` 交给我们。若直接用它构造 CGDataProvider，
++    // layer.contents 引用的就是那块会被下一帧覆写的内存 ——
++    // 表现为「字母区看着对、候选区空白/错乱、内容随机跳动」，
++    // 因为两区在同一帧的不同时刻被写。
++    // 拷贝后 CGDataProvider 引用的是自己的内存，生命周期独立于 core。
++    // 生命周期：layer.contents 一直持有这张 CGImage，直到下一帧被替换。
++    // 所以缓冲必须活过本次调用 —— 放进静态缓存复用（尺寸相同则原地覆写，
++    // 尺寸变了才重新分配），既不提前释放也不每帧 malloc。
++    let owned: UnsafeMutableRawPointer
++    if let cached = Self.frameBuffers[win], cached.allocated == need {
++        owned = cached.ptr
++    } else {
++        Self.frameBuffers[win]?.ptr.deallocate()
++        owned = UnsafeMutableRawPointer.allocate(byteCount: need, alignment: 16)
++        Self.frameBuffers[win] = (ptr: owned, allocated: need)
++    }
++    owned.copyMemory(from: ptr.assumingMemoryBound(to: UInt8.self), byteCount: need)
++
++    let space = CGColorSpaceCreateDeviceRGB()
++    // 预乘 BGRA。Swift 的 CGBitmapInfo 没有 byteOrder32Host，只有 Little/Big；
++    // 本机（x86_64 / arm64）是小端，byteOrder32Little 即等价于 Host。
++    // 注意 byteOrder32Little 是 static 成员，不能写在实例后面链式调用。
++    let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
++      .union(CGBitmapInfo.byteOrder32Little)
++
++    // CGContext.draw(_:in:) 在 Swift 里只接受 CGImage / CGLayer，
++    // 不能直接喂像素数据（裸指针和 Data 都会被解析成 CGLayer 重载而报错）。
++    // 所以走 CGDataProvider：包住我们自己的缓冲 → CGImage → 画进 layer。
++    guard let provider = CGDataProvider(
++      dataInfo: nil, data: owned, size: need,
++      releaseData: { _, _, _ in })
++    else {
++      Self.log("BLIT FAIL provider")
++      return
++    }
++    guard let img = CGImage(
++      width: pixelW, height: pixelH, bitsPerComponent: 8, bitsPerPixel: 32,
++      bytesPerRow: bytesPerRow, space: space, bitmapInfo: info,
++      provider: provider, decode: nil, shouldInterpolate: false,
++      intent: .defaultIntent)
++    else {
++      Self.log("BLIT FAIL cgimage px=\(pixelW)x\(pixelH) info=\(info.rawValue)")
++      return
++    }
++    CATransaction.begin()
++    CATransaction.setDisableActions(true)
++    layer.contents = img
++    layer.contentsGravity = .resize
++    CATransaction.commit()
++    Self.blitCount += 1
++    // 每窗首次贴帧时落一张 PPM（/tmp/heng-dump-w<N>.ppm），核对 core 画得对不对。
++    // 只写一次，不影响性能。
++    if !Self.dumpedWindows.contains(win) {
++      Self.dumpedWindows.insert(win)
++      Self.dumpFrame(win: win, img: img, w: pixelW, h: pixelH)
++    }
++  }
++
++  private static var blitCount = 0
++  private static var dumpedWindows: Set<Int> = []
++
++  /// 每窗一份「自有」像素缓冲。core 的 `render_buf` 是复用内存，
++  /// 直接给 CGDataProvider 用会被下一帧覆写 → 画面撕裂/空白。
++  /// 这里按窗口各存一份拷贝，CGImage 的生命周期就与 core 解耦。
++  private static var frameBuffers: [Int: (ptr: UnsafeMutableRawPointer, allocated: Int)] = [:]
++
++  /// 把 CGImage 写成二进制 PPM。只取 alpha 合成后的 RGB（白底），
++  /// 便于在无 GUI 环境里直接看 core 渲染成了什么样。
++  private static func dumpFrame(win: Int, img: CGImage, w: Int, h: Int) {
++    var pixels = [UInt8](repeating: 0, count: w * h * 4)
++    guard let ctx = CGContext(
++      data: &pixels, width: w, height: h, bitsPerComponent: 8,
++      bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
++      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
++    else { return }
++    ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
++    var out = Data("P6\n\(w) \(h)\n255\n".utf8)
++    out.reserveCapacity(out.count + w * h * 3)
++    let bytes = [UInt8](pixels)
++    for i in stride(from: 0, to: w * h, by: 1) {
++      let a = Int(bytes[i * 4 + 3])
++      // 白底合成：透明像素显示为白，方便看真实观感
++      let r = (Int(bytes[i * 4]) * a + 255 * (255 - a)) / 255
++      let g = (Int(bytes[i * 4 + 1]) * a + 255 * (255 - a)) / 255
++      let b = (Int(bytes[i * 4 + 2]) * a + 255 * (255 - a)) / 255
++      out.append(UInt8(min(255, r))); out.append(UInt8(min(255, g))); out.append(UInt8(min(255, b)))
++    }
++    let path = "/tmp/heng-dump-w\(win).ppm"
++    try? out.write(to: URL(fileURLWithPath: path))
++    Self.log("DUMP win=\(win) -> \(path) \(w)x\(h)")
++  }
++
++  /// 用 CGWindowList 反查我们这个 panel 在系统眼里的真实状态。
++  /// AppKit 说 visible=true 但用户看不见时，只有系统列表能给出裁决。
++  private static func querySystemWindow(_ panel: NSWindow) -> String {
++    let wid = CGWindowID(panel.windowNumber)
++    guard wid != 0 else { return "sys=noWindowNumber" }
++    guard let list = CGWindowListCopyWindowInfo(
++      [.optionIncludingWindow], kCGNullWindowID) as? [[String: Any]]
++    else { return "sys=listUnavailable" }
++    for w in list {
++      guard let n = w[kCGWindowNumber as String] as? CGWindowID, n == wid else { continue }
++      let onscreen = (w[kCGWindowIsOnscreen as String] as? Bool) ?? false
++      let alpha = (w[kCGWindowAlpha as String] as? Double) ?? -1
++      let layer = (w[kCGWindowLayer as String] as? Int) ?? -1
++      let bounds = w[kCGWindowBounds as String] ?? "?"
++      return "sys=onScreen(onscreen=\(onscreen) alpha=\(alpha) layer=\(layer) bounds=\(bounds))"
++    }
++    return "sys=NOT_IN_LIST"
++  }
++
++  private static func rectStr(_ r: NSRect) -> String {
++    "(\(Int(r.origin.x)),\(Int(r.origin.y)) \(Int(r.width))x\(Int(r.height)))"
++  }
++
++  // MARK: - 拖动
++
++  /// 设置窗进入拖动：记录基准点，后续 .leftMouseDragged 里按位移改 frame。
++  ///
++  /// NSWindow 没有 `performWindowMoveWithEvent` 这种公开 API（查过 SDK：
++  /// 只有 `movableByWindowBackground`，那是给系统标题栏用的，自绘无边框窗口不适用），
++  /// 所以按另两端的语义自己算：拖动期间持续收到事件 → 窗口位置 = 拖起时位置 + 位移。
++  private func beginDragSettingsWindow() {
++    guard let panel = panels[Win.settings.rawValue] else { return }
++    // 拖动全程只比「窗口原点」和「指针屏幕位置」两个 AppKit 左下原点量，
++    // core 的左上原点在这里不参与，避免两套坐标混算出方向错乱的位移。
++    let screen = NSEvent.mouseLocation
++    dragStart = (panel.frame.origin, screen)
++  }
++
++  // MARK: - 鼠标事件上报
++
++  /// NSPanel 的 contentView 收不到鼠标（我们不装NSView 子类），
++  /// 所以用 window 的事件监听：给 panel 挂一个本地事件 monitor。
++  /// 这里由 `installMouseTracking()` 在设置窗首次显示时调用一次。
++  func installMouseTracking() {
++    guard !mouseMonitorInstalled else { return }
++    guard panels[Win.settings.rawValue] != nil || panels[Win.candidate.rawValue] != nil else { return }
++    mouseMonitorInstalled = true
++
++    let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .scrollWheel]
++    // local monitor 只拦截本进程窗口上的事件。设置窗与候选窗共用一个 monitor，
++    // 按事件落点分发到对应窗口 —— 两个 monitor 会被后装的截走，反而漏事件。
++    monitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
++      guard let self else { return event }
++      // 候选窗优先：它在最上层（CGShieldingWindowLevel），
++      // 设置窗打开时也可能被点到，两者重叠时以候选窗为准。
++      if let win = self.windowUnderMouse(event), win == Win.candidate.rawValue {
++        self.forward(event, win: win)
++      } else if panels[Win.settings.rawValue] != nil {
++        self.forward(event, win: Win.settings.rawValue)
++      }
++      return event
++    }
++  }
++
++  /// 事件落在哪个候选窗/设置窗上（点坐标 → 窗口 frame 命中测试）。
++  private func windowUnderMouse(_ event: NSEvent) -> Int? {
++    let loc = NSEvent.mouseLocation
++    for win in [Win.candidate.rawValue, Win.settings.rawValue] {
++      if let panel = panels[win], panel.frame.contains(loc) { return win }
++    }
++    return nil
++  }
++
++  private var monitor: Any?
++  private var mouseMonitorInstalled = false
++
++  private func forward(_ event: NSEvent, win: Int) {
++    guard let view = panels[win]?.contentView else { return }
++    let loc = view.convert(event.locationInWindow, from: nil)
++    // core 约定的是**设备像素** + **左上原点**（blit 的 px 尺寸就是这个量级）。
++    // loc 是 contentView 的点坐标且左下原点，所以：乘 scale 转设备像素、翻 y 转原点。
++    let scale = view.window?.backingScaleFactor ?? 1
++    let x = Float(loc.x * scale)
++    let y = Float((view.bounds.height - loc.y) * scale)
++
++    switch event.type {
++    case .leftMouseDown:
++      heng_push_pointer_event(UInt8(win), 1, x, y, 0, 0)
++      // 不在这里起拖：是否在拖动带由 core 判定（另两端的拖动带语义都在 core），
++      // 它确认后回 OP_BEGIN_DRAG，那时才记基准点。否则点任何按钮都会拖窗口。
++    case .leftMouseDragged:
++      // 拖动中：按位移直接改窗口位置，不再上报给 core（core 那条路径
++      // 是给 Windows 的 HTCAPTION 用的，AppKit 没有等价机制）
++      if let panel = panels[win], let start = dragStart {
++        let now = NSEvent.mouseLocation
++        panel.setFrameOrigin(
++          NSPoint(x: start.origin.x + (now.x - start.pointer.x),
++                  y: start.origin.y + (now.y - start.pointer.y)))
++        heng_push_pointer_event(UInt8(win), 0, x, y, 0, 0)
++      } else {
++        heng_push_pointer_event(UInt8(win), 0, x, y, 0, 0)
++      }
++    case .leftMouseUp:
++      dragStart = nil
++      heng_push_pointer_event(UInt8(win), 2, x, y, 0, 0)
++      // 点选候选的上屏**不再**在这里取：点击从主线程发给 core UI 线程后，
++      // core 要跨两轮循环才产出 commit，比主队列下一轮晚约 9ms，
++      // 在这里取必定是空的（实测 takeUiCommit返回 nil）。
++      // 改由 core 在文本就绪时经 heng_set_commit_handler 回调，
++      // 见 observeCandidateClick() 与 hengRegisterCommitHandler()。
++    case .scrollWheel:
++      heng_push_pointer_event(UInt8(win), 3, x, y, Float(event.scrollingDeltaX), Float(event.scrollingDeltaY))
++    default:
++      break
++    }
++  }
++}
+\ No newline at end of file
+diff --git a/sources/SquirrelApplicationDelegate.swift b/sources/SquirrelApplicationDelegate.swift
+index 896d8d2..abb9e6b 100644
+--- a/sources/SquirrelApplicationDelegate.swift
++++ b/sources/SquirrelApplicationDelegate.swift
+@@ -145,6 +145,12 @@ final class SquirrelApplicationDelegate: NSObject, NSApplicationDelegate, SPUSta
+ 
+   func startRime(fullCheck: Bool) {
+     print("Initializing heng-core...")
++    // M-P4：注册窗口后端。core 只做slint 渲染，窗口贴帧由外壳在主线程执行。
++    // 必须在 heng_create 之前—— core 启动 UI 线程后会立刻回调要窗口。
++    let regRc = HengWindowRenderer.shared.register()
++    let msg = "registered=\(regRc > 0) screen=\(HengWindowRenderer.shared.debugScreenInfo())"
++    print("HengWindowRenderer \(msg)")
++    HengWindowRenderer.log("REGISTER \(msg)")
+     // fullCheck 保留入位：heng_create 内部恒为 full_check=TRUE 的完整部署
+     let sharedPath = Bundle.main.sharedSupportPath ?? ""
+     let userPath = SquirrelApp.userDir.path
+diff --git a/sources/SquirrelInputController.swift b/sources/SquirrelInputController.swift
+index f09e8ab..3b870f8 100644
+--- a/sources/SquirrelInputController.swift
++++ b/sources/SquirrelInputController.swift
+@@ -15,8 +15,25 @@ final class SquirrelInputController: IMKInputController {
+   private static let keyRollOver = 50
+   private static var unknownAppCnt: UInt = 0
+ 
++  // IMK 只走 init!(server:delegate:client:) 构造 controller（见 IMKInputController.h），
++  // override init() 永远不会被调用 —— 观察者注册曾经写在这里，等于从未注册。
++  //
++  // 这里听的是 core 的 commit 回调（hengCoreCommitReady），不是 mouseUp 的点击通知：
++  // 点击从主线程发给 core UI 线程后，core 要跨两轮循环才产出 commit，
++  // 比主线程的下一轮晚约 9ms，所以在 mouseUp 里取必定取空（实测 nil）。
++  // core 在文本就绪的同一刻回调，时序天然正确。
++  private func observeCandidateClick() {
++    candidateClickObserver = NotificationCenter.default.addObserver(
++      forName: .hengCoreCommitReady, object: nil, queue: .main
++    ) { [weak self] note in
++      guard let text = note.userInfo?["text"] as? String, !text.isEmpty else { return }
++      self?.commit(string: text)
++    }
++  }
++
+   private weak var client: IMKTextInput?
+   private var preedit: String = ""
++  private var preeditDirty: Bool = false
+   private var selRange: NSRange = .empty
+   private var caretPos: Int = 0
+   private var lastModifiers: NSEvent.ModifierFlags = .init()
+@@ -30,6 +47,15 @@ final class SquirrelInputController: IMKInputController {
+   private var chordTimer: Timer?
+   private var chordDuration: TimeInterval = 0
+   private var currentApp: String = ""
++  // 自绘候选窗（core slint 渲染，M-P4 起在 mac 上启用）：
++  // 光标矩形锚点。core 无有效区域时沿用上次位置（对齐 fcitx5 端 last_x_/last_y_ 语义）。
++  private var caretAnchorX: Int32 = -1
++  private var caretAnchorBottom: Int32 = -1
++  private var caretAnchorTop: Int32 = -1
++
++  /// 点选候选后由 HengWindowRenderer 派发：core UI 线程已处理完点击，
++  /// 此时取走上屏文本。点击路径没有按键事件伴随，不靠 rimeUpdate 触发。
++  private var candidateClickObserver: NSObjectProtocol?
+ 
+   // swiftlint:disable:next cyclomatic_complexity
+   override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
+@@ -222,6 +248,8 @@ final class SquirrelInputController: IMKInputController {
+     self.client = client as? IMKTextInput
+     super.init(server: server, delegate: delegate, client: client)
+     createSession()
++    observeCandidateClick()
++    hengRegisterCommitHandler()
+ 
+     NotificationCenter.default.addObserver(
+       forName: .init("SquirrelSetASCIIModeNotification"),
+@@ -248,9 +276,118 @@ final class SquirrelInputController: IMKInputController {
+ 
+   override func hidePalettes() {
+     NSApp.squirrelAppDelegate.panel?.hide()
++    // 自绘候选窗也要收：宿主panel 藏了但 core 的win=0/2 还挂着会留残影。
++    heng_ui_hide()
+     super.hidePalettes()
+   }
+ 
++  /// 光标锚点（core 三端统一**左上原点**的屏幕坐标）。
++  ///
++  /// 数据源：IMK 官方 API `attributesForCharacterIndex:lineHeightRectangle:`，
++  /// SDK 注释原话 "Input methods will call this method to place a candidate
++  /// window on the screen"，返回的是**光标处宽 1px、高一个行高**的矩形
++  /// （实测日志 `1x18` 印证），坐标系为屏幕坐标 —— 上游 SquirrelPanel 也是
++  /// 直接拿它当屏幕坐标用（`panel.position = inputPos`）。
++  ///
++  /// index 的正确取法，SDK 原文给了两条，缺一不可：
++  /// 1. "The index is relative to the inline session." —— 有内联会话时，
++  ///    index 是**相对会话起点**的偏移。
++  /// 2. "Note that if there is **no inline session** the value for index should be 0,
++  ///    which indicates that the information should be taken from the current selection."
++  ///    —— 没有内联会话时**必须传 0**，系统自己取当前选区。
++  ///
++  /// 之前踩的坑（三次位置跑偏都源于此）：
++  /// - 传 0（以为=行首）→ 实际是"当前选区"，**这才是对的**；
++  /// - 传 `selectedRange().location`（文档绝对偏移，如25）→ 越界，rect 不可靠；
++  /// - 传 `sel - marked`（相对偏移）→ 在 marked.length=0 时等于传绝对偏移，同样越界。
++  /// 关键：`client.length()` 对 IMK 代理返回 **0**（日志 docLen=0），
++  /// 拿它当上界做 clamp 会完全失效。
++  /// 光标锚点 → core（左上原点屏幕坐标）。
++  ///
++  /// ===== 权威结论（Apple 官方文档 + 实测，勿再猜）=====
++  /// 1. `NSTextInput.firstRectForCharacterRange:actualRange:`
++  ///    文档原文：*"Returns the first frame rectangle for characters in the
++  ///    given range, **in screen coordinates**."* → **这就是我们要的屏幕坐标。**
++  /// 2. `IMKTextInput.attributesForCharacterIndex:lineHeightRectangle:`
++  ///    返回的是**客户端局部坐标**（实测 y 随文档长度递减：
++  ///    y = 537 - (字符数/80列)×17，四轮全中），**不能当屏幕坐标用**。
++  ///    上游 Squirrel 官方用法是 `index=0` + `NSMinX/NSMinY`。
++  ///
++  /// `firstRect` 的坑：range 的 **length 必须 > 0**，传length=0（纯插入点）
++  /// 这个 legacy client 返回 0×0。传 length=1 即可拿到真实矩形。
++  private func updateCaretAnchor() {
++    var selSnap = NSRange(location: NSNotFound, length: 0)
++    var rect = NSRect.zero
++    var src = "fallback"
++    let lineHForClamp: CGFloat = 20
++    var probeDoc = NSRect.zero
++
++    if let client {
++      selSnap = client.selectedRange()
++      var sel = (selSnap.location == NSNotFound ? 0 : selSnap.location)
++      if sel < 0 { sel = 0 }
++
++      // ===== 用 index=0（上游 Squirrel 官方做法，20 年验证）=====
++      // 上游SquirrelPanel.swift:665 就是
++      //   `client.attributes(forCharacterIndex: 0, lineHeightRectangle: &inputPos)`
++      // 原因：index=0 取的是**内联会话/文档首行**，而首行必然在视口内
++      //（终端会滚动到底部显示最新内容），所以它的 y 恒为有效屏幕坐标。
++      // 传 sel（光标处）反而在长文档里拿到大负数（实测 sel=10640 -> y=-1724），
++      // 因为那个坐标是文档布局坐标，滚出视口就失去意义。
++      //
++      // x 同样取 index=0 的值 —— 上游也是这么做的，位置跟随的是行首，
++      // 不会因为打字长短而左右跳。
++      var probe = NSRect.zero
++      if client.attributes(forCharacterIndex: 0, lineHeightRectangle: &probe) != nil,
++         probe.width > 0 || probe.height > 0 {
++        rect = probe
++        src = "idx0"
++      }
++      // 对照：光标处的坐标，仅诊断用
++      _ = client.attributes(forCharacterIndex: sel, lineHeightRectangle: &probeDoc)
++    }
++
++    if src == "fallback" {
++      //拿不到就保持上一次有效锚点（首次用屏幕中心偏上）
++      if caretAnchorX >= 0 {
++        return
++      }
++      let sx = NSScreen.screens.first?.frame.width ?? 1440
++      let sy = NSScreen.screens.first?.frame.height ?? 900
++      rect = NSRect(x: sx * 0.4, y: sy * 0.45, width: 1, height: 20)
++      src = "center"
++    }
++
++    guard let screen = NSScreen.screens.first(where: {
++      NSMouseInRect(NSPoint(x: rect.minX, y: rect.minY), $0.frame, false)
++    }) ?? NSScreen.screens.first else { return }
++    let screenMaxY = screen.frame.maxY
++
++    // 屏幕边界夹紧（照抄上游 SquirrelPanel.swift:480-486）：
++    // 拿不到可靠屏幕坐标时，至少保证窗口不飞出屏幕。
++    // 注意夹紧必须在【点】域做，这里 rect 仍是点制。
++    if rect.minY < screen.frame.minY { rect.origin.y = screen.frame.minY }
++    if rect.minY > screen.frame.maxY - lineHForClamp {
++      rect.origin.y = screen.frame.maxY - lineHForClamp
++    }
++    if rect.minX < screen.frame.minX { rect.origin.x = screen.frame.minX }
++    caretAnchorX = Int32(rect.minX.rounded())
++    // 左下原点 → 左上原点，**保持点制不乘 scale**。
++    // 定位用的 x/y 必须是点：外壳 configure 时会把 x 交给
++    // NSPanel.setFrameOrigin（点域），乘 scale 会让窗口整体偏移一个缩放比。
++    // 需要设备像素的地方（如 core 的翻转判定）由 core 自己乘 scale。
++    caretAnchorBottom = Int32((screenMaxY - rect.minY).rounded())
++    caretAnchorTop = Int32((screenMaxY - rect.maxY).rounded())
++  }
++
++  /// 驱动 core 自绘候选窗。语义与 fcitx5 端 updateUI 尾部一致：
++  /// 把光标锚点交给 core，由它决定显示哪个窗口、画什么内容
++  /// （inline_preedit 的字母区内嵌与否由 core 自己读同一份配置）。
++  private func syncSelfDrawnUi() {
++    updateCaretAnchor()
++    _ = heng_ui_sync_ex(session, caretAnchorX, caretAnchorBottom, caretAnchorTop)
++  }
++
+   override func commitComposition(_ sender: Any!) {
+     self.client ?= sender as? IMKTextInput
+     if session != 0 {
+@@ -261,56 +398,43 @@ final class SquirrelInputController: IMKInputController {
+     }
+   }
+ 
++  // core 设置窗口的页号契约（core/src/ui.rs SET_NAV 下标，改那边必须同步这里）
++  private enum SettingsPage: Int32 {
++    case service = 5   // 服务（重新部署 / 日志目录 / 程序目录）
++    case about = 6     // 关于（版本 / 版权）
++  }
++
+   override func menu() -> NSMenu! {
+-    let deploy = NSMenuItem(title: NSLocalizedString("Deploy", comment: "Menu item"), action: #selector(deploy), keyEquivalent: "`")
+-    deploy.target = self
+-    deploy.keyEquivalentModifierMask = [.control, .option]
+-    let sync = NSMenuItem(title: NSLocalizedString("Sync user data", comment: "Menu item"), action: #selector(syncUserData), keyEquivalent: "")
+-    sync.target = self
+-    let logDir = NSMenuItem(title: NSLocalizedString("Logs...", comment: "Menu item"), action: #selector(openLogFolder), keyEquivalent: "")
+-    logDir.target = self
+-    let setting = NSMenuItem(title: NSLocalizedString("Settings...", comment: "Menu item"), action: #selector(openRimeFolder), keyEquivalent: "")
++    let setting = NSMenuItem(title: NSLocalizedString("Settings...", comment: "Menu item"),
++                             action: #selector(openSettings), keyEquivalent: "")
+     setting.target = self
+-    let wiki = NSMenuItem(title: NSLocalizedString("Rime Wiki...", comment: "Menu item"), action: #selector(openWiki), keyEquivalent: "")
+-    wiki.target = self
+-    let update = NSMenuItem(title: NSLocalizedString("Check for updates...", comment: "Menu item"), action: #selector(checkForUpdates), keyEquivalent: "")
++    let about = NSMenuItem(title: NSLocalizedString("About...", comment: "Menu item"),
++                           action: #selector(openAbout), keyEquivalent: "")
++    about.target = self
++    let update = NSMenuItem(title: NSLocalizedString("Check for updates...", comment: "Menu item"),
++                            action: #selector(checkForUpdates), keyEquivalent: "")
+     update.target = self
+ 
+     let menu = NSMenu()
+-    menu.addItem(deploy)
+-    menu.addItem(sync)
+-    menu.addItem(logDir)
+     menu.addItem(setting)
+-    menu.addItem(wiki)
++    menu.addItem(about)
+     menu.addItem(update)
+ 
+     return menu
+   }
+ 
+-  @objc func deploy() {
+-    NSApp.squirrelAppDelegate.deploy()
+-  }
+-
+-  @objc func syncUserData() {
+-    NSApp.squirrelAppDelegate.syncUserData()
++  @objc func openSettings() {
++    _ = heng_settings_show(SettingsPage.service.rawValue)
+   }
+ 
+-  @objc func openLogFolder() {
+-    NSApp.squirrelAppDelegate.openLogFolder()
+-  }
+-
+-  @objc func openRimeFolder() {
+-    NSApp.squirrelAppDelegate.openRimeFolder()
++  @objc func openAbout() {
++    _ = heng_settings_show(SettingsPage.about.rawValue)
+   }
+ 
+   @objc func checkForUpdates() {
+     NSApp.squirrelAppDelegate.checkForUpdates()
+   }
+ 
+-  @objc func openWiki() {
+-    NSApp.squirrelAppDelegate.openWiki()
+-  }
+-
+   private(set) var specialCommentIndices: [ReservedPropertyKey: Set<Int>] = [:]
+ 
+   func handleReservedProperty(key rawKey: String, value rawValue: String, for sessionId: RimeSessionId) throws(ReservedPropertyError) {
+@@ -328,6 +452,9 @@ final class SquirrelInputController: IMKInputController {
+   }
+ 
+   deinit {
++    if let obs = candidateClickObserver {
++      NotificationCenter.default.removeObserver(obs)
++    }
+     destroySession()
+   }
+ }
+@@ -402,7 +529,7 @@ private extension SquirrelInputController {
+     }
+     // v6 行为统一层：app_options 与选项初值由 core 在 set_session_owner 时统一应用，
+     // 外壳不再自行读取/下发（与 Windows/Linux 外壳一致）。
+-    currentApp.withCString { heng_set_session_owner(session, $0) }
++    _ = currentApp.withCString { heng_set_session_owner(session, $0) }
+   }
+ 
+   func destroySession() {
+@@ -417,6 +544,16 @@ private extension SquirrelInputController {
+     // 注：不再同步 _linear/_vertical 到 core。这两个原版 Squirrel 的 UI 提示选项
+     // 会让 librime 把方向键路由到组合串光标移动，破坏 key_binder 的
+     // Left→Up / Right→Down 候选切换（与 Windows 端行为统一的关键）。
++
++    // 先问候选窗：←/→ 切换预选词、↓ 展开面板、空格/回车/数字选词。
++    // 这一步不能省 —— heng_process_key 只调engine.process_key，不含 UI 导航，
++    // 方向键会被 librime 当成组合串光标移动吃掉，预选高亮永远不动。
++    // 未被消费（返回 false）才继续走普通按键流程。
++    if heng_ui_nav_key(session, Int32(rimeKeycode), Int32(rimeModifiers)) != 0 {
++      rimeUpdate()
++      return true
++    }
++
+     let handled = heng_process_key(session, Int32(rimeKeycode), Int32(rimeModifiers)) != 0
+ 
+     if !handled {
+@@ -446,6 +583,11 @@ private extension SquirrelInputController {
+     if let text = hengTakeCommit(session) {
+       commit(string: text)
+     }
++    // 鼠标点选候选没有按键事件伴随，rimeUpdate 不会因按键触发，
++    // 必须在点击处理里显式取一次，否则候选窗关了但字不上屏。
++    if let text = hengTakeUiCommit(session) {
++      commit(string: text)
++    }
+   }
+ 
+   // Preserve reserved comment marks when librime requests a UI-only refresh.
+@@ -554,12 +696,16 @@ private extension SquirrelInputController {
+       let lastPage = ctx.is_last_page != 0
+ 
+       let selRange = NSRange(location: start.utf16Offset(in: preedit), length: preedit.utf16.distance(from: start, to: end))
+-      showPanel(preedit: inlinePreedit ? "" : preedit, selRange: selRange, caretPos: caretPos.utf16Offset(in: preedit),
+-                candidates: candidates, comments: comments, labels: labels, highlighted: Int(ctx.highlighted),
+-                page: page, lastPage: lastPage)
++      // 自绘候选窗（M-P4）：候选内容由 core 自己从 session 取并渲染，
++      // 外壳只负责给光标锚点 —— 与 fcitx5 端 updateUI 尾部同构。
++      syncSelfDrawnUi()
++      _ = (candidates, comments, labels, page, lastPage, selRange)
+       heng_free_context(&ctx)
+     } else {
+-      hidePalettes()
++      // 取不到 context **不等于**没有候选词：只说明这一次快照失败。
++      // 旧代码在这里直接 hidePalettes() → 候选窗闪没，而 core 侧随后
++      // 又会 sync 回来，于是用户看到「窗口毫无规律的消失又出现」。
++      // 正确做法：不碰窗口，等下一次按键的 rimeUpdate 自然重画。
+     }
+   }
+ 
+@@ -583,15 +729,35 @@ private extension SquirrelInputController {
+     }
+ 
+     client.insertText(string, replacementRange: .empty)
++    // preedit 缓存必须清，但它同时是 show() 的早退依据 —— 清了之后若下一个
++    // show() 的入参也恰好是 ""，两者相等 → show() 直接 return →
++    // setMarkedText 不再调用 → IMK 侧 marked range 停留在旧状态，
++    // 而 syncSelfDrawnUi() 照发 SYNC → core 按「无组合串」把候选窗藏掉。
++    // 这正是「第一个字母最常丢预览窗」的成因：commit 后 preedit 与
++    // 入参同时为空，早退把刷新吞了。置脏标记强制下一次 show() 执行。
++    preeditDirty = true
+     preedit = ""
+-    hidePalettes()
++    // **不要在这里 hidePalettes()**。
++    // commit() 不只由「选词上屏」触发 —— librime 在打字过程中也会产生 commit
++    // （自动上屏 / 部分上屏 / 标点直上屏），此时组合串还在、候选窗应该继续显示。
++    // 旧代码在这里无条件藏窗 → 窗口毫无规律地消失，打下一个字母才回来，
++    // 就是本 BUG 的真凶（探针实测：BLIT 正常显示 → 0.5s 后 commit 藏窗 → 下一字母才回来）。
++    // 候选窗显隐统一交给 core：rimeUpdate 尾部会syncSelfDrawnUi()，
++    // core 侧按「既无候选又无组合串才藏窗」自己判断。
++    //
++    // 仍需 host panel 收起（那是宿主 UI，不走 core 的自绘链路）。
++    NSApp.squirrelAppDelegate.panel?.hide()
+   }
+ 
+   func show(preedit: String, selRange: NSRange, caretPos: Int) {
+     guard let client = client else { return }
+-    if self.preedit == preedit && self.caretPos == caretPos && self.selRange == selRange {
++    // preeditDirty：commit() 之后强制重刷一次，绕过下面的早退。
++    //（早退在「commit 后 preedit 与入参同为 ""」时会吞掉 setMarkedText，
++    //  导致 IMK marked range 不刷新 → core 判定无组合串 → 藏窗。）
++    if !preeditDirty && self.preedit == preedit && self.caretPos == caretPos && self.selRange == selRange {
+       return
+     }
++    preeditDirty = false
+ 
+     self.preedit = preedit
+     self.caretPos = caretPos
