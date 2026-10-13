@@ -343,33 +343,35 @@ jobs:
           # 官方 7z 包只有 boost 源码，没有编好的 .lib，而 weasel 要链
           # libboost_wserialization / libboost_filesystem / libboost_iostreams /
           # libboost_chrono。链接期报 LNK1104 cannot open file 就是缺这一步。
-          #
-          # 用 Start-Process 而不是 `& b2.exe 2>&1 | Tee-Object`：
-          # 管道 + Tee-Object 在 pwsh 里会把 b2 的输出吞掉（实测日志里
-          # 只有「--- b2 开始 ---」，后面什么都没有，也看不到退出码），
-          # 而 b2 的失败信息全在它自己的 stdout/stderr 里。
           $b2args = @(
             "toolset=msvc-14.3", "address-model=64", "link=static",
             "runtime-link=shared", "variant=release", "-j4",
             "--with-serialization", "--with-filesystem",
             "--with-iostreams", "--with-chrono", "stage-lib"
           )
-          Log "--- b2 开始: b2.exe $($b2args -join ' ') ---"
-          $p = Start-Process -FilePath "$root\b2.exe" -ArgumentList $b2args `
-               -WorkingDirectory $root -NoNewWindow -Wait -PassThru `
-               -RedirectStandardOutput "$env:GITHUB_WORKSPACE\b2-out.log" `
-               -RedirectStandardError "$env:GITHUB_WORKSPACE\b2-err.log"
-          Log "--- b2 退出码 $($p.ExitCode) ---"
-          Log "--- b2 stdout 末尾 ---"
-          if (Test-Path "$env:GITHUB_WORKSPACE\b2-out.log") {
-            Get-Content "$env:GITHUB_WORKSPACE\b2-out.log" | ForEach-Object { Log $_ }
+          #
+          # 输出先进变量再落盘：b2 编译 boost 要几分钟，输出上千行，
+          # 经管道再重定向在 pwsh 里会丢内容。b2.exe 是控制台程序，
+          # 用调用运算符直接跑，$LASTEXITCODE 就是它自己的退出码。
+          Log "b2.exe => $(Test-Path "$root\b2.exe")"
+          Log "--- b2 开始 ---"
+          Push-Location $root
+          $all = & ".\b2.exe" @b2args 2>&1
+          $rc = $LASTEXITCODE
+          Pop-Location
+          $all | Out-File -FilePath "$env:GITHUB_WORKSPACE\b2-out.log" -Encoding utf8
+          Log "--- b2 退出码 $rc ---"
+          Log "--- b2 输出（末尾 80 行）---"
+          if ($all) {
+            $all | Select-Object -Last 80 | ForEach-Object { Log "$_" }
+          } else {
+            Log "b2 无任何输出"
           }
-          if (Test-Path "$env:GITHUB_WORKSPACE\b2-err.log") {
-            Log "--- b2 stderr 末尾 ---"
-            Get-Content "$env:GITHUB_WORKSPACE\b2-err.log" | ForEach-Object { Log $_ }
-          }
-          if ($p.ExitCode -ne 0) { throw "b2 失败，退出码 $($p.ExitCode)" }
-          Get-ChildItem "$root/stage/lib" -Filter "*1_84.lib" | ForEach-Object { Log $_.Name }
+          if ($rc -ne 0) { throw "b2 失败，退出码 $rc" }
+          $libs = @(Get-ChildItem "$root/stage/lib" -Filter "*1_84.lib")
+          Log "产出 lib 数 = $($libs.Count)"
+          $libs | ForEach-Object { Log $_.Name }
+          if ($libs.Count -lt 4) { throw "boost 静态库不足 4 个，weasel 链接会缺" }
 
       - name: 生成 weasel.props
         shell: pwsh
@@ -381,7 +383,6 @@ jobs:
           $props = Get-Content patches/weasel.props -Raw
           $props = $props -replace '<BOOST_ROOT>[^<]*</BOOST_ROOT>', "<BOOST_ROOT>$boost</BOOST_ROOT>"
           Set-Content -Path third_party/src/weasel/weasel.props -Value $props -Encoding UTF8
-          Copy-Item patches/boost-project-config.jam third_party/src/weasel/deps/boost_1_84_0/project-config.jam -Force
           if (-not (Select-String -Path third_party/src/weasel/weasel.props -Pattern ([regex]::Escape($boost)) -Quiet)) {
             throw "BOOST_ROOT 未写入 weasel.props"
           }
