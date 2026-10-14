@@ -41,9 +41,9 @@ librime 发行包会随版本变动，而 weasel 编译期链接的是 `lib64/ri
 
 | 文件 | 权威位置 | 说明 |
 |---|---|---|
-| `default.yaml` | `patches/rime-default.yaml` | 左右键切换候选 |
-| `weasel.yaml` | `patches/rime-weasel.yaml` | 配色方案 heng_blue |
-| `rime_ice.schema.yaml` | `patches/rime-ice.schema.yaml` | 模糊音全开 |
+| `default.yaml` | `patches/rime/rime-default.yaml` | 左右键切换候选 |
+| `weasel.yaml` | `patches/rime/rime-weasel.yaml` | 配色方案 heng_blue |
+| `rime_ice.schema.yaml` | `patches/rime/rime-ice.schema.yaml` | 模糊音全开 |
 | `heng.yaml` | `config-center/shared/heng.yaml` | 衡自己的核心配置 |
 
 四份留底与 `data/` 下的实际文件内容 md5 一致。`data/` 本身仍需从雾凇

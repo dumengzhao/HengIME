@@ -209,8 +209,8 @@ jobs:
           bash tools/ci/make_ci_default.sh \
             ci-runtime/rime-shared/default.yaml \
             ci-runtime/rime-shared/default.yaml
-          cp patches/rime-ice.schema.yaml    ci-runtime/rime-shared/rime_ice.schema.yaml
-          cp patches/rime-weasel.yaml        ci-runtime/rime-shared/weasel.yaml
+          cp patches/rime/rime-ice.schema.yaml ci-runtime/rime-shared/rime_ice.schema.yaml
+          cp patches/rime/rime-weasel.yaml     ci-runtime/rime-shared/weasel.yaml
           cp config-center/shared/heng.yaml  ci-runtime/rime-shared/heng.yaml
 
           {
@@ -294,8 +294,8 @@ jobs:
           cd third_party/src/weasel
           git fetch --depth 1 origin d73f6295e8252ed2f7b9c12bae32e9001b1afdaa
           git checkout d73f6295e8252ed2f7b9c12bae32e9001b1afdaa
-          git apply --whitespace=nowarn ../../../patches/weasel-0.17.4-heng-m1.patch
-          Copy-Item ../../../patches/env.bat .
+          git apply --whitespace=nowarn ../../../patches/windows/weasel-0.17.4-heng-m1.patch
+          Copy-Item ../../../patches/windows/env.bat .
 
       # 原 ilammy/msvc-dev-cmd@v1 的替代实现。该 action 的 v1.13.0
       # （v1 tag 指向它）与 master 分支的 action.yml 都仍是 `using: node20`，
@@ -486,7 +486,7 @@ jobs:
           $log = "$env:GITHUB_WORKSPACE\boost-build.log"
           function Log($m) { $m | Tee-Object -FilePath $log -Append }
 
-          # 入库的 boost-project-config.jam 带的是本机绝对路径（BuildTools
+          # 入库的 patches/windows/boost-project-config.jam 带的是本机绝对路径（BuildTools
           # 14.44），runner 上是 Enterprise，编译器与 <setup> 两处都得重写。
           #
           # <setup> 不能省。msvc.jam 的 set-setup-command 靠它生成
@@ -595,7 +595,7 @@ jobs:
           # 而入库的模板里 BOOST_ROOT 是本机绝对路径 —— CI 必须按实际路径重写。
           $ErrorActionPreference = 'Stop'
           $boost = (Resolve-Path third_party/src/weasel/deps/boost_1_84_0).Path
-          $props = Get-Content patches/weasel.props -Raw
+          $props = Get-Content patches/windows/weasel.props -Raw
           $props = $props -replace '<BOOST_ROOT>[^<]*</BOOST_ROOT>', "<BOOST_ROOT>$boost</BOOST_ROOT>"
           Set-Content -Path third_party/src/weasel/weasel.props -Value $props -Encoding UTF8
           if (-not (Select-String -Path third_party/src/weasel/weasel.props -Pattern ([regex]::Escape($boost)) -Quiet)) {
@@ -629,9 +629,9 @@ jobs:
           # 少了它们编译仍能过，但行为与本地不一致（配色方案 / 左右键切换候选）。
           $ErrorActionPreference = 'Stop'
           $data = "third_party/externals/data"
-          Copy-Item patches/rime-default.yaml   "$data/default.yaml" -Force
-          Copy-Item patches/rime-weasel.yaml    "$data/weasel.yaml" -Force
-          Copy-Item patches/rime-ice.schema.yaml "$data/rime_ice.schema.yaml" -Force
+          Copy-Item patches/rime/rime-default.yaml   "$data/default.yaml" -Force
+          Copy-Item patches/rime/rime-weasel.yaml    "$data/weasel.yaml" -Force
+          Copy-Item patches/rime/rime-ice.schema.yaml "$data/rime_ice.schema.yaml" -Force
           Copy-Item config-center/shared/heng.yaml "$data/heng.yaml" -Force
 
       - name: 铺 librime 头文件与导入库
@@ -738,7 +738,7 @@ jobs:
           # 排序规则与 sync_heng_def.py 一致：非 heng_ 前缀按原样（Slint 的 *VTable
           # 等大写符号自然排在 heng_ 之后），heng_* 按字典序。
           # 用 CompareOrdinal 而非 Sort-Object：后者走区域性比较且不区分大小写，
-          # 生成的顺序与入库的 patches/heng.df 不同（ClipVTable 会排到 CheckBoxVTable 之后）。
+          # 生成的顺序与入库的 patches/windows/heng.def 不同（ClipVTable 会排到 CheckBoxVTable 之后）。
           # 顺序对 lib.exe 无影响，但一致才能直接 diff 出「dll 多了哪个导出」。
           $list = [System.Collections.Generic.List[string]]::new()
           $list.AddRange([string[]]$names)
@@ -1067,7 +1067,7 @@ jobs:
             *.log
           if-no-files-found: ignore
 
-  # macOS 外壳：squirrel 改造。改动固化在 patches/squirrel-heng.patch。
+  # macOS 外壳：squirrel 改造。改动固化在 patches/macos/squirrel-heng.patch。
   shell-macos:
     name: 外壳 macOS (squirrel)
     # macos-26 而不是 macos-15：上游 squirrel 的 SquirrelPanel.swift 用了
@@ -1112,7 +1112,7 @@ jobs:
           cd third_party/src/squirrel
           git fetch --depth 1 origin 6ad0e45bcf53b770474100c02cec43912f0da502
           git checkout 6ad0e45bcf53b770474100c02cec43912f0da502
-          git apply ../../../patches/squirrel-heng.patch
+          git apply ../../../patches/macos/squirrel-heng.patch
           # 只拉 Sparkle 与 plum。librime 那个 submodule 不初始化——
           # 编译用的是仓库 third_party/librime 下的官方预编译包，
           # 拉源码既慢且与core/build.rs 找的位置冲突。

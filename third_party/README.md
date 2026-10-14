@@ -49,9 +49,9 @@ WeaselServer.exe --导入--> WinSparkle.dll
 
 | 文件 | 权威位置 | 说明 |
 |---|---|---|
-| `default.yaml` | `patches/rime-default.yaml` | 左右键切换候选 |
-| `weasel.yaml` | `patches/rime-weasel.yaml` | 配色方案 heng_blue |
-| `rime_ice.schema.yaml` | `patches/rime-ice.schema.yaml` | 模糊音全开 |
+| `default.yaml` | `patches/rime/rime-default.yaml` | 左右键切换候选 |
+| `weasel.yaml` | `patches/rime/rime-weasel.yaml` | 配色方案 heng_blue |
+| `rime_ice.schema.yaml` | `patches/rime/rime-ice.schema.yaml` | 模糊音全开 |
 | `heng.yaml` | `config-center/shared/heng.yaml` | 衡核心配置 |
 
 ## 配置来源的分工
@@ -119,7 +119,7 @@ git clone --depth 1 https://github.com/rime/squirrel third_party/src/squirrel
 cd third_party/src/squirrel
 git fetch --depth 1 origin 6ad0e45bcf53b770474100c02cec43912f0da502
 git checkout 6ad0e45bcf53b770474100c02cec43912f0da502
-git apply ../../../patches/squirrel-heng.patch
+git apply ../../../patches/macos/squirrel-heng.patch
 ```
 
 基线 commit `6ad0e45b` 含品牌图标（作者为本项目），补丁只含贴帧层相关的 6 个文件。
@@ -167,33 +167,33 @@ COM 注册存的是路径而非文件身份，链接产物写回同名即生效�
 
 **改了 ABI 之后还要重建 `lib64/heng.lib`**，见文末。
 
-## src/weasel 改动固化（主仓库 patches/）
+## src/weasel 改动固化（主仓库 patches/windows/）
 
-我们对 weasel 源码的全部修改保存在主仓库 `patches/`：
+我们对 weasel 源码的全部修改保存在主仓库 `patches/windows/`：
 
 | 文件 | 内容 |
 |---|---|
-| `weasel-0.17.4-heng-m1.patch` | 全部源码与构建脚本改动：RimeWithWeasel 数据源换血 + 样式/app_options 配置通道 + 内置候选窗接线 + TSF 侧 CCandidateList 永不显示（避免与 core 候选窗叠双层）+ 布局间距修复 + ContextUpdater 零宽保护 + 菜单精简与托盘图标 + `build-x64.bat` / `build-x64-dev.bat` / `build-core.bat` / `sync-deps.bat` + `include/heng.h` |
-| `weasel.props` / `env.bat` | 编译配置（BOOST_ROOT 等，上游 gitignore 忽略） |
-| `boost-project-config.jam` | b2 MSVC 显式配置（修复 setup 路径 bug） |
-| `heng.def` | core 全部导出清单，供重建 `lib64/heng.lib` 用 |
+| `windows/weasel-0.17.4-heng-m1.patch` | 全部源码与构建脚本改动：RimeWithWeasel 数据源换血 + 样式/app_options 配置通道 + 内置候选窗接线 + TSF 侧 CCandidateList 永不显示（避免与 core 候选窗叠双层）+ 布局间距修复 + ContextUpdater 零宽保护 + 菜单精简与托盘图标 + `build-x64.bat` / `build-x64-dev.bat` / `build-core.bat` / `sync-deps.bat` + `include/heng.h` |
+| `windows/weasel.props` / `windows/env.bat` | 编译配置（BOOST_ROOT 等，上游 gitignore 忽略） |
+| `windows/boost-project-config.jam` | b2 MSVC 显式配置（修复 setup 路径 bug） |
+| `windows/heng.def` | core 全部导出清单，供重建 `lib64/heng.lib` 用 |
 
 配置留底（雾凇基础上叠加本项目改动）在 `config-center/shared/` 与
-`patches/*.yaml`，见「externals」一节的对照表。
+`patches/rime/*.yaml`，见「externals」一节的对照表。
 
 **新机器重建步骤**（克隆 weasel 后）：
 
 ```bash
 cd third_party/src/weasel
-git apply --whitespace=nowarn ../../../patches/weasel-0.17.4-heng-m1.patch
-cp ../../../patches/weasel.props ../../../patches/env.bat .
-cp ../../../patches/boost-project-config.jam deps/boost_1_84_0/project-config.jam
+git apply --whitespace=nowarn ../../../patches/windows/weasel-0.17.4-heng-m1.patch
+cp ../../../patches/windows/weasel.props ../../../patches/windows/env.bat .
+cp ../../../patches/windows/boost-project-config.jam deps/boost_1_84_0/project-config.jam
 
 # 共享数据从 externals/ 铺到 output\，再叠加本项目改过的配置
 cmd //c sync-deps.bat output
-cp ../../../patches/rime-default.yaml   output/data/default.yaml
-cp ../../../patches/rime-weasel.yaml    output/data/weasel.yaml
-cp ../../../patches/rime-ice.schema.yaml output/data/rime_ice.schema.yaml
+cp ../../../patches/rime/rime-default.yaml   output/data/default.yaml
+cp ../../../patches/rime/rime-weasel.yaml    output/data/weasel.yaml
+cp ../../../patches/rime/rime-ice.schema.yaml output/data/rime_ice.schema.yaml
 cp ../../../config-center/shared/heng.yaml output/data/heng.yaml
 ```
 
@@ -220,7 +220,7 @@ cp ../../../config-center/shared/heng.yaml output/data/heng.yaml
 **后续维护约定**：每次修改 weasel 树内文件后重新生成补丁并提交主仓库：
 
 ```bash
-python .workbuddy/tools/gen_weasel_patch.py patches/weasel-0.17.4-heng-m1.patch
+python .workbuddy/tools/gen_weasel_patch.py patches/windows/weasel-0.17.4-heng-m1.patch
 ```
 
 生成脚本的约束（`git diff HEAD` / 新文件先 `git add -N` / `--text` 而非
@@ -252,7 +252,7 @@ cd third_party/src/weasel/lib64
 lib /def:heng.def /machine:X64 /out:heng.lib
 ```
 
-`patches/heng.def` 已入库留底（全部导出清单，87 项 = 54 个 `heng_*` +
+`patches/windows/heng.def` 已入库留底（全部导出清单，93 项 = 60 个 `heng_*` +
 31 个 Slint `*VTable` + 2 个 `slint_new_path_*`）；`lib64/heng.lib`/`heng.exp`
 为本地产物不入库。导入库必须与当前 dll 同架构同版本，否则链接期报
 `LNK2001 无法解析的外部符号 __imp_heng_*`。

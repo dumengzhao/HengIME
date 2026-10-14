@@ -7,9 +7,9 @@ set -e
 cd "$(dirname "$0")/.."
 mkdir -p runtime/rime-shared
 
-cp -v patches/rime-default.yaml     runtime/rime-shared/default.yaml
-cp -v patches/rime-weasel.yaml      runtime/rime-shared/weasel.yaml
-cp -v patches/rime-ice.schema.yaml  runtime/rime-shared/rime_ice.schema.yaml
+cp -v patches/rime/rime-default.yaml     runtime/rime-shared/default.yaml
+cp -v patches/rime/rime-weasel.yaml      runtime/rime-shared/weasel.yaml
+cp -v patches/rime/rime-ice.schema.yaml  runtime/rime-shared/rime_ice.schema.yaml
 cp -v config-center/shared/heng.yaml runtime/rime-shared/heng.yaml
 
 echo "配置已同步到 runtime/rime-shared/（重载输入法生效）"

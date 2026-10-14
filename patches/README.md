@@ -1,8 +1,15 @@
 # 外壳补丁
 
-本目录固化两端的第三方外壳改动：`weasel-0.17.4-heng-m1.patch`（Windows）与
-`squirrel-heng.patch`（macOS）。两者形态不同：weasel 已在主仓库跑通重新生成与验证
-脚本，squirrel 目前是一次性产出，重生成需在 mac 上手工执行（见文末）。
+本目录按平台与用途分三组，固化两端第三方外壳的改动与共享配置：
+
+| 子目录 | 内容 |
+|---|---|
+| `windows/` | `weasel-0.17.4-heng-m1.patch`（weasel 源码与构建脚本）+ `heng.def`（core 导出清单）+ `weasel.props` / `env.bat` / `boost-project-config.jam`（编译配置） |
+| `macos/` | `squirrel-heng.patch` |
+| `rime/` | `rime-default.yaml` / `rime-weasel.yaml` / `rime-ice.schema.yaml`（雾凇基础上叠加的本项目改动，跨平台共用） |
+
+两端补丁形态不同：weasel 已在主仓库跑通重新生成与验证脚本，squirrel 目前是一次性
+产出，重生成需在 mac 上手工执行（见文末）。
 
 ## 为什么需要补丁
 
@@ -36,7 +43,7 @@ Linux 外壳不走这条路径：`shells/linux/fcitx5/` 是自研代码，直接
 ## 重新生成（weasel）
 
 ```bash
-python .workbuddy/tools/gen_weasel_patch.py patches/weasel-0.17.4-heng-m1.patch
+python .workbuddy/tools/gen_weasel_patch.py patches/windows/weasel-0.17.4-heng-m1.patch
 ```
 
 当前补丁 47 个文件 / 452 KB。
