@@ -69,10 +69,10 @@ index eb96d08..96b0321 100644
        "comment" : "Update",
        "localizations" : {
 diff --git a/sources/BridgingFunctions.swift b/sources/BridgingFunctions.swift
-index 4ce2c7b..0f97e89 100644
+index 4ce2c7b..ae02e11 100644
 --- a/sources/BridgingFunctions.swift
 +++ b/sources/BridgingFunctions.swift
-@@ -18,13 +18,13 @@ typealias RimeSessionId = UInt64
+@@ -18,13 +18,24 @@ typealias RimeSessionId = UInt64
  /// 读取会话选项（heng_get_option）。
  func hengGetOption(_ session: RimeSessionId, _ option: String) -> Bool {
    guard session != 0 else { return false }
@@ -85,10 +85,21 @@ index 4ce2c7b..0f97e89 100644
    guard session != 0 else { return }
 -  option.withCString { heng_set_option(session, $0, value ? 1 : 0) }
 +  _ = option.withCString { heng_set_option(session, $0, value ? 1 : 0) }
++}
++
++/// 上报 inline_preedit 开关给 core（heng_set_inline_preedit）。仅 macOS 有效。
++func hengSetInlinePreedit(_ on: Bool) {
++  heng_set_inline_preedit(on ? 1 : 0)
++}
++
++/// 读 weasel.custom.yaml 的 style/<key>（heng_style_flag，源补丁直读，不过部署缓存）。
++/// 返回调用方传入的 defaultValue = 键不存在（无覆盖）；0/1 = 有显式值。
++func hengStyleFlag(_ key: String, _ defaultValue: Int32) -> Int32 {
++  return key.withCString { heng_style_flag($0, defaultValue) }
  }
  
  /// 取待上屏文本（消费语义）。
-@@ -36,6 +36,19 @@ func hengTakeCommit(_ session: RimeSessionId) -> String? {
+@@ -36,6 +47,19 @@ func hengTakeCommit(_ session: RimeSessionId) -> String? {
    return String(cString: text)
  }
  
@@ -108,7 +119,7 @@ index 4ce2c7b..0f97e89 100644
  /// 取组合串原始输入（如拼音串）。nil = 无组合。
  func hengGetInput(_ session: RimeSessionId) -> String? {
    guard session != 0 else { return nil }
-@@ -104,3 +117,32 @@ extension NSPoint {
+@@ -104,3 +128,32 @@ extension NSPoint {
      sqrt(pow(self.x, 2) + pow(self.y, 2))
    }
  }
@@ -761,7 +772,7 @@ index 896d8d2..abb9e6b 100644
      let sharedPath = Bundle.main.sharedSupportPath ?? ""
      let userPath = SquirrelApp.userDir.path
 diff --git a/sources/SquirrelInputController.swift b/sources/SquirrelInputController.swift
-index f09e8ab..3b870f8 100644
+index f09e8ab..ce95855 100644
 --- a/sources/SquirrelInputController.swift
 +++ b/sources/SquirrelInputController.swift
 @@ -15,8 +15,25 @@ final class SquirrelInputController: IMKInputController {
@@ -815,7 +826,7 @@ index f09e8ab..3b870f8 100644
  
      NotificationCenter.default.addObserver(
        forName: .init("SquirrelSetASCIIModeNotification"),
-@@ -248,9 +276,118 @@ final class SquirrelInputController: IMKInputController {
+@@ -248,9 +276,139 @@ final class SquirrelInputController: IMKInputController {
  
    override func hidePalettes() {
      NSApp.squirrelAppDelegate.panel?.hide()
@@ -931,10 +942,31 @@ index f09e8ab..3b870f8 100644
 +    _ = heng_ui_sync_ex(session, caretAnchorX, caretAnchorBottom, caretAnchorTop)
 +  }
 +
++  /// inline_preedit 开关计算与推送。squirrel 配置（panel.inlinePreedit）为基准，
++  /// weasel.custom.yaml 的 style/inline_preedit 显式值覆盖之 —— 与 rime 的 patch
++  /// 语义一致：core 设置窗拨这个开关写的就是该文件，高级用户也可手改。
++  ///
++  /// 算完立即推送 core（heng_set_inline_preedit）：macOS 上 core 读不到
++  /// weasel.custom.yaml（那是 Windows weasel 端补丁），历史上恒 fallback「关」，
++  /// 于是 squirrel.yaml 开着时外壳把字母插进宿主区、core 的预览窗条内也画，
++  /// 同一份字母显两处（本 BUG）。推送后两侧同源，拨开关两边一起变。
++  private func refreshInlinePreedit() {
++    guard session != 0, let panel = NSApp.squirrelAppDelegate.panel else { return }
++    let base = (panel.inlinePreedit && !hengGetOption(session, "no_inline")) || hengGetOption(session, "inline")
++    let override = hengStyleFlag("inline_preedit", -1)
++    let on = override >= 0 ? (override != 0) : base
++    if on != inlinePreedit {
++      inlinePreedit = on
++      // 内嵌开 = 光标由宿主 marked text 承载；关 = core 预览窗自己画软光标
++      hengSetOption(session, "soft_cursor", !on)
++    }
++    hengSetInlinePreedit(on)
++  }
++
    override func commitComposition(_ sender: Any!) {
      self.client ?= sender as? IMKTextInput
      if session != 0 {
-@@ -261,56 +398,43 @@ final class SquirrelInputController: IMKInputController {
+@@ -261,56 +419,43 @@ final class SquirrelInputController: IMKInputController {
      }
    }
  
@@ -1009,7 +1041,7 @@ index f09e8ab..3b870f8 100644
    private(set) var specialCommentIndices: [ReservedPropertyKey: Set<Int>] = [:]
  
    func handleReservedProperty(key rawKey: String, value rawValue: String, for sessionId: RimeSessionId) throws(ReservedPropertyError) {
-@@ -328,6 +452,9 @@ final class SquirrelInputController: IMKInputController {
+@@ -328,6 +473,9 @@ final class SquirrelInputController: IMKInputController {
    }
  
    deinit {
@@ -1019,7 +1051,7 @@ index f09e8ab..3b870f8 100644
      destroySession()
    }
  }
-@@ -402,7 +529,7 @@ private extension SquirrelInputController {
+@@ -402,7 +550,7 @@ private extension SquirrelInputController {
      }
      // v6 行为统一层：app_options 与选项初值由 core 在 set_session_owner 时统一应用，
      // 外壳不再自行读取/下发（与 Windows/Linux 外壳一致）。
@@ -1028,7 +1060,7 @@ index f09e8ab..3b870f8 100644
    }
  
    func destroySession() {
-@@ -417,6 +544,16 @@ private extension SquirrelInputController {
+@@ -417,6 +565,16 @@ private extension SquirrelInputController {
      // 注：不再同步 _linear/_vertical 到 core。这两个原版 Squirrel 的 UI 提示选项
      // 会让 librime 把方向键路由到组合串光标移动，破坏 key_binder 的
      // Left→Up / Right→Down 候选切换（与 Windows 端行为统一的关键）。
@@ -1045,7 +1077,7 @@ index f09e8ab..3b870f8 100644
      let handled = heng_process_key(session, Int32(rimeKeycode), Int32(rimeModifiers)) != 0
  
      if !handled {
-@@ -446,6 +583,11 @@ private extension SquirrelInputController {
+@@ -446,6 +604,11 @@ private extension SquirrelInputController {
      if let text = hengTakeCommit(session) {
        commit(string: text)
      }
@@ -1057,7 +1089,23 @@ index f09e8ab..3b870f8 100644
    }
  
    // Preserve reserved comment marks when librime requests a UI-only refresh.
-@@ -554,12 +696,16 @@ private extension SquirrelInputController {
+@@ -463,11 +626,13 @@ private extension SquirrelInputController {
+         schemaId = String(cString: schema_id)
+         NSApp.squirrelAppDelegate.loadSettings(for: schemaId)
+         if let panel = NSApp.squirrelAppDelegate.panel {
+-          inlinePreedit = (panel.inlinePreedit && !hengGetOption(session, "no_inline")) || hengGetOption(session, "inline")
+           inlineCandidate = panel.inlineCandidate && !hengGetOption(session, "no_inline")
+-          hengSetOption(session, "soft_cursor", !inlinePreedit)
+         }
+       }
++      // inline 开关每次刷新都算并推送 core：squirrel.yaml 是用户主开关，
++      // weasel.custom.yaml（设置窗 / 高级用户直改）显式值覆盖之。
++      // 放在 schema 分支外 —— 不换 schema 也要能热生效（改配置即生效）。
++      refreshInlinePreedit()
+       heng_free_status(&status)
+     }
+ 
+@@ -554,12 +719,16 @@ private extension SquirrelInputController {
        let lastPage = ctx.is_last_page != 0
  
        let selRange = NSRange(location: start.utf16Offset(in: preedit), length: preedit.utf16.distance(from: start, to: end))
@@ -1078,7 +1126,7 @@ index f09e8ab..3b870f8 100644
      }
    }
  
-@@ -583,15 +729,35 @@ private extension SquirrelInputController {
+@@ -583,15 +752,35 @@ private extension SquirrelInputController {
      }
  
      client.insertText(string, replacementRange: .empty)
