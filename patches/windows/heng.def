@@ -61,6 +61,7 @@ EXPORTS
     heng_get_status
     heng_hello
     heng_highlight_candidate_on_current_page
+    heng_installation_id
     heng_last_error
     heng_open_dir
     heng_process_key
@@ -81,6 +82,11 @@ EXPORTS
     heng_simulate_key_sequence
     heng_start_session
     heng_style_flag
+    heng_sync_config
+    heng_sync_configure
+    heng_sync_now
+    heng_sync_set_enabled
+    heng_sync_status
     heng_sync_user_data
     heng_take_ui_commit
     heng_ui_click_candidate

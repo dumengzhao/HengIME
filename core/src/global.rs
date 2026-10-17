@@ -175,6 +175,13 @@ pub fn engine() -> Result<&'static Engine, EngineError> {
     engine_with(default_config())
 }
 
+/// 引擎单例的只读视图（未初始化返回 None）。同步模块的定时器线程与
+/// 状态查询走这里：它们不能触发 librime 初始化（那会部署整个用户目录），
+/// 只能等 `engine_with` 就绪后被动驱动。
+pub fn engine_opt() -> Option<&'static Engine> {
+    ENGINE.get()
+}
+
 pub fn engine_with(config: EngineConfig) -> Result<&'static Engine, EngineError> {
     if let Some(e) = ENGINE.get() {
         return Ok(e);
@@ -186,7 +193,11 @@ pub fn engine_with(config: EngineConfig) -> Result<&'static Engine, EngineError>
     }
     let engine = Engine::new(config)?;
     init_behavior_layer(&engine);
-    Ok(ENGINE.get_or_init(|| engine))
+    let e = ENGINE.get_or_init(|| engine);
+    // 同步模块就位：接管 installation_id、读配置、按需拉起定时器。
+    // 放在 get_or_init 之后，保证定时器线程能看到已初始化的引擎。
+    crate::sync::init(e.user_data_dir());
+    Ok(e)
 }
 
 /// 序列化所有 librime 会话操作。

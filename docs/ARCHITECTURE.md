@@ -29,9 +29,10 @@ TSF / IMK / Fcitx5 / IMS / Custom Keyboard Extension / IME Kit
     ▼
 heng-core（Rust，编译成 heng_core.dll / .so / .dylib）
     ├─ engine/     librime FFI + 会话封装
-    ├─ ui.rs       Slint 自绘候选窗 + 七页设置窗
+    ├─ ui.rs       Slint 自绘候选窗 + 八页设置窗
     ├─ settings.rs 配置读写（写 patch 文件）
-    ├─ capi.rs     C ABI（54 个 heng_* 导出，abi_version=10）
+    ├─ sync.rs     用户词库同步（timer 线程 + 服务端客户端，无 feature 门控）
+    ├─ capi.rs     C ABI（66 个 heng_* 导出，abi_version=11）
     └─ server.rs   本地 HTTP，仅诊断（127.0.0.1:9371）
 ```
 
@@ -56,9 +57,10 @@ librime 与候选窗都在 `WeaselServer.exe` 内，该进程直接调用 `heng_
 | `engine/mod.rs` | librime 绑定封装、会话管理、`redeploy()` |
 | `engine/rime_ffi.rs` | 手写 FFI 声明（对照 librime 1.17.0 的 `rime_api.h`） |
 | `global.rs` | 全局引擎 + 会话表 + 行为统一层（传播策略/app_options/开关记忆） |
-| `capi.rs` | C ABI，54 个 `heng_*` 导出，`abi_version = 10` |
+| `capi.rs` | C ABI，66 个 `heng_*` 导出，`abi_version = 11` |
 | `ui.rs` | 候选窗与设置窗的 Slint 场景、平台后端、事件分发 |
 | `settings.rs` | 读配置（config API v4）/ 写配置（直接改 patch 文件） |
+| `sync.rs` | 用户词库同步：配置/状态、`installation_id` 接管、timer 线程、拉取-导出-上传编排 |
 | `server.rs` | 本地 HTTP，诊断用 |
 
 **ABI 是手写的**，没有 IDL 代码生成。改 ABI 时必须三处同步：
@@ -132,7 +134,7 @@ weasel.custom.yaml
 
 ## 5. 设置窗口
 
-core 内的 Slint 原生窗口，`heng_settings_show(page)` 唤起。七页，页号是外壳契约：
+core 内的 Slint 原生窗口，`heng_settings_show(page)` 唤起。八页，页号是外壳契约：
 
 | 页 | 名称 | 内容 |
 |---|---|---|
@@ -142,7 +144,12 @@ core 内的 Slint 原生窗口，`heng_settings_show(page)` 唤起。七页，�
 | 3 | 标点符号 | 半角标点模式拨杆 |
 | 4 | 词库 | 用户词典文件列表、打开用户目录、备份用户词典 |
 | 5 | 服务 | 重启/退出服务、重新部署、词典管理、三个目录按钮 |
-| 6 | 关于 | 版本、ABI、目录信息 |
+| 6 | 同步 | 状态卡（服务器/账号/状态）、启用开关、立即同步、退出登录、CLI 登录指引 |
+| 7 | 关于 | 版本、ABI、目录信息 |
+
+同步页的账号录入走 CLI（`heng-cli sync login <地址> <用户名>`，密码经第三
+参数或 stdin）：设置窗没有键盘输入通路。状态由 timer 线程异步推进，UI 主循环
+在页面停留期间约 500ms 轮询刷新。
 
 改 `SET_NAV` 顺序必须同步改 `page_id` 常量，否则外壳调 `heng_settings_show(5)`
 会跳错页。
@@ -162,12 +169,12 @@ core 内的 Slint 原生窗口，`heng_settings_show(page)` 唤起。七页，�
 ```
 core/                heng-core：引擎 + 自绘 UI + ABI
   include/heng.h     C ABI 头文件（外壳唯一定价面）
-  src/{engine,ui,settings,capi,global,server}.rs
+  src/{engine,ui,settings,sync,capi,global,server}.rs
 shells/
   linux/fcitx5/      Fcitx5 addon（唯一已建的 shells 子目录）
 tools/
   heng-cli/          调试 CLI：version cand commit bench serve abitest
-                             uitest pagetest bartest settings
+                             uitest pagetest bartest settings sync
   weasel-dev-install.ps1   Windows dev 版注册/启动/卸载
   squirrel-dev-install.sh  macOS dev 版部署
   icons/
@@ -178,6 +185,7 @@ patches/             按平台分组的外壳补丁与配置
 config-center/       配置真源与分发
   shared/heng.yaml   行为统一层的配置
   deploy.sh
+server/               heng-sync-server：词库同步服务端（axum + SQLite）
 third_party/src/     上游源码浅克隆（weasel/squirrel/fcitx5-rime/trime，gitignored）
 runtime/             正式版用户数据（shared data + user dir）
 runtime-dev/         dev 版用户数据
@@ -212,17 +220,28 @@ iOS 走 Custom Keyboard Extension 直链 C 静态库，鸿蒙走 NAPI）。
 ## 8. 词库与用户资料同步
 
 librime 的 sync 机制只做一件事：把 userdb 导出成文本快照（头部带 `#@/tick`、
-`#@/user_id`）写到一个目录，**不含网络代码**。跨设备需要用网盘或U盘同步该目录。
+`#@/user_id`）写到一个目录，**不含网络代码**。
 
-- 未配 `sync_dir` 时，默认落点是 `user_dir\sync\<installation_id>\`，
-  即本地镜像，没有传输行为。
-- 快照包含 `*.custom.yaml` 与 `installation.yaml`，配置随快照一起备份，换机可整体恢复。
+- 默认落点是 `user_dir\sync\<installation_id>\`，即本地镜像。
+- 同步目录另含配置目录**根目录**的 `*.custom.yaml` 与 `installation.yaml`，
+  两者不参与同步；`sync.rs` 只挑 `*.userdb.txt` 传输。
 
-core 的 `heng_sync_user_data()` 导出当前无 UI 入口，是「服务端 + 账号」方案的
-数据基础：上传的是这份快照，服务端存文件并合并 tick 回传。设置页的
-「用户资料同步」按钮已移除，与该方案范围重叠。
+`sync.rs` 在其上实现「服务端 + 账号」方案。`installation_id` 由 core 接管
+生成（`<platform>-<hostname>-<6 位大写十六进制>`，写回 `installation.yaml`，
+librime 的 `InstallationUpdate` 只认已存在的值）。进程内 timer 线程默认
+30 分钟一轮，顺序为：注册设备 → 拉取其他设备快照到 `sync/<other_id>/` →
+`sync_user_data_blocking()`（librime 内部完成导出、合并、deploy）→
+上传本机快照。**词条级合并由各端 librime 完成**，服务端按设备分槽存储，
+不解析快照内容。一轮同步全程持 `SESSION_GATE`，`heng_start_session` 持同一
+把锁，会话创建最多被推迟一轮；有活动会话时整轮推迟并写待合并标记，
+由引擎启动与会话计数归零两条路径补跑。
 
-传输层尚未实现，详见 [FEATURES.md](FEATURES.md) §4。
+账号经 `heng-cli sync login <地址> <用户名>` 录入（密码走第三参数或 stdin；
+设置窗没有键盘输入通路），配置连 token 落 `<user_dir>/.heng/sync.yaml`。
+设置窗第 6 页管状态与开关，`heng-cli sync status|now|on|off` 为等价 CLI。
+失败静默退避重试，不弹窗、不阻塞输入。
+
+方案、接口与数据模型见 [SYNC-PLAN.md](SYNC-PLAN.md)。
 
 ---
 
@@ -231,7 +250,8 @@ core 的 `heng_sync_user_data()` 导出当前无 UI 入口，是「服务端 + �
 | 环节 | 命令 |
 |---|---|
 | 构建 core | `cargo build -p heng-core --release` |
-| 单测 | `cargo test -p heng-core --lib`（7 项） |
+| core 单测 | `cargo test -p heng-core --lib`（20 项） |
+| 同步服务端 | `cargo test -p heng-sync-server`（17 单测 + 4 集成） |
 | ABI 全链路 | `cargo run --release -p heng-cli -- abitest` |
 | 视觉验证 | `HENG_UI_DUMP=1 heng-cli settings <page>` 抓帧到 `%TEMP%/*.ppm` |
 | Windows 外壳 | `third_party/src/weasel/build-x64.bat`（正式）/ `build-x64-dev.bat`（dev） |
@@ -327,5 +347,6 @@ weasel 侧改动的固化与验证流程见 [patches/README.md](../patches/READM
 3. **X11 全量 blit** —— 没做 DirtyRegion 局部刷新。
 4. **多屏异构缩放** —— 取主屏 DPI，副屏窗口尺寸会偏差。
 5. **窗口不可缩放** —— 设置窗固定 640×480（乘 DPI 缩放），无最小/最大尺寸约束。
-6. **`installation_id` 未由 core 管理** —— 现在靠 librime 自己在
-   `installation.yaml` 里生成。服务端方案需要处理多机撞车。
+6. **`installation_id` 随用户目录重建而变** —— core 接管的可读 id 落在
+   `installation.yaml`，同一目录内稳定；重装/迁移生成新 id，服务端视为新
+   设备，旧槽位需在管理页面手动解绑。

@@ -19,8 +19,9 @@
 ```
 core（Rust，heng-core）             写一次 ×1
 ├─ librime 封装与 FFI
-├─ 版本化 C ABI（include/heng.h，abi_version=10）
-├─ 内置自绘候选窗 + 七页设置窗口（Slint）
+├─ 版本化 C ABI（include/heng.h，abi_version=11）
+├─ 内置自绘候选窗 + 八页设置窗口（Slint）
+├─ 用户词库同步（sync.rs：服务端 + 账号，见 docs/SYNC-PLAN.md）
 ├─ 配置中心对接（config-center/shared/heng.yaml 为配置真源）
 └─ 本地 HTTP（诊断与外部工具用，127.0.0.1:9371，非输入链路）
         ↕ 同进程 C ABI：五端外壳进程内直接加载 heng_core 动态库
@@ -51,9 +52,10 @@ librime + 词库（雾凇拼音）           现成 ×0
 | 模块 | 职责 |
 |---|---|
 | `engine/` | librime FFI 绑定与会话封装（组词、候选、上屏、开关状态） |
-| `capi.rs` | 版本化 C ABI（`heng.h`，abi_version=10），各端外壳唯一的对接面 |
-| `ui.rs` | 内置自绘候选窗：Slint 软渲染产出预乘 ARGB 帧，平台后端只负责搬帧与指针事件（Linux=X11，Windows=Win32 分层窗口，macOS=NSPanel 贴帧）；另含**七页设置窗口**（无边框 Slint 窗口，托盘菜单 `heng_settings_show` 唤起） |
+| `capi.rs` | 版本化 C ABI（`heng.h`，abi_version=11），各端外壳唯一的对接面 |
+| `ui.rs` | 内置自绘候选窗：Slint 软渲染产出预乘 ARGB 帧，平台后端只负责搬帧与指针事件（Linux=X11，Windows=Win32 分层窗口，macOS=NSPanel 贴帧）；另含**八页设置窗口**（无边框 Slint 窗口，托盘菜单 `heng_settings_show` 唤起） |
 | `settings.rs` | 设置数据层：config API v4 读 staging 生效值；写直接改 `*.custom.yaml` patch（不碰上游 YAML） |
+| `sync.rs` | 用户词库同步：`installation_id` 接管、timer 线程、拉取-导出-上传编排；账号经 `heng-cli sync login` 录入 |
 | `server.rs` | 本地 HTTP 服务（诊断与 heng-cli serve 用，127.0.0.1:9371，不在输入链路上） |
 | `global.rs` | 全局引擎与会话表 |
 
@@ -65,11 +67,14 @@ HengIME/
 │   ├── ARCHITECTURE.md        架构现状
 │   ├── FEATURES.md            功能规划清单
 │   ├── SETTINGS-PLAN.md       设置窗口结构与开发注意事项
+│   ├── SYNC-PLAN.md           词库同步方案（服务端 + 账号）
 │   └── archive/               决策记录与试验报告
 │
 ├── core/                    统一能力模块（cdylib: heng_core.dll/.so/.dylib）
-│   ├── src/                   engine · capi · ui · settings · server · global
+│   ├── src/                   engine · capi · ui · settings · sync · server · global
 │   └── include/heng.h         C ABI 头文件（供各端外壳 include）
+│
+├── server/                   heng-sync-server：词库同步服务端（axum + SQLite）
 │
 ├── shells/                  自研外壳
 │   └── linux/fcitx5/          fcitx5 addon
@@ -103,9 +108,9 @@ HengIME/
 | M5 | Windows 收尾：样式配置化、app_options、配置中心对接 | 已完成 |
 | M-P1 | core 内置自绘候选窗（Linux + Windows），替代各端自带候选 UI | 已完成 |
 | M7 | Linux 外壳：fcitx5 addon | 可用 |
-| M2 | 设置界面：core 内置七页 Slint 设置窗（Web 方案已废弃） | 已上线，进程级动作待验证 |
+| M2 | 设置界面：core 内置八页 Slint 设置窗（Web 方案已废弃） | 已上线，进程级动作待验证 |
 | M6 | macOS 外壳：Squirrel 改造，NSPanel 贴帧 + 自绘候选窗 | 可用 |
-| M3 | 词库与数据同步（账号 + 服务端方案） | 未开始，见 FEATURES §4 |
+| M3 | 词库与数据同步（账号 + 服务端方案）：core sync + heng-sync-server + CLI + 设置页 | core/服务端/测试已完成，移动端接入待各端外壳 |
 | M-P3 | Android 外壳：aarch64 交叉编译 + JNI + IMS 骨架 + 原生键盘 | 未开始 |
 | M-P3.5 | iOS 外壳：Custom Keyboard Extension（UIKit 键盘 + 候选栏） | 未开始，需 Apple Developer 账号 |
 | M4 | 鸿蒙外壳 | 未开始 |
@@ -129,5 +134,6 @@ HengIME/
 - [docs/FEATURES.md](docs/FEATURES.md) —— 功能规划清单：功能范围与进度
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 架构现状：进程模型、core 结构、各端状态、已知局限
 - [docs/SETTINGS-PLAN.md](docs/SETTINGS-PLAN.md) —— 设置窗口结构、配置读写取舍、Slint 开发注意事项
+- [docs/SYNC-PLAN.md](docs/SYNC-PLAN.md) —— 词库同步：服务端 + 账号方案的接口、数据模型与实现状态
 - [docs/archive/](docs/archive/) —— 决策记录与试验报告
 - [third_party/README.md](third_party/README.md) —— 第三方依赖重建步骤

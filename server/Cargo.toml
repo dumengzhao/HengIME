@@ -1,0 +1,33 @@
+[package]
+name = "heng-sync-server"
+version.workspace = true
+edition.workspace = true
+
+# 用户词库同步服务端（docs/SYNC-PLAN.md）：账号 + 每设备快照槽位，
+# 服务端不解析、不合并快照，合并由各端 librime 在 sync 时完成。
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# bundled：SQLite C 源码随 crate 编译，单二进制、无系统依赖。
+rusqlite = { version = "0.32", features = ["bundled"] }
+# argon2id：口令哈希。PHC 标准串（$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>），
+# 算法与参数记录在串里；password-hash 显式声明：SaltString/PasswordHash 的
+# 编解码在该 feature 下（默认开，不依赖默认值漂移）。
+argon2 = { version = "0.5", features = ["password-hash"] }
+# 盐的随机源（SaltString::generate 需要 RngCore）。
+rand = "0.8"
+# 管理员会话 JWT（HS256）：HMAC-SHA256 + base64url。
+hmac = "0.12"
+base64 = "0.22"
+# `hash` 子命令交互读口令不回显（--stdin 走管道）。
+rpassword = "7"
+# 快照上传时由服务端重算 sha256（不信任客户端自述值）。
+sha2 = "0.10"
+getrandom = "0.3"
+
+[dev-dependencies]
+# 集成测试的 HTTP 客户端（与服务端进程外同协议栈）。
+ureq = { version = "2", features = ["json"] }

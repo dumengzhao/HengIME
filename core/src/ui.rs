@@ -707,6 +707,13 @@ slint::slint! {
         in property <color> pick-preview;    // 当前 hsv 合成的预览色
     in property <string> pick-preview-hex; // 同色hex 文本（面板右下角显示）
     in property <bool> picker-is-transparent; // 当前项是否已处于「不填」态
+        // —— 同步页（账号录入走 CLI，本页只展示状态/开关/动作）——
+        in property <string> sync-server;    // 服务器地址（未配置为空串）
+        in property <string> sync-account;   // 账号（未登录为空串）
+        in property <string> sync-state;     // 状态人话：未配置/待同步/同步中…/正常/失败/等待空闲
+        in property <string> sync-detail;    // 设备号 + 上次同步 + 收发计数 / 错误信息
+        in property <bool> sync-enabled;     // 同步开关
+        in property <bool> sync-configured;  // 是否已登录（地址 + 令牌俱全）
         callback nav_clicked(int);
         callback row_clicked(int);
         callback toggle_clicked(string);
@@ -1120,8 +1127,83 @@ slint::slint! {
                     SetBtn { text: "打开日志目录"; clicked => { root.action_clicked("open-log"); } }
                     Rectangle { horizontal-stretch: 1; }
                 }
-                // —— 页6 关于 ——
+                // —— 页6 同步 ——
+                // 账号录入不在设置窗做（设置窗无键盘输入通路）：走 CLI
+                // `heng-cli sync login <地址> <用户名>`，密码经 stdin 或第三参数。
+                // 本页只承载状态卡、开关、两个动作与登录指引。
                 if root.page == 6: Rectangle {
+                    height: 118px; border-radius: 8px; background: #ffffff;
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 12px;
+                        VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "服务器"; font-size: 13px; color: #9aa0a8; vertical-alignment: center; }
+                            Text { text: "账号"; font-size: 13px; color: #9aa0a8; vertical-alignment: center; }
+                            Text { text: "状态"; font-size: 13px; color: #9aa0a8; vertical-alignment: center; }
+                        }
+                        VerticalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.sync-server == "" ? "未配置" : root.sync-server;
+                                font-size: 13px; color: #1f2328; vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                // 退出登录后 username 保留作回显，登录态以
+                                // sync-configured（地址 + 令牌俱全）为准
+                                text: root.sync-configured ? root.sync-account : "未登录";
+                                font-size: 13px; color: #1f2328; vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: root.sync-state;
+                                font-size: 13px; vertical-alignment: center; overflow: elide;
+                                color: root.sync-state == "失败" ? #d93025
+                                    : (root.sync-state == "正常" ? #1e8e3e : #1f2328);
+                            }
+                        }
+                    }
+                }
+                if root.page == 6: Rectangle {
+                    height: 44px; border-radius: 8px; background: #ffffff;
+                    HorizontalLayout {
+                        padding-left: 12px; padding-right: 12px; spacing: 8px;
+                        alignment: center;
+                        Text { text: "启用同步"; font-size: 14px; color: #1f2328; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Rectangle {
+                            width: 40px; height: 22px; border-radius: 11px; y: 11px;
+                            background: root.sync-enabled ? #2164f1 : #c9ced6;
+                            Rectangle {
+                                x: root.sync-enabled ? 20px : 2px; y: 2px;
+                                width: 18px; height: 18px; border-radius: 9px;
+                                background: #ffffff;
+                            }
+                        }
+                    }
+                    sta6 := TouchArea { clicked => { root.toggle_clicked("sync"); } }
+                }
+                if root.page == 6: HorizontalLayout {
+                    height: 40px; spacing: 8px;
+                    SetBtn { text: "立即同步"; clicked => { root.action_clicked("sync-now"); } }
+                    SetBtn { text: "退出登录"; clicked => { root.action_clicked("sync-logout"); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if root.page == 6: Rectangle {
+                    min-height: 96px; border-radius: 8px; background: #ffffff;
+                    HorizontalLayout {
+                        padding: 12px;
+                        Text {
+                            text: "登录：heng-cli sync login <服务器地址> <用户名>\n密码留空时从 stdin 读取（不回显）。\n\n" + root.sync-detail;
+                            font-size: 12px; color: #666666;
+                            wrap: word_wrap;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                // —— 页7 关于 ——
+                if root.page == 7: Rectangle {
                     min-height: 120px; border-radius: 8px; background: #ffffff;
                     HorizontalLayout {
                         padding: 12px;
@@ -3486,6 +3568,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     let hint_mode = Cell::new(0i32);
     // 气泡态自动恢复期限：到期后按输入上下文决定回横条还是藏窗（不误杀候选）
     let hint_deadline: Cell<Option<std::time::Instant>> = Cell::new(None);
+    // 同步页状态轮询节流（timer 线程异步推进状态，UI 侧 ~500ms 刷一次）
+    let sync_poll_at = Cell::new(std::time::Instant::now());
     // 渲染并上屏（Sync / 展开 / 收起共用）。w,h 物理像素；map=true 时确保已映射
     // （XWayland：未映射窗口的 PutImage 会被静默丢弃，必须先 map 再画）
     let paint = |backend: &mut Box<dyn UiBackend>,
@@ -3929,6 +4013,26 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         }
                     }
                 }
+                "sync" => {
+                    // 未登录时不给开（没有令牌，timer 起了也只能空转）
+                    if !st.sync.configured {
+                        show_notice(
+                            &sui,
+                            "尚未登录：heng-cli sync login <服务器地址> <用户名>",
+                        );
+                        return;
+                    }
+                    match crate::sync::set_enabled(!st.sync.enabled) {
+                        Ok(()) => {
+                            let snap = crate::sync::status_snapshot();
+                            if let Some(ref mut ns) = sstate.borrow_mut().as_mut() {
+                                ns.sync = snap.clone();
+                            }
+                            sync_apply_status(&sui, &snap);
+                        }
+                        Err(e) => show_notice(&sui, &format!("同步开关失败: {e}")),
+                    }
+                }
                 _ => {}
             }
         }
@@ -4028,6 +4132,28 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                                 let _ = copy_dir(&e.path(), &dst.join(&name));
                             }
                         }
+                    }
+                }
+                // —— 同步页：立即同步只唤醒 timer 线程（网络 IO 不占 UI 线程），
+                //    状态由主循环轮询自动刷；退出登录即清令牌 + 停用 ——
+                "sync-now" => {
+                    if crate::sync::request_sync_now() {
+                        show_notice(&sui, "已触发同步，状态自动刷新");
+                    } else {
+                        show_notice(&sui, "同步未配置或已停用");
+                    }
+                }
+                "sync-logout" => {
+                    match crate::sync::logout() {
+                        Ok(()) => {
+                            let snap = crate::sync::status_snapshot();
+                            if let Some(ref mut ns) = sstate.borrow_mut().as_mut() {
+                                ns.sync = snap.clone();
+                            }
+                            sync_apply_status(&sui, &snap);
+                            show_notice(&sui, "已退出登录");
+                        }
+                        Err(e) => show_notice(&sui, &format!("退出登录失败: {e}")),
                     }
                 }
                 _ => {}
@@ -4176,7 +4302,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         settings_visible.set(true);
                     }
                     if let Some(st) = sstate.borrow().as_ref() {
-                        // 页号契约 = SET_NAV 下标，7 页（0-6）。原来写死 clamp(0, 5)，
+                        // 页号契约 = SET_NAV 下标，8 页（0-7）。原来写死 clamp(0, 5)，
                         // 会让第 6 页「关于」永远打不开。
                         let max_page = (SET_NAV.len() - 1) as i32;
                         settings_apply_page(&sui, st, page.clamp(0, max_page));
@@ -4680,6 +4806,17 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
             }
         }
 
+        // 3d. 同步页状态轮询：sync 的状态由 timer 线程异步写入，设置窗停在
+        //     同步页时约 500ms 拉一次快照刷六个属性（只刷属性不重排版，
+        //     页头的一次性通知不被覆盖）
+        if settings_visible.get() && sui.get_page() == PAGE_SYNC {
+            let now = std::time::Instant::now();
+            if now >= sync_poll_at.get() + Duration::from_millis(500) {
+                sync_poll_at.set(now);
+                sync_apply_status(&sui, &crate::sync::status_snapshot());
+            }
+        }
+
         std::thread::sleep(Duration::from_millis(8));
     }
 }
@@ -4714,9 +4851,10 @@ fn scale_pointer_event(event: WindowEvent, scale: f32) -> WindowEvent {
 // ============================ 设置窗口（S0-S3） ============================
 
 /// 设置页左侧导航。顺序即页号：
-/// 0 输入方案 / 1 外观 / 2 快捷键 / 3 标点符号 / 4 词库 / 5 服务 / 6 关于
-const SET_NAV: [&str; 7] =
-    ["输入方案", "外观", "快捷键", "标点符号", "词库", "服务", "关于"];
+/// 0 输入方案 / 1 外观 / 2 快捷键 / 3 标点符号 / 4 词库 / 5 服务 / 6 同步 / 7 关于
+const SET_NAV: [&str; 8] = [
+    "输入方案", "外观", "快捷键", "标点符号", "词库", "服务", "同步", "关于",
+];
 
 /// 页号契约：与 SET_NAV 下标一一对应，也是托盘/语言栏「关于」菜单的跳转目标。
 /// 外壳侧按这套数字调 `heng_settings_show(page)`，改 SET_NAV 顺序必须同步改这里。
@@ -4728,9 +4866,10 @@ mod page_id {
     pub const PUNCT: i32 = 3;
     pub const DICT: i32 = 4;
     pub const SERVICE: i32 = 5;
-    pub const ABOUT: i32 = 6;
+    pub const SYNC: i32 = 6;
+    pub const ABOUT: i32 = 7;
 }
-use page_id::{ABOUT as PAGE_ABOUT, DICT as PAGE_DICT};
+use page_id::{ABOUT as PAGE_ABOUT, DICT as PAGE_DICT, SYNC as PAGE_SYNC};
 
 /// 托盘/语言栏「关于」菜单要跳的页号（保持与 SET_NAV 下标一致）
 pub const PAGE_ABOUT_FOR_MENU: i32 = PAGE_ABOUT;
@@ -4755,6 +4894,9 @@ struct SettingsState {
     ascii_punct: bool,
     about: String,
     user_files: Vec<(String, u64)>,
+    /// 同步状态快照（打开设置窗时取一次；timer 线程异步推进的值由
+    /// 主循环轮询刷新，不走这里）
+    sync: crate::sync::SyncStatus,
 }
 
 // ==================== 自定义配色（替代原 preset_color_schemes 列表） ====================
@@ -4940,6 +5082,7 @@ fn load_settings_state(
         ascii_punct: false,
         about: String::new(),
         user_files: vec![],
+        sync: crate::sync::status_snapshot(),
     };
     if let Ok(mut cfg) = engine.config_open("weasel") {
         st.inline = engine
@@ -5095,6 +5238,9 @@ fn settings_apply_page(sui: &SettingsWindow, st: &SettingsState, page: i32) {
         5 => {
             head = "服务 · 进程运维、数据部署与目录诊断".into();
         }
+        6 => {
+            head = "同步 · 账号经命令行登录，本页管状态与开关".into();
+        }
         _ => {
             head = "关于".into();
         }
@@ -5142,6 +5288,76 @@ fn settings_apply_page(sui: &SettingsWindow, st: &SettingsState, page: i32) {
     sui.set_picker_open(st.picker_open);
     sui.set_picker_target(st.picker_target as i32);
     sui.set_picker_allow_transparent(COLOR_ALLOW_TRANSPARENT[t]);
+    // 同步页六属性（timer 线程异步推进的值由主循环轮询单独刷新）
+    sync_apply_status(sui, &st.sync);
+}
+
+/// 同步页状态卡 + 开关 + 详情行（六个 Slint 属性一次写全）
+fn sync_apply_status(sui: &SettingsWindow, st: &crate::sync::SyncStatus) {
+    sui.set_sync_server(st.server_url.clone().into());
+    sui.set_sync_account(st.username.clone().into());
+    sui.set_sync_state(sync_state_label(st).into());
+    sui.set_sync_detail(sync_detail_text(st).into());
+    sui.set_sync_enabled(st.enabled);
+    sui.set_sync_configured(st.configured);
+}
+
+/// 同步状态人话（`SyncStatus.state` 存的是机读标签）
+fn sync_state_label(st: &crate::sync::SyncStatus) -> String {
+    match st.state.as_str() {
+        "not_configured" => "未配置".into(),
+        "idle" => "待同步".into(),
+        "running" => "同步中…".into(),
+        "ok" => "正常".into(),
+        "error" => "失败".into(),
+        "deferred" => "等待空闲".into(),
+        "skipped" => "已跳过".into(),
+        other => other.into(),
+    }
+}
+
+/// 同步页详情行：有错误时错误优先；否则设备号 + 上次同步 + 收发计数
+fn sync_detail_text(st: &crate::sync::SyncStatus) -> String {
+    if let Some(e) = &st.last_error {
+        return format!("上次错误：{e}");
+    }
+    let mut s = String::new();
+    if !st.installation_id.is_empty() {
+        s.push_str(&format!("设备 {}", st.installation_id));
+    }
+    if let Some(t) = st.last_sync_at {
+        if !s.is_empty() {
+            s.push_str(" · ");
+        }
+        s.push_str(&format!("上次同步 {}", fmt_elapsed(crate::sync::now_unix() - t)));
+    }
+    if st.last_downloaded > 0 || st.last_uploaded > 0 {
+        if !s.is_empty() {
+            s.push_str(" · ");
+        }
+        s.push_str(&format!(
+            "下载 {} / 上传 {}",
+            st.last_downloaded, st.last_uploaded
+        ));
+    }
+    if s.is_empty() {
+        s.push_str("尚未同步过");
+    }
+    s
+}
+
+/// 秒级间隔 → 「x 秒/分钟/小时/天前」（详情行用，精度到分足够）
+fn fmt_elapsed(secs: i64) -> String {
+    let s = secs.max(0);
+    if s < 60 {
+        format!("{s} 秒前")
+    } else if s < 3600 {
+        format!("{} 分钟前", s / 60)
+    } else if s < 86400 {
+        format!("{} 小时前", s / 3600)
+    } else {
+        format!("{} 天前", s / 86400)
+    }
 }
 
 fn screen_size() -> (i32, i32) {
@@ -5304,5 +5520,55 @@ mod tests {
             (bottom.red(), bottom.green(), bottom.blue()),
             (0u8, 0, 0)
         );
+    }
+
+    #[test]
+    fn sync_page_labels_and_detail() {
+        // 机读 state → 人话（含未知值原样透出，不崩）
+        let mut st = crate::sync::SyncStatus::default();
+        st.state = "not_configured".into();
+        assert_eq!(sync_state_label(&st), "未配置");
+        st.state = "idle".into();
+        assert_eq!(sync_state_label(&st), "待同步");
+        st.state = "running".into();
+        assert_eq!(sync_state_label(&st), "同步中…");
+        st.state = "ok".into();
+        assert_eq!(sync_state_label(&st), "正常");
+        st.state = "error".into();
+        assert_eq!(sync_state_label(&st), "失败");
+        st.state = "deferred".into();
+        assert_eq!(sync_state_label(&st), "等待空闲");
+        st.state = "weird-new-state".into();
+        assert_eq!(sync_state_label(&st), "weird-new-state");
+        // 详情行：错误优先于一切统计
+        st.state = "error".into();
+        st.last_error = Some("连不上服务器".into());
+        st.installation_id = "windows-desktop-abc123-DEADBE".into();
+        st.last_sync_at = Some(crate::sync::now_unix() - 90);
+        st.last_downloaded = 3;
+        st.last_uploaded = 1;
+        assert_eq!(sync_detail_text(&st), "上次错误：连不上服务器");
+        // 无错误：设备号 + 相对时间 + 收发计数
+        st.last_error = None;
+        let d = sync_detail_text(&st);
+        assert!(d.contains("设备 windows-desktop-abc123-DEADBE"), "{d}");
+        assert!(d.contains("下载 3 / 上传 1"), "{d}");
+        assert!(d.contains("上次同步"), "{d}");
+        // 从未同步过 + 无错误 → 兜底文案
+        let fresh = crate::sync::SyncStatus::default();
+        assert_eq!(sync_detail_text(&fresh), "尚未同步过");
+    }
+
+    #[test]
+    fn fmt_elapsed_scales_units() {
+        assert_eq!(fmt_elapsed(0), "0 秒前");
+        assert_eq!(fmt_elapsed(59), "59 秒前");
+        assert_eq!(fmt_elapsed(60), "1 分钟前");
+        assert_eq!(fmt_elapsed(3599), "59 分钟前");
+        assert_eq!(fmt_elapsed(3600), "1 小时前");
+        assert_eq!(fmt_elapsed(86399), "23 小时前");
+        assert_eq!(fmt_elapsed(86400), "1 天前");
+        // 时钟回跳（负数差值）不崩，按 0 处理
+        assert_eq!(fmt_elapsed(-5), "0 秒前");
     }
 }

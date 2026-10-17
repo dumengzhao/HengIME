@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HengIME 同步服务</title>
+<style>
+/*
+ * heng-sync-server 管理页面（docs/SYNC-PLAN.md §8）。
+ *
+ * 单文件 HTML，include_str! 进二进制，由 axum 直接返回：不引构建链、
+ * 不引外部 CDN。四个标签：设备 / 用户 / 同步记录 / 改密码。
+ *
+ * 交互模型（与 ClipSync 服务端同一套口令模式）：
+ *   未初始化 → 初始化卡片（用户名 + 本地生成的 Argon2id 哈希串）
+ *   已初始化未登录 → 登录卡片（/api/admin/login 签发 JWT）
+ *   已登录 → 四个标签
+ * 令牌只存页面内存（JS 变量），刷新即失效，与「长期令牌存客户端」互补：
+ * 管理页是偶发操作，不追求免登录。
+ */
+  :root {
+    --bg: #f7f8fa; --card: #ffffff; --line: #e5e7eb;
+    --text: #1f2328; --sub: #888d95; --accent: #2164f1;
+    --accent-hover: #1b56d6; --danger: #d93025; --danger-hover: #b3261e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    background: var(--card); border-bottom: 1px solid var(--line);
+    padding: 12px 24px; display: flex; align-items: center; gap: 16px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .meta { color: var(--sub); font-size: 12px; }
+  nav { margin-left: auto; display: flex; gap: 4px; }
+  nav button {
+    border: 0; background: transparent; padding: 6px 14px; border-radius: 8px;
+    font-size: 13px; color: var(--text); cursor: pointer;
+  }
+  nav button.on { background: var(--accent); color: #fff; }
+  nav button:not(.on):hover { background: #eef0f4; }
+  main { max-width: 960px; margin: 24px auto; padding: 0 24px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 20px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; color: var(--sub); margin: 0 0 12px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--sub); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .muted { color: var(--sub); }
+  .empty { color: var(--sub); padding: 16px 10px; text-align: center; }
+  button.act {
+    border: 0; border-radius: 6px; padding: 5px 12px; font-size: 12px;
+    cursor: pointer; background: #e9ebef; color: var(--text);
+  }
+  button.act:hover { background: #dfe6f5; }
+  button.act.danger { background: #fdecea; color: var(--danger); }
+  button.act.danger:hover { background: #fbd7d3; }
+  button.primary {
+    border: 0; border-radius: 8px; padding: 8px 18px; font-size: 13px;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.primary:hover { background: var(--accent-hover); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .row.grow > * { flex: 1; }
+  input[type=text], input[type=password], textarea {
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+    font-size: 13px; width: 100%; background: #fff; color: var(--text);
+  }
+  textarea { resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  input:focus, textarea:focus { outline: 2px solid #bcd0f7; border-color: var(--accent); }
+  label { font-size: 12px; color: var(--sub); display: block; margin-bottom: 4px; }
+  .field { margin-bottom: 12px; }
+  .tag {
+    display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: 11px; background: #eef0f4; color: var(--sub);
+  }
+  .msg { font-size: 12px; margin-top: 8px; min-height: 18px; }
+  .msg.err { color: var(--danger); }
+  .msg.ok { color: #137333; }
+  #init, #login { max-width: 480px; margin: 64px auto; }
+  #init h1, #login h1 { font-size: 18px; margin: 0 0 4px; }
+  #init .sub, #login .sub { color: var(--sub); font-size: 12px; margin-bottom: 20px; }
+  .hint { font-size: 12px; color: var(--sub); line-height: 1.8; margin: 0 0 14px; }
+  .hint b { color: var(--text); font-weight: 600; }
+  .hint code { background: #eef0f4; border-radius: 4px; padding: 1px 6px; font-size: 12px; word-break: break-all; }
+  #init details, #login details { margin-top: 12px; }
+  details { font-size: 12px; color: var(--sub); margin-top: 4px; }
+  details summary { cursor: pointer; color: var(--accent); }
+  pre {
+    font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.7;
+    background: #f2f4f8; border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; margin: 8px 0 0; white-space: pre-wrap; word-break: break-all;
+  }
+</style>
+</head>
+<body>
+
+<!-- 未初始化：初始化卡片（提示文案与结构同 ClipSync 服务端管理页） -->
+<div id="init" class="card" hidden>
+  <h1>HengIME 同步服务</h1>
+  <div class="sub">FIRST-TIME SETUP · 首次使用，先初始化管理员凭据</div>
+  <p class="hint">
+    服务端<b>不保存明文口令</b>，也不接收明文口令 —— 请填入<b>口令哈希串</b>
+    （形如 <code>$argon2id$v=19$m=19456,t=2,p=1$…$…</code>）。<br>
+    最简单的是在服务器上跑 <code>heng-sync-server hash</code>（输入不回显），
+    具体做法见下面「这串哈希怎么生成？」。<br>
+    写入后请<b>用真实口令登录一次</b>：能登进去，才说明这串哈希确实对应你手里那个口令。
+  </p>
+  <div class="field"><label>用户名</label><input id="iu" type="text" autocomplete="username" placeholder="admin"></div>
+  <div class="field"><label>口令哈希串（Argon2id PHC，不是口令本身）</label>
+    <textarea id="ih" rows="4" placeholder="$argon2id$v=19$m=19456,t=2,p=1$..."></textarea></div>
+  <button class="primary" onclick="doInit()">写入并启用</button>
+  <div id="imsg" class="msg err"></div>
+  <details>
+    <summary>这串哈希怎么生成？</summary>
+    <pre># 推荐：服务端自带命令（输入不回显，参数与服务端校验完全一致）
+heng-sync-server hash
+
+# 或用三方工具生成，只要指定这几个参数即可：
+#   算法 argon2id，m=19456 KiB，t=2，p=1，输出 PHC 格式串
+#   （形如 $argon2id$v=19$m=19456,t=2,p=1$&lt;盐&gt;$&lt;哈希&gt;）</pre>
+    <p class="hint" style="margin-top:8px">
+      任何能输出 <b>argon2id</b> PHC 串的工具都可以。口令只在你本机出现一次，
+      不会经过网络，也不会被写进服务端的任何文件。<br>
+      <b>盐不用另外记</b>：它就明文写在这串哈希里（<code>…$&lt;盐&gt;$&lt;哈希&gt;</code> 这两段），
+      登录时服务端从串里读出同一个盐、同样的参数再算一遍比对。所以盐是随机值也<b>不会登不上</b>——
+      它的作用只是让同一个口令每次生成的串都不一样（防彩虹表）。<br>
+      忘记口令：停服，删掉数据目录下的 <code>admin.json</code>，重启后重新走一遍本流程。
+    </p>
+  </details>
+</div>
+
+<!-- 已初始化未登录：登录卡片 -->
+<div id="login" class="card" hidden>
+  <h1>HengIME 同步服务</h1>
+  <div class="sub">管理员登录。普通用户无需访问本页。</div>
+  <div class="field"><label>用户名</label><input id="lu" type="text" autocomplete="username"></div>
+  <div class="field"><label>密码</label><input id="lp" type="password" autocomplete="current-password"></div>
+  <button class="primary" onclick="doLogin()">登录</button>
+  <div id="lmsg" class="msg err"></div>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <h1>HengIME 同步服务</h1>
+    <span class="meta" id="who"></span>
+    <nav>
+      <button id="tab-devices" class="on" onclick="showTab('devices')">设备</button>
+      <button id="tab-users" onclick="showTab('users')">用户</button>
+      <button id="tab-records" onclick="showTab('records')">同步记录</button>
+      <button id="tab-pwd" onclick="showTab('pwd')">改密码</button>
+      <button onclick="logout()">退出</button>
+    </nav>
+  </header>
+  <main>
+    <div id="pane-devices">
+      <div class="card">
+        <h2>设备</h2>
+        <div id="dev-body"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div id="pane-users" hidden>
+      <div class="card">
+        <h2>新增用户</h2>
+        <div class="row grow">
+          <div class="field" style="flex:1"><label>用户名</label><input id="nu" type="text"></div>
+          <div class="field" style="flex:1"><label>密码（至少 4 位）</label><input id="np" type="password"></div>
+          <div class="field" style="flex:0 0 auto"><label>&nbsp;</label>
+            <button class="primary" onclick="createUser()">创建</button></div>
+        </div>
+        <div id="nmsg" class="msg"></div>
+      </div>
+      <div class="card">
+        <h2>用户列表</h2>
+        <div id="usr-body"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div id="pane-records" hidden>
+      <div class="card">
+        <h2>各设备最近一次同步</h2>
+        <div class="muted" style="font-size:12px;margin-bottom:10px">
+          只保留最后一次同步状态，不存历史流水。合并由各端 librime 在本地完成，
+          服务端只做每设备一个槽位的快照存储。
+        </div>
+        <div id="rec-body"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+    <div id="pane-pwd" hidden>
+      <div class="card">
+        <h2>修改管理员密码</h2>
+        <div class="muted" style="font-size:12px;margin-bottom:12px">
+          至少 8 位，不能是默认口令。改完后所有已登录会话立即失效，需要重新登录。
+        </div>
+        <div class="field"><label>当前密码</label><input id="op" type="password" autocomplete="current-password" style="max-width:320px"></div>
+        <div class="field"><label>新密码</label><input id="npw" type="password" autocomplete="new-password" style="max-width:320px"></div>
+        <button class="primary" onclick="changePass()">修改</button>
+        <div id="pmsg" class="msg"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+let TOKEN = null;
+
+const $ = (id) => document.getElementById(id);
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), Authorization: "Bearer " + TOKEN },
+  });
+  const body = await res.json().catch(() => ({}));
+  // 运行期被重置（admin.json 被删）→ 回初始化卡片，别让用户对着一圈 401 干瞪眼
+  if (res.status === 409 && body.code === "not_initialized") { boot(); throw new Error(""); }
+  if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+  return body;
+};
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtTime = (t) => t ? new Date(t * 1000).toLocaleString() : "—";
+const fmtSize = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
+  : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B";
+
+// 入口：未初始化显示初始化卡片，否则显示登录卡片
+async function boot() {
+  TOKEN = null;
+  $("app").hidden = true;
+  let initialized = false;
+  try {
+    const res = await fetch("/api/admin/init-status");
+    initialized = (await res.json()).initialized;
+  } catch { /* 网络异常时按未初始化处理，提交时自然会报错 */ }
+  $("init").hidden = initialized;
+  $("login").hidden = !initialized;
+}
+
+async function doInit() {
+  $("imsg").className = "msg err"; $("imsg").textContent = "";
+  try {
+    const res = await fetch("/api/admin/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user: $("iu").value.trim(), pass_hash: $("ih").value.trim() }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+    $("imsg").className = "msg ok";
+    $("imsg").textContent = "已初始化，请用刚才的口令登录";
+    $("init").hidden = true; $("login").hidden = false;
+    $("lu").value = $("iu").value.trim(); $("lp").focus();
+  } catch (e) { $("imsg").textContent = e.message; }
+}
+
+async function doLogin() {
+  $("lmsg").textContent = "";
+  try {
+    const res = await fetch("/api/admin/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user: $("lu").value.trim(), pass: $("lp").value }),
+    });
+    const body = await res.json().catch(() => ({}));
+    // 双保险：既看状态码也看 body.error —— 历史上失败路径误返 200 时，
+    // 只看 res.ok 会把空口令直接放行进主界面
+    if (!res.ok || body.error) throw new Error(body.error || "登录失败");
+    TOKEN = body.token;
+    $("login").hidden = true; $("app").hidden = false;
+    $("who").textContent = $("lu").value.trim();
+    showTab("devices");
+  } catch (e) { $("lmsg").textContent = e.message; }
+}
+
+function logout() { TOKEN = null; $("lp").value = ""; $("app").hidden = true; boot(); }
+
+function showTab(name) {
+  for (const t of ["devices", "users", "records", "pwd"]) {
+    $("pane-" + t).hidden = t !== name;
+    $("tab-" + t).classList.toggle("on", t === name);
+  }
+  if (name === "devices") loadDevices();
+  if (name === "users") loadUsers();
+  if (name === "records") loadRecords();
+}
+
+async function loadDevices() {
+  $("dev-body").innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const { devices } = await api("/api/admin/devices");
+    if (!devices.length) { $("dev-body").innerHTML = '<div class="empty">还没有设备绑定</div>'; return; }
+    $("dev-body").innerHTML = `<table><tr>
+      <th>账号</th><th>设备</th><th>平台</th>
+      <th>最近在线</th><th>最近同步</th>
+      <th class="num">快照</th><th class="num">占用</th><th></th></tr>` +
+      devices.map((d) => `<tr>
+        <td>${esc(d.account)}</td>
+        <td><code>${esc(d.installation_id)}</code><br><span class="muted">${esc(d.display_name)}</span></td>
+        <td>${esc(d.platform)}</td>
+        <td>${fmtTime(d.last_seen_at)}</td>
+        <td>${fmtTime(d.last_sync_at)}</td>
+        <td class="num">${d.file_count}</td>
+        <td class="num">${fmtSize(d.total_size)}</td>
+        <td><button class="act danger" onclick="unbind('${esc(d.installation_id)}')">解绑</button></td>
+      </tr>`).join("") + "</table>";
+  } catch (e) { if (e.message) $("dev-body").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+}
+
+async function unbind(id) {
+  if (!confirm("解绑 " + id + "？该设备的全部快照将被删除。")) return;
+  try { await api("/api/admin/devices/" + encodeURIComponent(id), { method: "DELETE" }); loadDevices(); }
+  catch (e) { alert(e.message); }
+}
+
+async function loadUsers() {
+  $("usr-body").innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const { users } = await api("/api/admin/users");
+    $("usr-body").innerHTML = `<table><tr>
+      <th>用户名</th><th>设备</th><th>创建时间</th><th></th></tr>` +
+      users.map((u) => `<tr>
+        <td>${esc(u.username)}</td>
+        <td class="num">${u.device_count}</td>
+        <td>${fmtTime(u.created_at)}</td>
+        <td>
+          <button class="act" onclick='chpass("${esc(u.username)}")'>改密码</button>
+          <button class="act danger" onclick='deluser("${esc(u.username)}")'>删除</button>
+        </td>
+      </tr>`).join("") + "</table>";
+  } catch (e) { if (e.message) $("usr-body").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+}
+
+async function createUser() {
+  $("nmsg").className = "msg"; $("nmsg").textContent = "";
+  try {
+    await api("/api/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: $("nu").value.trim(), password: $("np").value }),
+    });
+    $("nmsg").className = "msg ok"; $("nmsg").textContent = "已创建";
+    $("nu").value = ""; $("np").value = "";
+    loadUsers();
+  } catch (e) { $("nmsg").className = "msg err"; $("nmsg").textContent = e.message; }
+}
+
+async function chpass(name) {
+  const p = prompt("为 " + name + " 设置新密码（至少 4 位）：");
+  if (!p) return;
+  try {
+    await api("/api/admin/users/" + encodeURIComponent(name) + "/passwd", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: p }),
+    });
+    alert("已修改（该用户的所有登录令牌已失效）");
+  } catch (e) { alert(e.message); }
+}
+
+async function deluser(name) {
+  if (!confirm("删除用户 " + name + "？其全部设备与快照都会被删除。")) return;
+  try { await api("/api/admin/users/" + encodeURIComponent(name), { method: "DELETE" }); loadUsers(); }
+  catch (e) { alert(e.message); }
+}
+
+async function changePass() {
+  $("pmsg").className = "msg"; $("pmsg").textContent = "";
+  try {
+    await api("/api/admin/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ old_pass: $("op").value, new_pass: $("npw").value }),
+    });
+    $("pmsg").className = "msg ok";
+    $("pmsg").textContent = "已修改，全部会话已失效，请重新登录";
+    $("op").value = ""; $("npw").value = "";
+    setTimeout(logout, 1200);
+  } catch (e) { $("pmsg").className = "msg err"; $("pmsg").textContent = e.message; }
+}
+
+async function loadRecords() {
+  $("rec-body").innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const { devices } = await api("/api/admin/devices");
+    const rows = devices.filter((d) => d.last_sync_at || d.file_count > 0);
+    if (!rows.length) { $("rec-body").innerHTML = '<div class="empty">暂无同步记录</div>'; return; }
+    $("rec-body").innerHTML = `<table><tr>
+      <th>账号</th><th>设备</th><th>最近同步</th>
+      <th class="num">快照数</th><th class="num">占用</th></tr>` +
+      rows.map((d) => `<tr>
+        <td>${esc(d.account)}</td>
+        <td><code>${esc(d.installation_id)}</code></td>
+        <td>${fmtTime(d.last_sync_at)}</td>
+        <td class="num">${d.file_count}</td>
+        <td class="num">${fmtSize(d.total_size)}</td>
+      </tr>`).join("") + "</table>";
+  } catch (e) { if (e.message) $("rec-body").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+}
+
+// 登录框回车提交
+$("lp").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+$("lu").addEventListener("keydown", (e) => { if (e.key === "Enter") $("lp").focus(); });
+$("ih").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doInit(); } });
+
+boot();
+</script>
+</body>
+</html>

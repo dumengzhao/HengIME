@@ -803,6 +803,27 @@ impl Engine {
         Ok(unsafe { sync() == rime_ffi::TRUE })
     }
 
+    /// 同步用户数据并等待维护线程退出。
+    ///
+    /// `RimeSyncUserData()` 只做调度（`CleanupAllSessions` + 安排
+    /// installation_update / backup_config_files / user_dict_sync +
+    /// `StartMaintenance`），真正的合并与备份发生在后台维护线程；
+    /// 不 join 就无法保证本轮 sync 已落盘。调用方须确认无活动会话——
+    /// sync 会摧毁全部会话。
+    pub fn sync_user_data_blocking(&self) -> Result<bool, EngineError> {
+        let sync = self
+            .api()
+            .sync_user_data
+            .ok_or(EngineError::ApiMissing("sync_user_data"))?;
+        let join = self
+            .api()
+            .join_maintenance_thread
+            .ok_or(EngineError::ApiMissing("join_maintenance_thread"))?;
+        let ok = unsafe { sync() == rime_ffi::TRUE };
+        unsafe { join() };
+        Ok(ok)
+    }
+
     /// 选项状态标签（abbreviated=true 取短标签，用于菜单栏图标）。None = 无标签。
     pub fn get_state_label_abbreviated(
         &self,

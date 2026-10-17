@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use heng_core::{Engine, EngineConfig};
 
-const USAGE: &str = "用法: heng-cli <version|cand|commit|bench|serve|abitest> [参数]";
+const USAGE: &str = "用法: heng-cli <version|cand|commit|bench|serve|sync|abitest> [参数]\n       heng-cli sync <status|login|now|on|off>  用户词库同步";
 const DEFAULT_PORT: u16 = 9371;
 
 fn runtime_dir() -> PathBuf {
@@ -452,6 +452,105 @@ fn cmd_pagetest() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 用户词库同步（docs/SYNC-PLAN.md）。账号录入走 CLI：设置窗是纯鼠标
+/// 交互，没有键盘输入通路。
+///
+///   heng-cli sync                      同 sync status
+///   heng-cli sync status               打印配置与状态
+///   heng-cli sync login <url> <user> [password]
+///   heng-cli sync now                  立即同步（唤醒定时器并等待结果）
+///   heng-cli sync on | off             总开关
+fn cmd_sync(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    use heng_core::sync::{self, SyncStatus};
+
+    // 同步模块的共享状态由 engine_with 初始化（ensure_installation_id 等）
+    heng_core::global::engine()?;
+
+    fn print_status(st: &SyncStatus) {
+        println!("installation_id : {}", st.installation_id);
+        println!("服务器          : {}", if st.server_url.is_empty() { "（未配置）" } else { &st.server_url });
+        println!("账号            : {}", if st.username.is_empty() { "（未配置）" } else { &st.username });
+        println!("开关            : {}", if st.enabled { "开" } else { "关" });
+        println!("状态            : {}", st.state);
+        if let Some(t) = st.last_sync_at {
+            // 不打本地时间：CLI 不引 chrono，直接给 Unix 秒
+            println!("上次同步        : {}（下载 {} / 上传 {}）", t, st.last_downloaded, st.last_uploaded);
+        }
+        if let Some(e) = &st.last_error {
+            println!("上次错误        : {e}");
+        }
+        if st.pending_merge {
+            println!("待合并          : 有（存在活动会话时被推迟的快照，会话结束后自动补跑）");
+        }
+        if st.consecutive_failures > 0 {
+            let wait = (st.next_attempt_at - sync::now_unix()).max(0);
+            println!("连续失败        : {} 次，{} 秒后重试", st.consecutive_failures, wait);
+        }
+    }
+
+    match args.first().map(String::as_str) {
+        None | Some("status") => {
+            print_status(&sync::status_snapshot());
+            Ok(())
+        }
+        Some("login") => {
+            let (Some(url), Some(user)) = (args.get(1), args.get(2)) else {
+                return Err("用法: heng-cli sync login <服务器地址> <用户名> [密码]".into());
+            };
+            let password = match args.get(3) {
+                Some(p) => p.clone(),
+                None => {
+                    print!("密码: ");
+                    std::io::stdout().flush().ok();
+                    let mut line = String::new();
+                    if std::io::stdin().read_line(&mut line)? == 0 {
+                        return Err("未读到密码".into());
+                    }
+                    line.trim().to_string()
+                }
+            };
+            sync::configure(url, user, &password)?;
+            println!("已登录并启用同步（{user} @ {url}）");
+            Ok(())
+        }
+        Some("now") => {
+            if !sync::request_sync_now() {
+                return Err("同步未配置或已停用（先 heng-cli sync login …）".into());
+            }
+            println!("已触发，等待结果…");
+            // 同步跑在定时器线程：轮询状态直到离开 running（上限 60 秒）
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let st = sync::status_snapshot();
+                if st.state != "running" && st.state != "idle" {
+                    print_status(&st);
+                    if st.state == "ok" {
+                        return Ok(());
+                    }
+                    return Err(st.last_error.unwrap_or_else(|| format!("同步状态 {}", st.state)).into());
+                }
+                if Instant::now() >= deadline {
+                    return Err("等待超时（同步仍在后台进行，用 heng-cli sync status 查看）".into());
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+        Some("on") | Some("off") => {
+            let on = args[0] == "on";
+            sync::set_enabled(on)?;
+            println!("同步已{}", if on { "启用" } else { "停用" });
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "未知 sync 子命令 {other:?}（status | login | now | on | off）"
+        )
+        .into()),
+    }
+}
+
 fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
     use std::ffi::{CStr, CString};
     use std::os::raw::{c_char, c_int};
@@ -484,8 +583,8 @@ fn cmd_abitest() -> Result<(), Box<dyn std::error::Error>> {
         };
         let rc = heng_hello(5, &mut hello);
         check!("heng_hello 填充成功", rc == 1);
-        // 与 core/src/capi.rs 的 HENG_ABI_VERSION 对齐（当前 10）
-        check!("hello.abi_version == 10", hello.abi_version == 10);
+        // 与 core/src/capi.rs 的 HENG_ABI_VERSION 对齐（当前 11）
+        check!("hello.abi_version == 11", hello.abi_version == 11);
         check!("hello.data_size > 0", hello.data_size > 0);
         check!("min_abi_version <= abi_version", hello.min_abi_version <= hello.abi_version);
 
@@ -802,8 +901,15 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // serve / abitest / uitest / settings 走 global 层（自带引擎单例），不能用 make_engine 重复初始化 librime
-    if args[0] == "serve" || args[0] == "abitest" || args[0] == "uitest" || args[0] == "pagetest" || args[0] == "bartest" || args[0] == "settings" {
+    // serve / abitest / uitest / settings / sync 走 global 层（自带引擎单例），不能用 make_engine 重复初始化 librime
+    if args[0] == "serve"
+        || args[0] == "abitest"
+        || args[0] == "uitest"
+        || args[0] == "pagetest"
+        || args[0] == "bartest"
+        || args[0] == "settings"
+        || args[0] == "sync"
+    {
         let result: Result<(), Box<dyn std::error::Error>> = match args[0].as_str() {
             "serve" => {
                 let port: u16 = args
@@ -816,6 +922,7 @@ fn main() -> ExitCode {
             "pagetest" => cmd_pagetest(),
             "bartest" => cmd_bartest(),
             "settings" => cmd_settings(args.get(1)),
+            "sync" => cmd_sync(&args[1..]),
             _ => cmd_abitest(),
         };
         return match result {

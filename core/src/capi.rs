@@ -22,8 +22,9 @@ pub type HengSession = u64; // 对应 heng.h 的 heng_session_t（uint64_t），
 pub const HENG_TRUE: c_int = 1;
 pub const HENG_FALSE: c_int = 0;
 
-/// 当前 C ABI 版本（v10：新增 heng_set_commit_handler——UI 点击上屏即时回调）
-pub const HENG_ABI_VERSION: c_int = 10;
+/// 当前 C ABI 版本（v11：新增 heng_sync_configure / heng_sync_set_enabled /
+/// heng_sync_config / heng_sync_now / heng_sync_status / heng_installation_id）
+pub const HENG_ABI_VERSION: c_int = 11;
 /// 仍兼容的最低调用方 ABI（v4 起有 config API；更早调用方未验证）
 pub const HENG_MIN_ABI_VERSION: c_int = 4;
 
@@ -294,7 +295,9 @@ pub extern "C" fn heng_describe() -> *const c_char {
                 "heng_sync_user_data", "heng_get_state_label_abbreviated",
                 "heng_config_open_schema", "heng_config_get_double",
                 "heng_clear", "heng_free_string", "heng_last_error",
-                "heng_settings_show", "heng_settings_hide"
+                "heng_settings_show", "heng_settings_hide",
+                "heng_sync_configure", "heng_sync_set_enabled", "heng_sync_config",
+                "heng_sync_now", "heng_sync_status", "heng_installation_id"
             ]
         });
         CString::new(json.to_string()).unwrap()
@@ -305,6 +308,10 @@ pub extern "C" fn heng_describe() -> *const c_char {
 // ---- 会话 ----
 
 /// 打开会话。app_id 仅用于登记（M0 不做按应用配置），成功返回会话句柄，0 失败。
+///
+/// v11：全程持 `sync::SESSION_GATE`。librime 的 sync 会 `CleanupAllSessions`
+/// 摧毁全部会话，会话创建与一轮 sync 互斥 → 最多等一轮 sync（秒级），
+/// 不会出现「会话被摧毁但外壳仍持旧句柄」（docs/SYNC-PLAN.md §6）。
 #[no_mangle]
 pub extern "C" fn heng_start_session(app_id: *const c_char) -> HengSession {
     ffi_guard!(0, {
@@ -317,6 +324,7 @@ pub extern "C" fn heng_start_session(app_id: *const c_char) -> HengSession {
                 return 0;
             }
         };
+        let _gate = crate::sync::SESSION_GATE.lock().unwrap();
         match engine.create_session() {
             Ok(session) => {
                 // into_raw 消费 Session 但不触发 Drop 销毁，librime 会话交注册表接管
@@ -344,6 +352,10 @@ pub extern "C" fn heng_end_session(session: HengSession) {
         }
         if let Ok(engine) = engine() {
             SESSIONS.remove(engine, session);
+        }
+        // v11：最后一个会话结束且留有待合并标记 → 立即补跑一轮同步
+        if SESSIONS.count() == 0 {
+            crate::sync::notify_sessions_idle();
         }
     })
 }
@@ -1615,6 +1627,140 @@ pub extern "C" fn heng_sync_user_data() -> c_int {
                 set_err(e);
                 HENG_FALSE
             }
+        }
+    })
+}
+
+// ---- v11：用户词库同步（docs/SYNC-PLAN.md） ----
+
+/// 登录同步服务端并保存账号（server_url / username / password）。
+/// 成功后启用同步、落盘 `<user_dir>/.heng/sync.yaml` 并立即唤醒定时器。
+/// 返回 TRUE 成功；失败原因经 `heng_last_error` 读取。
+///
+/// 本调用含网络 IO（秒级），不得在输入热路径调用。令牌只落在本机
+/// `.heng/sync.yaml`，不回显给调用方（`heng_sync_config` 不含 token）。
+#[no_mangle]
+pub extern "C" fn heng_sync_configure(
+    server_url: *const c_char,
+    username: *const c_char,
+    password: *const c_char,
+) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        clear_err();
+        let (Some(url), Some(user), Some(pass)) = (
+            unsafe { cstr_to_string(server_url) },
+            unsafe { cstr_to_string(username) },
+            unsafe { cstr_to_string(password) },
+        ) else {
+            set_err("server_url/username/password 有空指针");
+            return HENG_FALSE;
+        };
+        // 引擎未就位时同步模块无处落盘：先确保初始化（幂等）
+        if let Err(e) = engine() {
+            set_err(e);
+            return HENG_FALSE;
+        }
+        match crate::sync::configure(&url, &user, &pass) {
+            Ok(()) => HENG_TRUE,
+            Err(e) => {
+                set_err(e);
+                HENG_FALSE
+            }
+        }
+    })
+}
+
+/// 同步总开关（设置页拨杆）。返回 TRUE 成功。
+#[no_mangle]
+pub extern "C" fn heng_sync_set_enabled(enabled: c_int) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        clear_err();
+        match crate::sync::set_enabled(enabled != 0) {
+            Ok(()) => HENG_TRUE,
+            Err(e) => {
+                set_err(e);
+                HENG_FALSE
+            }
+        }
+    })
+}
+
+/// 「立即同步」：唤醒定时器线程跑一轮（同步含网络 IO，不卡调用方）。
+/// 返回 TRUE = 已唤醒；FALSE = 未配置 / 已停用 / 引擎未初始化。
+#[no_mangle]
+pub extern "C" fn heng_sync_now() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        clear_err();
+        crate::sync::request_sync_now() as c_int
+    })
+}
+
+/// 同步配置快照（JSON，不含令牌）：`{"server_url","username","enabled",
+/// "interval_secs","configured"}`。内存归 core，调用方用 `heng_free_string`
+/// 释放；*out 恒非 NULL（未配置时为默认值 JSON）。
+#[no_mangle]
+pub extern "C" fn heng_sync_config(out: *mut *mut c_char) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if out.is_null() {
+            return HENG_FALSE;
+        }
+        unsafe { *out = std::ptr::null_mut() };
+        let cfg = crate::sync::config_snapshot();
+        let json = serde_json::json!({
+            "server_url": cfg.server_url,
+            "username": cfg.username,
+            "enabled": cfg.enabled,
+            "interval_secs": cfg.interval_secs,
+            "configured": !cfg.server_url.is_empty() && !cfg.token.is_empty(),
+        });
+        match CString::new(json.to_string()) {
+            Ok(s) => {
+                unsafe { *out = s.into_raw() };
+                HENG_TRUE
+            }
+            Err(_) => HENG_FALSE,
+        }
+    })
+}
+
+/// 同步状态快照（JSON）：`{"state","last_sync_at","last_error",
+/// "last_downloaded","last_uploaded","pending_merge","next_attempt_at",
+/// "consecutive_failures","installation_id","configured","enabled"}`。
+/// 内存归 core，调用方用 `heng_free_string` 释放。
+#[no_mangle]
+pub extern "C" fn heng_sync_status(out: *mut *mut c_char) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if out.is_null() {
+            return HENG_FALSE;
+        }
+        unsafe { *out = std::ptr::null_mut() };
+        let st = crate::sync::status_snapshot();
+        match CString::new(serde_json::to_string(&st).unwrap_or_default()) {
+            Ok(s) => {
+                unsafe { *out = s.into_raw() };
+                HENG_TRUE
+            }
+            Err(_) => HENG_FALSE,
+        }
+    })
+}
+
+/// 本机 installation_id（`<platform>-<hostname>-<6位随机>`，已写回
+/// `installation.yaml`）。内存归 core，调用方用 `heng_free_string` 释放；
+/// 引擎未初始化时为空串。
+#[no_mangle]
+pub extern "C" fn heng_installation_id(out: *mut *mut c_char) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if out.is_null() {
+            return HENG_FALSE;
+        }
+        unsafe { *out = std::ptr::null_mut() };
+        match CString::new(crate::sync::installation_id()) {
+            Ok(s) => {
+                unsafe { *out = s.into_raw() };
+                HENG_TRUE
+            }
+            Err(_) => HENG_FALSE,
         }
     })
 }

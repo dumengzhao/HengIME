@@ -1,6 +1,6 @@
 # 设置窗口
 
-> 七页结构已全部上线。本文记录当前结构、配置读写取舍与 Slint 开发注意事项。
+> 八页结构已全部上线。本文记录当前结构、配置读写取舍与 Slint 开发注意事项。
 > 在整体架构中的位置见 [ARCHITECTURE.md](ARCHITECTURE.md) §5。
 
 ---
@@ -54,7 +54,7 @@ per-machine state（如 `installation_id`）仍归 librime/core 本地存储。
 **窗口固定尺寸，不可缩放**，无最小/最大约束。窗口本身是 `WS_POPUP` 无边框方角，
 8px 圆角是内部控件的。
 
-**七页，页号是外壳契约**（`heng_settings_show(page)`）：
+**八页，页号是外壳契约**（`heng_settings_show(page)`）：
 
 | 页 | 名称 | 内容 | 落点 |
 |---|---|---|---|
@@ -64,11 +64,19 @@ per-machine state（如 `installation_id`）仍归 librime/core 本地存储。
 | 3 | 标点符号 | 半角标点模式（拨杆，立即生效） | `default.custom.yaml`（punctuator） |
 | 4 | 词库 | 用户词典文件列表、打开用户目录、备份用户词典 | 用户目录 |
 | 5 | 服务 | 重启/退出服务、重新部署、词典管理、三个目录按钮 | — |
-| 6 | 关于 | 版本、ABI、目录信息（只读） | — |
+| 6 | 同步 | 状态卡（服务器/账号/状态）、启用开关、立即同步、退出登录 | `<user_dir>/.heng/sync.yaml` |
+| 7 | 关于 | 版本、ABI、目录信息（只读） | — |
 
 第 5 页是从托盘/语言栏菜单搬过来的运维功能（原菜单已精简为设置/关于/检查更新三项）。
 「服务」页里的进程级动作由外壳执行 —— core 是宿主加载的 DLL，自己重启/退出没意义，
 只能抛意图过去（`heng_set_service_handler`）。
+
+第 6 页「同步」的账号录入走 CLI（`heng-cli sync login <地址> <用户名>`，
+密码经第三参数或 stdin）：本窗没有键盘输入通路（见 §5 第 6 条），录不了密码。
+页内只有状态卡、开关与两个动作；同步状态由 timer 线程异步写入，UI 主循环在
+页面停留期间约 500ms 轮询 `status_snapshot()` 刷新六个属性
+（`sync-server` / `sync-account` / `sync-state` / `sync-detail` /
+`sync-enabled` / `sync-configured`），只刷属性不重排版，页头的一次性通知不被覆盖。
 
 配色不采用 `preset_color_schemes` 预设列表：自绘候选窗不读 `style/color_scheme`
 （那是 weasel 原生 UI 的键），预设链路对本项目无效。实际使用四项自定义颜色
@@ -79,7 +87,7 @@ per-machine state（如 `installation_id`）仍归 librime/core 本地存储。
 ## 4. 入口
 
 - **托盘/语言栏菜单「设置」** → `heng_settings_show(0)`（输入方案页）
-- **托盘/语言栏菜单「关于」** → `heng_settings_show(6)`
+- **托盘/语言栏菜单「关于」** → `heng_settings_show(7)`
 - **候选窗工具条 ☰ 菜单「设置」** → 打开外观页
 
 **没有全局快捷键**。Ctrl+Shift+P 已分配给「标点切换键」，不可用于设置入口。

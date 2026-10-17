@@ -444,6 +444,37 @@ HENG_API heng_config_t heng_config_open_schema(const char* schema_id);
 HENG_API int heng_config_get_double(heng_config_t config, const char* key,
                                     double* out);
 
+/* ---- 用户词库同步（v11；docs/SYNC-PLAN.md） ---- */
+
+/* 登录同步服务端并保存账号（server_url/username/password 均为 UTF-8）。
+ * 成功后启用同步并立即唤醒定时器线程。返回 HENG_TRUE=成功，
+ * 失败原因经 heng_last_error 读取。含网络 IO（秒级），勿在输入热路径调用。 */
+HENG_API int heng_sync_configure(const char* server_url, const char* username,
+                                 const char* password);
+
+/* 同步总开关（设置页拨杆）。返回 HENG_TRUE=成功。 */
+HENG_API int heng_sync_set_enabled(int enabled);
+
+/* 「立即同步」：唤醒定时器跑一轮（不卡调用方）。返回 HENG_TRUE=已唤醒，
+ * HENG_FALSE=未配置 / 已停用 / 引擎未初始化。 */
+HENG_API int heng_sync_now(void);
+
+/* 同步配置快照 JSON（不含令牌）：
+ * {"server_url","username","enabled","interval_secs","configured"}。
+ * 内存归 core，调用方用 heng_free_string 释放；*out 恒非 NULL。 */
+HENG_API int heng_sync_config(char** out);
+
+/* 同步状态快照 JSON：
+ * {"state","last_sync_at","last_error","last_downloaded","last_uploaded",
+ *  "pending_merge","next_attempt_at","consecutive_failures",
+ *  "installation_id","configured","enabled"}。
+ * 内存归 core，调用方用 heng_free_string 释放。 */
+HENG_API int heng_sync_status(char** out);
+
+/* 本机 installation_id（`<platform>-<hostname>-<6位随机>`）。
+ * 内存归 core，调用方用 heng_free_string 释放；引擎未初始化时为空串。 */
+HENG_API int heng_installation_id(char** out);
+
 /* ---- 内存释放 ---- */
 
 HENG_API void heng_free_string(char* s);

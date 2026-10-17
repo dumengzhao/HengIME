@@ -18,18 +18,25 @@ crate-type = ["rlib", "cdylib"]
 # 关闭时 ui 模块替换为 ui_stub.rs，C ABI 符号集合不变。
 default = ["ui", "http"]
 # feature 名与依赖名不同名（slint → ui），所以只能显式声明。
-# getrandom 只被 server.rs 用（会话 token），不会单独生成 feature，一并列出。
 ui = ["dep:slint"]
-http = ["dep:axum", "dep:tokio", "dep:getrandom"]
+http = ["dep:axum", "dep:tokio"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 
+# 同步模块（六端常驻，无 feature 门控）：阻塞式 HTTP 客户端 + 快照摘要 +
+# installation_id 随机段。
+# ureq 关掉默认 tls：客户端只讲明文 HTTP，与自有中继的部署姿态一致，
+# 同时避免把 OpenSSL/Schannel 拖进移动端产物。服务端可另行置于
+# TLS 反代之后（浏览器访问 /admin 走 HTTPS），客户端侧暂不支持。
+ureq = { version = "2", default-features = false, features = ["json"] }
+sha2 = "0.10"
+getrandom = "0.3"
+
 axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net"], optional = true }
-getrandom = { version = "0.3", optional = true }
 
 slint = { version = "1", default-features = false, optional = true, features = [
     "std",
@@ -37,7 +44,7 @@ slint = { version = "1", default-features = false, optional = true, features = [
     "renderer-software",
     "software-renderer-systemfonts",
 ] }
-# getrandom 只被 server.rs 用（会话 token），随 http 一起进包。
+# getrandom 由 sync.rs（installation_id 随机段）与 server.rs（会话 token）共用。
 
 # macOS 后端（M-P4）：core 只负责 slint 渲染，窗口贴帧交给外壳主线程
 # （AppKit 窗口调用必须在主线程，而 UI 线程是 core 自己 spawn 的 Rust 线程）。
