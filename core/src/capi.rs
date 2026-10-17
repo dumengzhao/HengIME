@@ -1087,6 +1087,20 @@ pub extern "C" fn heng_set_work_area(top: i32, bottom: i32) {
 #[no_mangle]
 pub extern "C" fn heng_set_work_area(_top: i32, _bottom: i32) {}
 
+/// 外壳上报 inline_preedit 开关（"字母区内嵌到宿主输入区"）。
+/// macOS 专用：core 不能自己读 weasel.custom.yaml（Windows 端补丁文件，
+/// macOS 上不存在），否则外壳插宿主区、core 条内也画，一份字母显两处。
+/// 其他平台继续由 core 直读 weasel.custom.yaml（weasel/fcitx5 正统配置源）。
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn heng_set_inline_preedit(on: c_int) {
+    crate::ui::mac_backend::set_inline_preedit(on != 0);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn heng_set_inline_preedit(_on: c_int) {}
+
 /// 外壳上报指针事件（M-P4）。仅 macOS 有效。
 #[cfg(target_os = "macos")]
 #[no_mangle]

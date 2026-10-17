@@ -307,6 +307,15 @@ HENG_API void heng_set_screen_info(unsigned int width, unsigned int height, floa
  * 显示器插拔 / Dock 显隐 / 菜单栏高度变化时应重新上报。 */
 HENG_API void heng_set_work_area(int top, int bottom);
 
+/* 外壳上报 inline_preedit 开关（"字母区内嵌到宿主输入区"）。仅 macOS 有效：
+ * Windows/Linux 由 core 直读 weasel.custom.yaml（其正统配置源）。
+ * macOS 上 core 读不到该文件（weasel 端补丁），历史上 fallback 成恒关，
+ * 于是 squirrel.yaml 开着时外壳把字母插进宿主区、core 的预览窗条内也画，
+ * 同一份字母显两处。改为外壳推送后两侧同源：拨开关两边一起变。
+ * on 非 0 = 内嵌开（字母进宿主区，预览窗条内不显示）。
+ * 应在每次会话刷新时推送（配置可能已被用户改动）。 */
+HENG_API void heng_set_inline_preedit(int on);
+
 /* 外壳在主线程收到指针事件后调用，core 排空队列转成 Slint 事件。
  * x/y/dx/dy 均为**逻辑像素**（DPI 换算由 core 统一做）。
  * kind 取值：0=移动 1=按下 2=抬起 3=滚轮 4=指针离开 5=窗口关闭请求。

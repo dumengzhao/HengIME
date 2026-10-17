@@ -1557,6 +1557,25 @@ pub mod mac_backend {
         *WORK_AREA.lock().unwrap()
     }
 
+    /// 「字母区内嵌到宿主输入区」开关（inline_preedit）。
+    /// 由外壳经 heng_set_inline_preedit 推送，是 macOS 上该开关的唯一真相源。
+    ///
+    /// 为什么 core 不能自己读 weasel.custom.yaml：那是 Windows weasel 端的
+    /// 补丁文件，macOS 上不存在 -> get_path 恒 None -> fallback false ->
+    /// core 永远认为「内嵌关」，预览窗条内照显字母；而外壳读 squirrel.yaml
+    /// 把字母插进宿主区 -> 同一份字母渲染两遍。推送后 core 与外壳同源。
+    static INLINE_PREEDIT: Mutex<Option<bool>> = Mutex::new(None);
+
+    /// 外壳调用：上报 inline_preedit 开关状态（每次会话刷新时推）。
+    pub fn set_inline_preedit(on: bool) {
+        *INLINE_PREEDIT.lock().unwrap() = Some(on);
+    }
+
+    /// 开关状态；未推送时 None（回退到 weasel.custom.yaml 读法）。
+    pub fn inline_preedit() -> Option<bool> {
+        *INLINE_PREEDIT.lock().unwrap()
+    }
+
     /// 外壳调用：上报主屏尺寸与缩放（主线程，随时可调）。
     pub fn set_screen_info(w: i32, h: i32, scale: f32) {
         *SCREEN.lock().unwrap() = Some((w, h, scale));
@@ -2989,12 +3008,20 @@ fn set_bar_cells(
         ),
     };
     bar_base.set(base);
-    // 内嵌关时字母显示在条上方（对齐 weasel inline_preedit 语义）；
-    // 开时字母由 client preedit 内嵌到应用，条内不显示
-    let inline_on = crate::settings::Settings::new(engine)
+    let weasel_inline = crate::settings::Settings::new(engine)
         .get_path(crate::settings::PATCH_WEASEL, "style/inline_preedit")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false); // Linux 默认关（字母显示在候选窗上方）
+        .and_then(|v| v.as_bool());
+    // macOS：外壳（squirrel.yaml 与 weasel.custom.yaml 覆盖的合并结果）经
+    // heng_set_inline_preedit 推送，它是该开关的唯一真相源。core 自己读
+    // weasel.custom.yaml 在 macOS 上恒 None（Windows 端补丁文件），曾导致
+    // 「开关开 = 预览窗条内与宿主区各显一份字母」。未推送时（启动初期）
+    // 退回 weasel 读法，与 Linux 默认关一致。
+    #[cfg(target_os = "macos")]
+    let inline_on = mac_backend::inline_preedit()
+        .or(weasel_inline)
+        .unwrap_or(false);
+    #[cfg(not(target_os = "macos"))]
+    let inline_on = weasel_inline.unwrap_or(false); // Linux 默认关
     let input_text = if !inline_on {
         snapshot.preedit.clone()
     } else {
@@ -5099,6 +5126,15 @@ fn load_settings_state(
             .get_path(PATCH_WEASEL, "style/inline_preedit")
             .and_then(|v| v.as_bool())
         {
+            st.inline = v;
+        }
+        // macOS：外壳推送值是 inline 开关的唯一真相源（渲染行为由它决定），
+        // 设置窗显示必须与之一致。weasel 部署配置在 macOS 上没有
+        // inline_preedit 键（那是 Windows 端配置），恒读成 false，曾导致
+        // 「设置窗显示关、实际却在内嵌」的初始态错位，用户要手拨一次
+        // 写入 weasel.custom.yaml 后显示与行为才统一。
+        #[cfg(target_os = "macos")]
+        if let Some(v) = mac_backend::inline_preedit() {
             st.inline = v;
         }
         if let Some(v) = settings
