@@ -479,3 +479,84 @@ async fn admin_page_served_without_auth() {
     assert!(html.contains("/api/admin/login"));
     assert!(html.contains("管理员登录"));
 }
+
+/// `GET /api/admin/stats` —— 顶栏实时状态聚合。
+///
+/// 验证点：
+/// - 未初始化时 409（被 admin_auth 中间件拦下，与其他数据面同行为）
+/// - 客户端 token 访问 → 401（管理端不认）
+/// - 管理员 token 访问 → 4 个数 schema 正确；online / active_24h 阈值生效
+/// - 空库 → 4 个数全为 0
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_stats_endpoint() {
+    let srv = spawn_server().await;
+    let st: serde_json::Value = ureq::get(&format!("{}/api/admin/init-status", srv.base))
+        .call()
+        .unwrap()
+        .into_json()
+        .unwrap();
+    assert_eq!(st["initialized"], false);
+    // 未初始化：所有管理数据面一律 409
+    assert_eq!(
+        code(ureq::get(&format!("{}/api/admin/stats", srv.base)).call()),
+        409
+    );
+
+    admin_init(&srv, "admin", "admin-root-pass");
+    let ta = admin_login(&srv, "admin", "admin-root-pass").unwrap();
+
+    // 客户端账号：建、登
+    seed_account(&srv, "carol", "user-pass");
+    let tu = login(&srv, "carol", "user-pass").unwrap();
+    // 客户端 token 访问管理数据面 → 401
+    assert_eq!(
+        code(ureq::get(&format!("{}/api/admin/stats", srv.base))
+            .set("Authorization", &format!("Bearer {tu}"))
+            .call()),
+        401
+    );
+
+    // 空库：4 个数全 0
+    let stats = api_json(&srv, &ta, "/api/admin/stats");
+    for k in ["total_devices", "online_devices", "active_24h", "total_size_bytes"] {
+        assert_eq!(stats[k].as_i64().unwrap(), 0, "field {k} 应为 0");
+    }
+
+    // 造两台设备：carol 的 win 设备（recent，online+active 24h），
+    // dave 的旧设备（很老，offline 且不在 24h 内）
+    {
+        let conn = db::open(&srv.data_dir.join("test.db")).unwrap();
+        let carol = db::find_account_by_name(&conn, "carol").unwrap().unwrap();
+        let carol_dev = db::upsert_device(
+            &conn, carol.id, "win-dmz-1A2B3C", "DMZ Win 主机", "windows",
+        )
+        .unwrap();
+        let now = db::now_unix();
+        // last_sync_at 设到 1h 前（应计入 24h 活跃）
+        conn.execute(
+            "UPDATE device SET last_sync_at = ?1 WHERE id = ?2",
+            rusqlite::params![now - 3_600, carol_dev],
+        )
+        .unwrap();
+
+        // 第二台账号：dave
+        db::create_account(&conn, "dave", &auth::hash_pass("pw-dave")).unwrap();
+        let dave = db::find_account_by_name(&conn, "dave").unwrap().unwrap();
+        let dave_dev = db::upsert_device(
+            &conn, dave.id, "old-mac-OLDOLD", "旧 Mac", "macos",
+        )
+        .unwrap();
+        // 改 last_seen_at 与 last_sync_at 到 2 天前（都不应计入）
+        conn.execute(
+            "UPDATE device SET last_seen_at = ?1, last_sync_at = ?1 WHERE id = ?2",
+            rusqlite::params![now - 172_800, dave_dev],
+        )
+        .unwrap();
+    }
+
+    let stats = api_json(&srv, &ta, "/api/admin/stats");
+    assert_eq!(stats["total_devices"], 2, "两台设备");
+    assert_eq!(stats["online_devices"], 1, "只有 carol 5min 内活跃");
+    assert_eq!(stats["active_24h"], 1, "只有 carol 24h 内同步过");
+    assert_eq!(stats["total_size_bytes"], 0, "没造快照文件");
+}

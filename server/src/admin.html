@@ -9,100 +9,542 @@
  * heng-sync-server 管理页面（docs/SYNC-PLAN.md §8）。
  *
  * 单文件 HTML，include_str! 进二进制，由 axum 直接返回：不引构建链、
- * 不引外部 CDN。四个标签：设备 / 用户 / 同步记录 / 改密码。
+ * 不引外部 CDN。设计 token 化、暗色科技范（网格底纹、霓虹青强调、
+ * 等宽数字、微发光边框）、空态带 SVG、表格分页、自定义 modal/toast。
+ * 顶栏右端显示实时状态聚合（GET /api/admin/stats）。
  *
- * 交互模型（与 ClipSync 服务端同一套口令模式）：
- *   未初始化 → 初始化卡片（用户名 + 本地生成的 Argon2id 哈希串）
- *   已初始化未登录 → 登录卡片（/api/admin/login 签发 JWT）
- *   已登录 → 四个标签
- * 令牌只存页面内存（JS 变量），刷新即失效，与「长期令牌存客户端」互补：
- * 管理页是偶发操作，不追求免登录。
+ * 交互模型：
+ *   未初始化 → 初始化卡片
+ *   已初始化未登录 → 登录卡片
+ *   已登录 → 四个标签 + 顶栏状态条
+ * 令牌存 localStorage（3 天随 JWT exp 过期；改密后服务端按 pwd 版本号
+ * 作废，前端 401 时自动清除）。管理页是偶发操作，免登录不影响安全面。
  */
-  :root {
-    --bg: #f7f8fa; --card: #ffffff; --line: #e5e7eb;
-    --text: #1f2328; --sub: #888d95; --accent: #2164f1;
-    --accent-hover: #1b56d6; --danger: #d93025; --danger-hover: #b3261e;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-  }
-  header {
-    background: var(--card); border-bottom: 1px solid var(--line);
-    padding: 12px 24px; display: flex; align-items: center; gap: 16px;
-  }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  header .meta { color: var(--sub); font-size: 12px; }
-  nav { margin-left: auto; display: flex; gap: 4px; }
-  nav button {
-    border: 0; background: transparent; padding: 6px 14px; border-radius: 8px;
-    font-size: 13px; color: var(--text); cursor: pointer;
-  }
-  nav button.on { background: var(--accent); color: #fff; }
-  nav button:not(.on):hover { background: #eef0f4; }
-  main { max-width: 960px; margin: 24px auto; padding: 0 24px; }
-  .card {
-    background: var(--card); border: 1px solid var(--line);
-    border-radius: 10px; padding: 16px 20px; margin-bottom: 16px;
-  }
-  .card h2 { font-size: 13px; color: var(--sub); margin: 0 0 12px; font-weight: 600; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; color: var(--sub); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-  td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  tr:last-child td { border-bottom: 0; }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .muted { color: var(--sub); }
-  .empty { color: var(--sub); padding: 16px 10px; text-align: center; }
-  button.act {
-    border: 0; border-radius: 6px; padding: 5px 12px; font-size: 12px;
-    cursor: pointer; background: #e9ebef; color: var(--text);
-  }
-  button.act:hover { background: #dfe6f5; }
-  button.act.danger { background: #fdecea; color: var(--danger); }
-  button.act.danger:hover { background: #fbd7d3; }
-  button.primary {
-    border: 0; border-radius: 8px; padding: 8px 18px; font-size: 13px;
-    background: var(--accent); color: #fff; cursor: pointer;
-  }
-  button.primary:hover { background: var(--accent-hover); }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .row.grow > * { flex: 1; }
-  input[type=text], input[type=password], textarea {
-    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
-    font-size: 13px; width: 100%; background: #fff; color: var(--text);
-  }
-  textarea { resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
-  input:focus, textarea:focus { outline: 2px solid #bcd0f7; border-color: var(--accent); }
-  label { font-size: 12px; color: var(--sub); display: block; margin-bottom: 4px; }
-  .field { margin-bottom: 12px; }
-  .tag {
-    display: inline-block; padding: 1px 8px; border-radius: 10px;
-    font-size: 11px; background: #eef0f4; color: var(--sub);
-  }
-  .msg { font-size: 12px; margin-top: 8px; min-height: 18px; }
-  .msg.err { color: var(--danger); }
-  .msg.ok { color: #137333; }
-  #init, #login { max-width: 480px; margin: 64px auto; }
-  #init h1, #login h1 { font-size: 18px; margin: 0 0 4px; }
-  #init .sub, #login .sub { color: var(--sub); font-size: 12px; margin-bottom: 20px; }
-  .hint { font-size: 12px; color: var(--sub); line-height: 1.8; margin: 0 0 14px; }
-  .hint b { color: var(--text); font-weight: 600; }
-  .hint code { background: #eef0f4; border-radius: 4px; padding: 1px 6px; font-size: 12px; word-break: break-all; }
-  #init details, #login details { margin-top: 12px; }
-  details { font-size: 12px; color: var(--sub); margin-top: 4px; }
-  details summary { cursor: pointer; color: var(--accent); }
-  pre {
-    font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.7;
-    background: #f2f4f8; border: 1px solid var(--line); border-radius: 8px;
-    padding: 10px 12px; margin: 8px 0 0; white-space: pre-wrap; word-break: break-all;
-  }
+
+/* ============ 设计 token ============ */
+:root {
+  /* 主色：霓虹青（科技范标志性色）。hover 加深而非减淡，暗底上更亮 */
+  --accent: #00d4ff;
+  --accent-hover: #33ddff;
+  --accent-dim: rgba(0, 212, 255, .12);
+  --accent-glow: rgba(0, 212, 255, .35);
+  --success: #34d399;
+  --warn: #fbbf24;
+  --info: #60a5fa;
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, .12);
+  --danger-soft-hover: rgba(248, 113, 113, .2);
+
+  /* 深色底：近黑偏蓝，卡片略亮一档，形成层次 */
+  --bg: #0a0e14;
+  --bg-grid: rgba(0, 212, 255, .025);
+  --card: #11161d;
+  --card-raised: #151c25;
+  --line: #1e2630;
+  --line-strong: #2c3845;
+  --line-glow: rgba(0, 212, 255, .25);
+  --text: #e2e8f0;
+  --text-soft: #b0b8c4;
+  --sub: #7d8a99;
+  --subtle: #5a6673;
+
+  --r-sm: 4px; --r-md: 8px; --r-lg: 12px;
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px;
+  --t-1: 12px; --t-2: 13px; --t-3: 14px; --t-4: 16px; --t-5: 20px;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, .5);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, .7);
+  --glow-accent: 0 0 12px var(--accent-glow);
+
+  --row-hover: #161d26;
+  --th-bg: #0d1218;
+  --modal-overlay: rgba(4, 8, 14, .78);
+
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; } /* HTML hidden 属性被任意 display: 覆盖的经典坑 */
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  /* 网格底纹：细线 + 中心微光，静态 CSS 绘制、零请求 */
+  background-image:
+    linear-gradient(var(--bg-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px),
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0, 212, 255, .06), transparent);
+  background-size: 40px 40px, 40px 40px, 100% 100%;
+  color: var(--text);
+  font: var(--t-3)/1.55 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); }
+a:hover { text-shadow: 0 0 8px var(--accent-glow); }
+code {
+  font-family: var(--mono);
+  font-size: .92em;
+  background: rgba(0, 212, 255, .07);
+  color: var(--accent);
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+}
+
+/* ============ 顶栏 ============ */
+header {
+  position: sticky; top: 0; z-index: 5;
+  background: rgba(17, 22, 29, .85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+  padding: var(--s-3) var(--s-5);
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: var(--s-4);
+  align-items: center;
+  min-height: 60px;
+  /* 底部霓虹细线 */
+  box-shadow: 0 1px 0 0 rgba(0, 212, 255, .12), 0 4px 24px rgba(0, 0, 0, .3);
+}
+header h1 {
+  font-size: var(--t-4); margin: 0; font-weight: 600;
+  letter-spacing: 1px;
+  color: var(--text);
+}
+header h1::before {
+  content: "▮ ";
+  color: var(--accent);
+  text-shadow: 0 0 8px var(--accent-glow);
+}
+header .meta { color: var(--sub); font-size: var(--t-1); margin-left: var(--s-3); font-family: var(--mono); }
+header .status {
+  font-size: var(--t-1);
+  color: var(--text-soft);
+  display: flex; gap: var(--s-2); align-items: center;
+  white-space: nowrap;
+  padding: var(--s-1) var(--s-3);
+  background: var(--card-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font-family: var(--mono);
+}
+header .status b { color: var(--accent); font-weight: 600; }
+header .status .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--subtle);
+  transition: background .3s;
+}
+header .status.live .dot {
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--success); }
+  50% { opacity: .5; box-shadow: 0 0 3px var(--success); }
+}
+nav { display: flex; gap: 2px; }
+nav button {
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 6px 14px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-2);
+  color: var(--sub);
+  cursor: pointer;
+  transition: all .15s;
+  font-family: var(--mono);
+  letter-spacing: .5px;
+}
+nav button.on {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--line-glow);
+  box-shadow: inset 0 0 12px rgba(0, 212, 255, .06);
+}
+nav button:not(.on):hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+/* ============ 主区 ============ */
+main { max-width: 1100px; margin: 0 auto; padding: var(--s-5); }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--s-5);
+  margin-bottom: var(--s-4);
+  box-shadow: var(--shadow-sm);
+  position: relative;
+  /* 顶部左侧霓虹标记 */
+}
+.card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: var(--s-4); right: var(--s-4);
+  height: 1px;
+  background: linear-gradient(90deg, var(--accent-glow), transparent 30%);
+}
+.card h2 {
+  font-size: var(--t-1);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  margin: 0 0 var(--s-3);
+  font-weight: 600;
+  font-family: var(--mono);
+}
+.card h2::before { content: "// "; color: var(--subtle); }
+.center-card {
+  max-width: 480px;
+  margin: 10vh auto 0;
+  padding: var(--s-6);
+  border-color: var(--line-glow);
+  box-shadow: var(--shadow-md), 0 0 40px rgba(0, 212, 255, .05);
+}
+.center-card h1 {
+  font-size: var(--t-5); margin: 0 0 var(--s-1);
+  font-weight: 600;
+  letter-spacing: .5px;
+}
+.center-card .sub {
+  color: var(--accent);
+  font-size: var(--t-1);
+  margin-bottom: var(--s-5);
+  font-family: var(--mono);
+  letter-spacing: 1px;
+}
+
+.hint { font-size: var(--t-1); color: var(--sub); line-height: 1.8; margin: 0 0 var(--s-4); }
+.hint b { color: var(--text); font-weight: 600; }
+.muted { color: var(--sub); }
+
+/* ============ 表单 ============ */
+.row { display: flex; gap: var(--s-3); align-items: flex-end; flex-wrap: wrap; }
+.row.grow > * { flex: 1 1 200px; }
+.field { margin-bottom: var(--s-3); min-width: 0; }
+label {
+  font-size: var(--t-1);
+  color: var(--sub);
+  display: block;
+  margin-bottom: var(--s-1);
+  font-weight: 500;
+  font-family: var(--mono);
+  letter-spacing: .5px;
+  text-transform: uppercase;
+}
+input[type=text], input[type=password], textarea {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  padding: 8px 12px;
+  font-size: var(--t-2);
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  transition: border-color .15s, box-shadow .15s;
+}
+input[type=text]:focus, input[type=password]:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 16px var(--accent-glow);
+}
+input::placeholder, textarea::placeholder { color: var(--subtle); }
+textarea { resize: vertical; font-family: var(--mono); font-size: var(--t-1); line-height: 1.6; }
+
+/* ============ 按钮 ============ */
+button { font-family: inherit; }
+button.primary {
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  padding: 8px 20px;
+  font-size: var(--t-2);
+  font-weight: 500;
+  background: var(--accent-dim);
+  color: var(--accent);
+  cursor: pointer;
+  transition: all .15s;
+  font-family: var(--mono);
+  letter-spacing: .5px;
+  text-transform: uppercase;
+}
+button.primary:hover {
+  background: rgba(0, 212, 255, .2);
+  box-shadow: var(--glow-accent);
+  text-shadow: 0 0 8px var(--accent-glow);
+}
+button.act {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  padding: 4px 12px;
+  font-size: var(--t-1);
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: all .15s;
+  font-family: var(--mono);
+}
+button.act:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 8px rgba(0, 212, 255, .15);
+}
+button.act.danger { color: var(--danger); }
+button.act.danger:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  box-shadow: 0 0 8px rgba(248, 113, 113, .2);
+}
+
+/* ============ 卡片网格 ============ */
+.grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--s-3);
+}
+.cell-card {
+  background: var(--card-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+  display: flex; flex-direction: column; gap: var(--s-2);
+  transition: border-color .15s, box-shadow .15s, transform .15s;
+  position: relative;
+}
+.cell-card:hover {
+  border-color: var(--line-glow);
+  box-shadow: 0 0 16px rgba(0, 212, 255, .1);
+  transform: translateY(-2px);
+}
+.cell-card .cell-head {
+  display: flex; align-items: center; gap: var(--s-2);
+  min-width: 0;
+}
+.cell-card .cell-title {
+  font-family: var(--mono);
+  font-size: var(--t-2);
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cell-card .cell-sub {
+  font-size: var(--t-1);
+  color: var(--sub);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cell-card .cell-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-1) var(--s-3);
+  font-size: var(--t-1);
+  color: var(--sub);
+  border-top: 1px solid var(--line);
+  padding-top: var(--s-2);
+}
+.cell-card .cell-meta .k { color: var(--subtle); }
+.cell-card .cell-meta .v {
+  font-family: var(--mono);
+  color: var(--text-soft);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cell-card .cell-acts {
+  display: flex; gap: var(--s-2); justify-content: flex-end;
+  border-top: 1px solid var(--line);
+  padding-top: var(--s-2);
+  margin-top: auto;
+}
+
+/* ============ 空态 ============ */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center;
+  padding: var(--s-6) var(--s-4);
+  text-align: center;
+  color: var(--sub);
+}
+.empty-state svg {
+  width: 64px; height: 64px;
+  color: var(--accent);
+  opacity: .5;
+  margin-bottom: var(--s-3);
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 8px var(--accent-glow));
+}
+.empty-state h3 {
+  font-size: var(--t-3);
+  color: var(--text-soft);
+  font-weight: 500;
+  margin: 0 0 var(--s-1);
+  font-family: var(--mono);
+  letter-spacing: .5px;
+}
+.empty-state p {
+  font-size: var(--t-1);
+  color: var(--sub);
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* ============ 分页 ============ */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--line);
+  font-size: var(--t-1);
+  color: var(--sub);
+  font-family: var(--mono);
+}
+.pager-pages { display: flex; gap: 2px; }
+.pager button {
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--text-soft);
+  border-radius: var(--r-sm);
+  padding: 4px 10px;
+  font-size: var(--t-1);
+  cursor: pointer;
+  min-width: 30px;
+  font-family: var(--mono);
+}
+.pager button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.pager button:disabled { opacity: .35; cursor: not-allowed; }
+.pager button.on {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+/* ============ Modal ============ */
+.modal-root {
+  position: fixed; inset: 0;
+  z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--s-4);
+}
+.modal-backdrop {
+  position: absolute; inset: 0;
+  background: var(--modal-overlay);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: fade-in .12s ease-out;
+}
+.modal {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--line-glow);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg), 0 0 32px rgba(0, 212, 255, .08);
+  max-width: 440px;
+  width: 100%;
+  padding: var(--s-5);
+  animation: pop-in .15s ease-out;
+}
+.modal h3 {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-4);
+  font-weight: 600;
+  font-family: var(--mono);
+  letter-spacing: .5px;
+}
+.modal .modal-body { margin-bottom: var(--s-4); color: var(--text-soft); }
+.modal .modal-actions {
+  display: flex; gap: var(--s-2); justify-content: flex-end;
+}
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(.96) translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ============ Toast ============ */
+.toast-root {
+  position: fixed;
+  top: var(--s-4); right: var(--s-4);
+  z-index: 200;
+  display: flex; flex-direction: column; gap: var(--s-2);
+  pointer-events: none;
+  max-width: 360px;
+}
+.toast {
+  pointer-events: auto;
+  background: var(--card-raised);
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--sub);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-md);
+  padding: 10px 14px;
+  font-size: var(--t-2);
+  color: var(--text);
+  display: flex; align-items: flex-start; gap: var(--s-2);
+  animation: slide-in .18s ease-out;
+  font-family: var(--mono);
+}
+.toast.success { border-left-color: var(--success); box-shadow: var(--shadow-md), 0 0 12px rgba(52, 211, 153, .15); }
+.toast.error   { border-left-color: var(--danger);  box-shadow: var(--shadow-md), 0 0 12px rgba(248, 113, 113, .15); }
+.toast.warn    { border-left-color: var(--warn);    box-shadow: var(--shadow-md), 0 0 12px rgba(251, 191, 36, .15); }
+.toast.info    { border-left-color: var(--info);    box-shadow: var(--shadow-md), 0 0 12px rgba(96, 165, 250, .15); }
+.toast .toast-msg { flex: 1; line-height: 1.5; }
+.toast.fade-out { animation: fade-out .18s ease-in forwards; }
+@keyframes slide-in {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes fade-out {
+  to { opacity: 0; transform: translateX(8px); }
+}
+
+/* ============ 杂项 ============ */
+.tag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-1);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-family: var(--mono);
+  border: 1px solid var(--line-glow);
+}
+details { font-size: var(--t-1); color: var(--sub); margin-top: var(--s-2); }
+details summary { cursor: pointer; color: var(--accent); font-family: var(--mono); }
+details summary:hover { text-shadow: 0 0 8px var(--accent-glow); }
+pre {
+  font-family: var(--mono);
+  font-size: var(--t-1);
+  line-height: 1.7;
+  background: var(--th-bg);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--r-sm);
+  padding: var(--s-2) var(--s-3);
+  margin: var(--s-2) 0 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-soft);
+}
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--subtle); }
 </style>
 </head>
 <body>
 
-<!-- 未初始化：初始化卡片（提示文案与结构同 ClipSync 服务端管理页） -->
-<div id="init" class="card" hidden>
+<!-- ========== 未初始化：初始化卡片 ========== -->
+<div id="init" class="card center-card" hidden>
   <h1>HengIME 同步服务</h1>
   <div class="sub">FIRST-TIME SETUP · 首次使用，先初始化管理员凭据</div>
   <p class="hint">
@@ -136,8 +578,8 @@ heng-sync-server hash
   </details>
 </div>
 
-<!-- 已初始化未登录：登录卡片 -->
-<div id="login" class="card" hidden>
+<!-- ========== 已初始化未登录：登录卡片 ========== -->
+<div id="login" class="card center-card" hidden>
   <h1>HengIME 同步服务</h1>
   <div class="sub">管理员登录。普通用户无需访问本页。</div>
   <div class="field"><label>用户名</label><input id="lu" type="text" autocomplete="username"></div>
@@ -146,10 +588,16 @@ heng-sync-server hash
   <div id="lmsg" class="msg err"></div>
 </div>
 
+<!-- ========== 已登录：主界面 ========== -->
 <div id="app" hidden>
   <header>
-    <h1>HengIME 同步服务</h1>
-    <span class="meta" id="who"></span>
+    <div>
+      <h1>HengIME 同步服务</h1>
+      <span class="meta" id="who"></span>
+    </div>
+    <div class="status" id="status" title="实时状态（每 30 秒刷新）">
+      <span class="dot"></span><span id="status-text">加载中…</span>
+    </div>
     <nav>
       <button id="tab-devices" class="on" onclick="showTab('devices')">设备</button>
       <button id="tab-users" onclick="showTab('users')">用户</button>
@@ -169,8 +617,8 @@ heng-sync-server hash
       <div class="card">
         <h2>新增用户</h2>
         <div class="row grow">
-          <div class="field" style="flex:1"><label>用户名</label><input id="nu" type="text"></div>
-          <div class="field" style="flex:1"><label>密码（至少 4 位）</label><input id="np" type="password"></div>
+          <div class="field"><label>用户名</label><input id="nu" type="text"></div>
+          <div class="field"><label>密码（至少 4 位）</label><input id="np" type="password"></div>
           <div class="field" style="flex:0 0 auto"><label>&nbsp;</label>
             <button class="primary" onclick="createUser()">创建</button></div>
         </div>
@@ -206,18 +654,52 @@ heng-sync-server hash
   </main>
 </div>
 
+<!-- ========== Modal 根 ========== -->
+<div id="modal-root" class="modal-root" hidden>
+  <div class="modal-backdrop" data-modal-close></div>
+  <div class="modal" role="dialog" aria-modal="true">
+    <h3 id="modal-title"></h3>
+    <div id="modal-body" class="modal-body"></div>
+    <div id="modal-actions" class="modal-actions"></div>
+  </div>
+</div>
+
+<!-- ========== Toast 根 ========== -->
+<div id="toast-root" class="toast-root" aria-live="polite"></div>
+
 <script>
+"use strict";
 let TOKEN = null;
 
+// ---------- 工具 ----------
 const $ = (id) => document.getElementById(id);
+// 令牌落 localStorage：JWT 自包含 exp，前端解码 payload 判断过期，
+// 无需网络往返；过期即丢、走正常登录。改密后服务端按 pwd 版本号作废
+// 旧令牌（admin.rs:328），那种失效靠 api() 的 401 兜底处理。
+const TOKEN_KEY = "heng-admin-token";
+const tokenSave = (t, who) => { try { localStorage.setItem(TOKEN_KEY, JSON.stringify({ t, who })); } catch {} };
+const tokenClear = () => { try { localStorage.removeItem(TOKEN_KEY); } catch {} };
+const tokenLoad = () => {
+  try {
+    const raw = localStorage.getItem(TOKEN_KEY);
+    if (!raw) return null;
+    const { t, who } = JSON.parse(raw);
+    if (!t || !who) return null;
+    // 前端只查 exp（payload 第二段 base64url）；不验签——验签是服务端的事，
+    // 篡改 payload 过不了服务端 hmac 校验，最坏结果是提前跳登录卡片。
+    const payload = JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    if (!payload.exp || payload.exp * 1000 <= Date.now()) return null;
+    return { t, who };
+  } catch { return null; }
+};
 const api = async (path, opts = {}) => {
   const res = await fetch(path, {
     ...opts,
     headers: { ...(opts.headers || {}), Authorization: "Bearer " + TOKEN },
   });
   const body = await res.json().catch(() => ({}));
-  // 运行期被重置（admin.json 被删）→ 回初始化卡片，别让用户对着一圈 401 干瞪眼
   if (res.status === 409 && body.code === "not_initialized") { boot(); throw new Error(""); }
+  if (res.status === 401) { tokenClear(); boot(); throw new Error("会话已过期，请重新登录"); }
   if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
   return body;
 };
@@ -226,18 +708,148 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
 const fmtTime = (t) => t ? new Date(t * 1000).toLocaleString() : "—";
 const fmtSize = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
   : n >= 1024 ? (n / 1024).toFixed(1) + " KB" : n + " B";
+const inlineSvg = (svg) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">${svg}</svg>`;
 
-// 入口：未初始化显示初始化卡片，否则显示登录卡片
+// ---------- 空态（4 套内联 SVG） ----------
+const emptyStates = {
+  devices: {
+    title: "还没有设备绑定",
+    body: "客户端在 IME 设置里启用同步并完成首次登录后，会在这里出现。",
+    icon: inlineSvg(`
+      <rect x="3" y="6" width="18" height="12" rx="2"/>
+      <path d="M8 12h.01M12 12h.01M16 12h.01"/>
+      <path d="M3 18v2M21 18v2"/>
+    `),
+  },
+  users: {
+    title: "还没有用户",
+    body: "通过上方「新增用户」卡片创建第一个客户端账号。",
+    icon: inlineSvg(`
+      <circle cx="9" cy="8" r="3"/>
+      <path d="M3 20c0-3 3-5 6-5s6 2 6 5"/>
+      <circle cx="17" cy="6" r="2.5"/>
+      <path d="M14.5 13c2-1 4.5-.5 5.5 1.5"/>
+    `),
+  },
+  records: {
+    title: "暂无同步记录",
+    body: "客户端完成首次同步后，会出现在这里。",
+    icon: inlineSvg(`
+      <circle cx="12" cy="12" r="9"/>
+      <path d="M12 7v5l3 2"/>
+    `),
+  },
+  pwd: {
+    title: "改密从这里开始",
+    body: "填入当前密码与新密码，点击「修改」即可。所有已签发的会话会立即失效。",
+    icon: inlineSvg(`
+      <rect x="5" y="11" width="14" height="9" rx="2"/>
+      <path d="M8 11V7a4 4 0 1 1 8 0v4"/>
+      <circle cx="12" cy="15.5" r="1.2" fill="currentColor"/>
+    `),
+  },
+};
+const renderEmpty = (kind) => {
+  const e = emptyStates[kind];
+  return `<div class="empty-state">${e.icon}<h3>${esc(e.title)}</h3><p>${esc(e.body)}</p></div>`;
+};
+
+// ---------- Toast ----------
+const toast = (msg, kind = "info", ms) => {
+  const root = $("toast-root");
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.innerHTML = `<div class="toast-msg">${esc(msg)}</div>`;
+  root.appendChild(el);
+  const timeout = ms ?? (kind === "error" ? 6000 : 4000);
+  const t = setTimeout(() => {
+    el.classList.add("fade-out");
+    setTimeout(() => el.remove(), 200);
+  }, timeout);
+  el.addEventListener("click", () => { clearTimeout(t); el.remove(); });
+};
+
+// ---------- Modal ----------
+let modalLastFocus = null;
+const modal = {
+  open({ title, body, actions = [] }) {
+    modalLastFocus = document.activeElement;
+    $("modal-title").textContent = title;
+    $("modal-body").innerHTML = body;
+    const acts = $("modal-actions");
+    acts.innerHTML = "";
+    actions.forEach((a) => {
+      const btn = document.createElement("button");
+      btn.className = a.kind === "primary" ? "primary" : a.kind === "danger" ? "act danger" : "act";
+      btn.textContent = a.label;
+      btn.addEventListener("click", () => {
+        if (a.onClick) a.onClick();
+        if (a.close !== false) modal.close();
+      });
+      acts.appendChild(btn);
+    });
+    $("modal-root").hidden = false;
+    // 焦点落到第一个 input
+    setTimeout(() => {
+      const first = $("modal-body").querySelector("input,textarea,button");
+      if (first) first.focus();
+    }, 0);
+  },
+  close() {
+    $("modal-root").hidden = true;
+    if (modalLastFocus && modalLastFocus.focus) modalLastFocus.focus();
+  },
+};
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("modal-root").hidden) modal.close();
+});
+
+// ---------- 顶栏状态聚合 ----------
+async function loadStats() {
+  try {
+    const s = await api("/api/admin/stats");
+    const live = s.online_devices > 0;
+    const el = $("status");
+    el.classList.toggle("live", live);
+    $("status-text").innerHTML =
+      `<b>${s.total_devices}</b> 设备 · <b>${s.online_devices}</b> 在线` +
+      ` · 24h 活跃 <b>${s.active_24h}</b> · 累计 ${esc(fmtSize(s.total_size_bytes))}`;
+  } catch { /* 静默：不影响主流程 */ }
+}
+let statsTimer = null;
+const startStatsPolling = () => { stopStatsPolling(); loadStats(); statsTimer = setInterval(loadStats, 30000); };
+const stopStatsPolling = () => { if (statsTimer) { clearInterval(statsTimer); statsTimer = null; } };
+
+// ---------- 入口 / 认证 ----------
 async function boot() {
   TOKEN = null;
+  stopStatsPolling();
   $("app").hidden = true;
   let initialized = false;
   try {
     const res = await fetch("/api/admin/init-status");
     initialized = (await res.json()).initialized;
-  } catch { /* 网络异常时按未初始化处理，提交时自然会报错 */ }
+  } catch { /* 网络异常按未初始化处理 */ }
   $("init").hidden = initialized;
   $("login").hidden = !initialized;
+  // 已初始化且 localStorage 里有未过期令牌 → 免登录直进主界面
+  if (initialized) {
+    const saved = tokenLoad();
+    if (saved) {
+      TOKEN = saved.t;
+      // 轻量验证：拉一次 stats，401 时 api() 已自动 tokenClear + boot（重入安全）
+      try {
+        await api("/api/admin/stats");
+        $("login").hidden = true;
+        $("app").hidden = false;
+        $("who").textContent = saved.who;
+        startStatsPolling();
+        showTab("devices");
+        return;
+      } catch { /* 已过期或被改密作废：boot 会重跑一遍落到登录卡片 */ return; }
+    }
+  }
 }
 
 async function doInit() {
@@ -266,18 +878,21 @@ async function doLogin() {
       body: JSON.stringify({ user: $("lu").value.trim(), pass: $("lp").value }),
     });
     const body = await res.json().catch(() => ({}));
-    // 双保险：既看状态码也看 body.error —— 历史上失败路径误返 200 时，
-    // 只看 res.ok 会把空口令直接放行进主界面
     if (!res.ok || body.error) throw new Error(body.error || "登录失败");
     TOKEN = body.token;
+    tokenSave(TOKEN, $("lu").value.trim());
     $("login").hidden = true; $("app").hidden = false;
     $("who").textContent = $("lu").value.trim();
+    startStatsPolling();
     showTab("devices");
   } catch (e) { $("lmsg").textContent = e.message; }
 }
 
-function logout() { TOKEN = null; $("lp").value = ""; $("app").hidden = true; boot(); }
+function logout() {
+  TOKEN = null; tokenClear(); $("lp").value = ""; $("app").hidden = true; boot();
+}
 
+// ---------- 标签切换 ----------
 function showTab(name) {
   for (const t of ["devices", "users", "records", "pwd"]) {
     $("pane-" + t).hidden = t !== name;
@@ -288,50 +903,179 @@ function showTab(name) {
   if (name === "records") loadRecords();
 }
 
+// ---------- 分页 ----------
+const PAGE_SIZE = 10;
+const currentPage = { devices: 0, users: 0, records: 0 };
+function paginate(rows, key) {
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const page = Math.min(currentPage[key] || 0, pages - 1);
+  currentPage[key] = page;
+  return {
+    slice: rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE),
+    page, pages, total,
+  };
+}
+function renderPager(p, key, onChange) {
+  if (p.total === 0) return "";
+  const pageButtons = [];
+  // 简版：当前 ±2，最多 5 个页码按钮；超出范围补「...」
+  const show = new Set([0, p.pages - 1, p.page - 2, p.page - 1, p.page, p.page + 1, p.page + 2]);
+  const visible = [...show].filter((x) => x >= 0 && x < p.pages).sort((a, b) => a - b);
+  let last = -1;
+  for (const n of visible) {
+    if (n - last > 1) pageButtons.push(`<span class="muted" style="padding:0 4px">…</span>`);
+    pageButtons.push(`<button class="${n === p.page ? "on" : ""}" data-go="${n}">${n + 1}</button>`);
+    last = n;
+  }
+  return `
+    <div class="pager">
+      <span class="muted">共 ${p.total} 条</span>
+      <button data-go="${p.page - 1}" ${p.page === 0 ? "disabled" : ""}>‹ 上一页</button>
+      <span class="pager-pages">${pageButtons.join("")}</span>
+      <button data-go="${p.page + 1}" ${p.page >= p.pages - 1 ? "disabled" : ""}>下一页 ›</button>
+    </div>
+  `;
+}
+function bindPager(el, key, onChange) {
+  const pager = el.querySelector(".pager");
+  if (!pager) return;
+  pager.addEventListener("click", (e) => {
+    const t = e.target.closest("button[data-go]");
+    if (!t || t.disabled) return;
+    const n = parseInt(t.dataset.go, 10);
+    if (!Number.isFinite(n) || n === currentPage[key]) return;
+    currentPage[key] = n;
+    onChange();
+  });
+}
+
+// ---------- 设备 ----------
 async function loadDevices() {
-  $("dev-body").innerHTML = '<div class="empty">加载中…</div>';
+  const body = $("dev-body");
+  body.innerHTML = '<div class="empty">加载中…</div>';
+  currentPage.devices = 0;
   try {
     const { devices } = await api("/api/admin/devices");
-    if (!devices.length) { $("dev-body").innerHTML = '<div class="empty">还没有设备绑定</div>'; return; }
-    $("dev-body").innerHTML = `<table><tr>
-      <th>账号</th><th>设备</th><th>平台</th>
-      <th>最近在线</th><th>最近同步</th>
-      <th class="num">快照</th><th class="num">占用</th><th></th></tr>` +
-      devices.map((d) => `<tr>
-        <td>${esc(d.account)}</td>
-        <td><code>${esc(d.installation_id)}</code><br><span class="muted">${esc(d.display_name)}</span></td>
-        <td>${esc(d.platform)}</td>
-        <td>${fmtTime(d.last_seen_at)}</td>
-        <td>${fmtTime(d.last_sync_at)}</td>
-        <td class="num">${d.file_count}</td>
-        <td class="num">${fmtSize(d.total_size)}</td>
-        <td><button class="act danger" onclick="unbind('${esc(d.installation_id)}')">解绑</button></td>
-      </tr>`).join("") + "</table>";
-  } catch (e) { if (e.message) $("dev-body").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+    if (!devices.length) { body.innerHTML = renderEmpty("devices"); return; }
+    const p = paginate(devices, "devices");
+    body.innerHTML = `<div class="grid-cards">` + p.slice.map((d) => `
+      <div class="cell-card">
+        <div class="cell-head">
+          <span class="cell-title">${esc(d.display_name)}</span>
+          <span class="tag">${esc(d.platform)}</span>
+        </div>
+        <div class="cell-sub">${esc(d.account)} · <code>${esc(d.installation_id)}</code></div>
+        <div class="cell-meta">
+          <span class="k">最近在线</span><span class="v">${esc(fmtTime(d.last_seen_at))}</span>
+          <span class="k">最近同步</span><span class="v">${esc(fmtTime(d.last_sync_at))}</span>
+          <span class="k">快照</span><span class="v">${d.file_count}</span>
+          <span class="k">占用</span><span class="v">${esc(fmtSize(d.total_size))}</span>
+        </div>
+        <div class="cell-acts">
+          <button class="act danger" data-unbind="${esc(d.installation_id)}">解绑</button>
+        </div>
+      </div>`).join("") + `</div>` + renderPager(p, "devices");
+    bindPager(body, "devices", loadDevices);
+    body.addEventListener("click", onDevicesClick);
+  } catch (e) {
+    if (e.message) body.innerHTML = renderEmpty("devices"); // 失败也按空态呈现，避免错乱
+    toast("加载设备失败：" + e.message, "error");
+  }
 }
+const onDevicesClick = (e) => {
+  const t = e.target.closest("button[data-unbind]");
+  if (!t) return;
+  const id = t.dataset.unbind;
+  modal.open({
+    title: "解绑设备",
+    body: `<p>解绑 <code>${esc(id)}</code>？</p><p class="muted">该设备的全部快照将被删除，且不可恢复。</p>`,
+    actions: [
+      { label: "取消" },
+      { label: "解绑", kind: "danger", onClick: async () => {
+        try {
+          await api("/api/admin/devices/" + encodeURIComponent(id), { method: "DELETE" });
+          toast("已解绑 " + id, "success");
+          loadDevices(); loadStats();
+        } catch (err) { toast("解绑失败：" + err.message, "error"); }
+      }},
+    ],
+  });
+};
 
-async function unbind(id) {
-  if (!confirm("解绑 " + id + "？该设备的全部快照将被删除。")) return;
-  try { await api("/api/admin/devices/" + encodeURIComponent(id), { method: "DELETE" }); loadDevices(); }
-  catch (e) { alert(e.message); }
-}
-
+// ---------- 用户 ----------
 async function loadUsers() {
-  $("usr-body").innerHTML = '<div class="empty">加载中…</div>';
+  const body = $("usr-body");
+  body.innerHTML = '<div class="empty">加载中…</div>';
+  currentPage.users = 0;
   try {
     const { users } = await api("/api/admin/users");
-    $("usr-body").innerHTML = `<table><tr>
-      <th>用户名</th><th>设备</th><th>创建时间</th><th></th></tr>` +
-      users.map((u) => `<tr>
-        <td>${esc(u.username)}</td>
-        <td class="num">${u.device_count}</td>
-        <td>${fmtTime(u.created_at)}</td>
-        <td>
-          <button class="act" onclick='chpass("${esc(u.username)}")'>改密码</button>
-          <button class="act danger" onclick='deluser("${esc(u.username)}")'>删除</button>
-        </td>
-      </tr>`).join("") + "</table>";
-  } catch (e) { if (e.message) $("usr-body").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+    if (!users.length) { body.innerHTML = renderEmpty("users"); return; }
+    const p = paginate(users, "users");
+    body.innerHTML = `<div class="grid-cards">` + p.slice.map((u) => `
+      <div class="cell-card">
+        <div class="cell-head">
+          <span class="cell-title">${esc(u.username)}</span>
+          <span class="tag">${u.device_count} 台设备</span>
+        </div>
+        <div class="cell-meta">
+          <span class="k">创建时间</span><span class="v">${esc(fmtTime(u.created_at))}</span>
+        </div>
+        <div class="cell-acts">
+          <button class="act" data-chpass="${esc(u.username)}">改密码</button>
+          <button class="act danger" data-deluser="${esc(u.username)}">删除</button>
+        </div>
+      </div>`).join("") + `</div>` + renderPager(p, "users");
+    bindPager(body, "users", loadUsers);
+    body.addEventListener("click", onUsersClick);
+  } catch (e) {
+    body.innerHTML = renderEmpty("users");
+    toast("加载用户失败：" + e.message, "error");
+  }
+}
+const onUsersClick = (e) => {
+  const ch = e.target.closest("button[data-chpass]");
+  if (ch) return openChpassModal(ch.dataset.chpass);
+  const del = e.target.closest("button[data-deluser]");
+  if (del) return openDeluserModal(del.dataset.deluser);
+};
+function openChpassModal(name) {
+  modal.open({
+    title: "为「" + name + "」修改密码",
+    body: `<div class="field"><label>新密码（至少 4 位）</label>
+           <input type="password" id="modal-pw" autocomplete="new-password"></div>
+           <div class="muted" style="font-size:12px;margin-top:-4px">改完后该用户的所有登录令牌立即失效</div>`,
+    actions: [
+      { label: "取消" },
+      { label: "保存", kind: "primary", onClick: async () => {
+        const pw = $("modal-pw").value;
+        if (!pw || pw.length < 4) { toast("密码至少 4 位", "warn"); return; }
+        try {
+          await api("/api/admin/users/" + encodeURIComponent(name) + "/passwd", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password: pw }),
+          });
+          toast("已修改「" + name + "」的密码（该用户全部会话已失效）", "success");
+        } catch (err) { toast("改密失败：" + err.message, "error"); }
+      }},
+    ],
+  });
+}
+function openDeluserModal(name) {
+  modal.open({
+    title: "删除用户「" + name + "」？",
+    body: `<p>其全部设备与快照都会被删除，且不可恢复。</p>`,
+    actions: [
+      { label: "取消" },
+      { label: "删除", kind: "danger", onClick: async () => {
+        try {
+          await api("/api/admin/users/" + encodeURIComponent(name), { method: "DELETE" });
+          toast("已删除 " + name, "success");
+          loadUsers(); loadStats();
+        } catch (err) { toast("删除失败：" + err.message, "error"); }
+      }},
+    ],
+  });
 }
 
 async function createUser() {
@@ -344,29 +1088,12 @@ async function createUser() {
     });
     $("nmsg").className = "msg ok"; $("nmsg").textContent = "已创建";
     $("nu").value = ""; $("np").value = "";
+    toast("已创建用户", "success");
     loadUsers();
   } catch (e) { $("nmsg").className = "msg err"; $("nmsg").textContent = e.message; }
 }
 
-async function chpass(name) {
-  const p = prompt("为 " + name + " 设置新密码（至少 4 位）：");
-  if (!p) return;
-  try {
-    await api("/api/admin/users/" + encodeURIComponent(name) + "/passwd", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: p }),
-    });
-    alert("已修改（该用户的所有登录令牌已失效）");
-  } catch (e) { alert(e.message); }
-}
-
-async function deluser(name) {
-  if (!confirm("删除用户 " + name + "？其全部设备与快照都会被删除。")) return;
-  try { await api("/api/admin/users/" + encodeURIComponent(name), { method: "DELETE" }); loadUsers(); }
-  catch (e) { alert(e.message); }
-}
-
+// ---------- 改管理员密码 ----------
 async function changePass() {
   $("pmsg").className = "msg"; $("pmsg").textContent = "";
   try {
@@ -378,30 +1105,41 @@ async function changePass() {
     $("pmsg").className = "msg ok";
     $("pmsg").textContent = "已修改，全部会话已失效，请重新登录";
     $("op").value = ""; $("npw").value = "";
+    toast("管理员密码已修改，即将退出登录…", "success");
     setTimeout(logout, 1200);
   } catch (e) { $("pmsg").className = "msg err"; $("pmsg").textContent = e.message; }
 }
 
+// ---------- 同步记录 ----------
 async function loadRecords() {
-  $("rec-body").innerHTML = '<div class="empty">加载中…</div>';
+  const body = $("rec-body");
+  body.innerHTML = '<div class="empty">加载中…</div>';
+  currentPage.records = 0;
   try {
     const { devices } = await api("/api/admin/devices");
     const rows = devices.filter((d) => d.last_sync_at || d.file_count > 0);
-    if (!rows.length) { $("rec-body").innerHTML = '<div class="empty">暂无同步记录</div>'; return; }
-    $("rec-body").innerHTML = `<table><tr>
-      <th>账号</th><th>设备</th><th>最近同步</th>
-      <th class="num">快照数</th><th class="num">占用</th></tr>` +
-      rows.map((d) => `<tr>
-        <td>${esc(d.account)}</td>
-        <td><code>${esc(d.installation_id)}</code></td>
-        <td>${fmtTime(d.last_sync_at)}</td>
-        <td class="num">${d.file_count}</td>
-        <td class="num">${fmtSize(d.total_size)}</td>
-      </tr>`).join("") + "</table>";
-  } catch (e) { if (e.message) $("rec-body").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+    if (!rows.length) { body.innerHTML = renderEmpty("records"); return; }
+    const p = paginate(rows, "records");
+    body.innerHTML = `<div class="grid-cards">` + p.slice.map((d) => `
+      <div class="cell-card">
+        <div class="cell-head">
+          <span class="cell-title">${esc(d.account)}</span>
+          <span class="tag">${d.file_count} 快照</span>
+        </div>
+        <div class="cell-sub"><code>${esc(d.installation_id)}</code></div>
+        <div class="cell-meta">
+          <span class="k">最近同步</span><span class="v">${esc(fmtTime(d.last_sync_at))}</span>
+          <span class="k">占用</span><span class="v">${esc(fmtSize(d.total_size))}</span>
+        </div>
+      </div>`).join("") + `</div>` + renderPager(p, "records");
+    bindPager(body, "records", loadRecords);
+  } catch (e) {
+    body.innerHTML = renderEmpty("records");
+    toast("加载同步记录失败：" + e.message, "error");
+  }
 }
 
-// 登录框回车提交
+// ---------- 三个 Enter 键提交（保留） ----------
 $("lp").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
 $("lu").addEventListener("keydown", (e) => { if (e.key === "Enter") $("lp").focus(); });
 $("ih").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doInit(); } });

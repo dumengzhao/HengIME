@@ -298,6 +298,37 @@ pub async fn change_password(
     Json(json!({"ok": true})).into_response()
 }
 
+/// GET /api/admin/stats —— 管理页顶栏实时状态聚合。
+///
+/// 在 admin_auth 中间件之后：未初始化会被前置中间件以 409 拦下。
+/// 单 SQL 聚合（`db::admin_stats`），4 个数零写入、零迁移。
+pub async fn admin_stats(State(state): State<AppState>) -> Response {
+    let now = crate::db::now_unix();
+    let stats = {
+        let conn = state.db.lock().unwrap_or_else(|e| e.into_inner());
+        match crate::db::admin_stats(&conn, now) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("stats 失败：{e}")})),
+                )
+                    .into_response();
+            }
+        }
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "total_devices": stats.total_devices,
+            "online_devices": stats.online_devices,
+            "active_24h": stats.active_24h,
+            "total_size_bytes": stats.total_size_bytes,
+        })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod init_tests {
     use super::*;

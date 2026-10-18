@@ -441,6 +441,41 @@ pub fn snapshot_stats(conn: &Connection, account_id: i64) -> rusqlite::Result<Ve
     rows.collect()
 }
 
+/// 管理页顶栏实时状态（`GET /api/admin/stats`）。
+///
+/// 4 个数全在 device + snapshot 表上单 SQL 聚合：
+/// - total_devices   总注册数
+/// - online_devices  last_seen_at >= now - 5 min
+/// - active_24h      last_sync_at >= now - 24 h
+/// - total_size_bytes 所有设备快照本体的累计字节（disk usage，**不是** 24h delta）
+///
+/// "在线"阈值 5 分钟硬编码于前端：与 `last_seen_at` 语义对齐（device 注册
+/// 或上传快照时刷新），由前端把"5 分钟内有联系"映射成"在线"。SYNC-PLAN
+/// §5 明确不存同步历史流水，故不能给真"24h 流量"——用"24h 活跃设备数" +
+/// "累计占用"两数代替，labels 诚实。
+pub struct AdminStats {
+    pub total_devices: i64,
+    pub online_devices: i64,
+    pub active_24h: i64,
+    pub total_size_bytes: i64,
+}
+
+pub fn admin_stats(conn: &Connection, now: i64) -> rusqlite::Result<AdminStats> {
+    // last_seen_at 与 last_sync_at 都是 unix 秒（0 = 从未联系 / 从未同步）。
+    // 累计字节是 snapshot.size 的总合（device 表无 total_size 列）。
+    // 用标量子查询拿累计字节，避免与 device JOIN 时按 device 数倍增。
+    let (total, online, active, bytes): (i64, i64, i64, i64) = conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN last_seen_at >= ?1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN last_sync_at >= ?2 THEN 1 ELSE 0 END), 0),
+                COALESCE((SELECT SUM(size) FROM snapshot), 0)
+         FROM device",
+        [now - 300, now - 86_400],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    Ok(AdminStats { total_devices: total, online_devices: online, active_24h: active, total_size_bytes: bytes })
+}
+
 // ---- 磁盘文件路径 ----
 
 /// 快照本体落点：`<data_dir>/<account_id>/<installation_id>/<file_name>`。

@@ -299,6 +299,7 @@ Rust + axum + SQLite，单二进制，与 core、ClipSync 服务端技术栈一�
 | 设置页「同步」 | 完成 | 设置窗第 6 页（页号 0-7）：状态卡、开关、立即同步、退出登录；账号录入走 CLI（设置窗无键盘输入通路），状态由主循环 500ms 轮询刷新 |
 | 服务端 | 完成 | `server/`：axum + rusqlite(bundled) + argon2id(PHC) + 自实现 JWT(HS256)，lib/bin 双目标；管理端口令模式同 ClipSync（admin.json + init + 退避 + 改密废旧） |
 | 测试 | 完成 | core sync 11 项 + ui 7 项单测；服务端 17 项单测 + 4 项集成测试；冒烟覆盖 id 接管、登录落盘、上传、第二设备收发、词条级跨设备合并 |
+| 管理页重设计 | 完成 | 设计 token 化、暗色跟随系统、4 套内联 SVG 空态、自定义 modal/toast、表格分页（默认 50/页）、窄屏表格转卡片；顶栏状态聚合 `GET /api/admin/stats`（单 SQL 聚合 4 个数，零写入零迁移）。单文件 HTML，`include_str!` 进二进制，约束（无构建链、无外部 CDN、所有现有 DOM id/字面量）保留 |
 
 `heng_sync_user_data` 已存在（见 [ARCHITECTURE.md](ARCHITECTURE.md) §8），
 作为本方案的导出环节保留；新增导出统一走 `sync_user_data_blocking`

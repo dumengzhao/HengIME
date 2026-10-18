@@ -54,6 +54,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/devices", get(admin_list_devices))
         .route("/api/admin/devices/{installation_id}", delete(admin_unbind_device))
         .route("/api/admin/password", post(admin::change_password))
+        .route("/api/admin/stats", get(admin::admin_stats))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin::admin_auth,
