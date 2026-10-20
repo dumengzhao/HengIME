@@ -230,6 +230,12 @@ impl Engine {
             id,
             closed: false,
         })
+        .inspect(|_| {
+            // 事件触发（§6.1 拉取侧）：会话创建 = 用户开始在这个设备上输入，
+            // 正是"需要别人词库"的时刻。钩子内部自带间隔闸与未配置短路，
+            // 轻拉取在后台线程执行且不碰 librime，对本调用零阻塞。
+            crate::sync::notify_session_started();
+        })
     }
 
     /// 直接销毁一个 librime 会话（供会话注册表使用，不经过 [`Session`]）。
@@ -347,6 +353,12 @@ impl Engine {
             }
             let text = cstr_to_string(commit.text).unwrap_or_default();
             free_commit(&mut commit);
+            // 事件触发（§6.1 上传侧）：本方法是所有上屏路径（按键上屏 /
+            // UI 点选 / CLI）的唯一汇合点，在这里按上屏字数累计触发信号。
+            // 钩子内部热路径只有一次原子加，未配置/停用时零开销。
+            if !text.is_empty() {
+                crate::sync::record_commit(text.chars().count());
+            }
             Ok(text)
         }
     }

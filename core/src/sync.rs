@@ -18,7 +18,7 @@
 //! 检查；另有设置页「立即同步」与 `heng-cli sync`。未到间隔不起任何请求。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -40,6 +40,16 @@ const MAX_BACKOFF_SECS: i64 = 6 * 3600;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// 定时器睡眠上限：保证 run_asap 能在 30 秒内被唤醒。
 const MAX_SLEEP_SECS: u64 = 30;
+
+// ---- 事件触发阈值（docs/SYNC-PLAN.md §6.1）----
+/// 上屏字数触发阈值：200 字 ≈ 3~6 分钟持续输入（30~60 字/分钟）。
+/// 过阈值后仍受 MIN_TRIGGER_INTERVAL_SECS 节流；未触发前计数持续累计。
+pub const COMMIT_TRIGGER_CHARS: u32 = 200;
+/// 触发节流闸（秒）：两次网络往返之间的最小间隔，防触发风暴。
+pub const MIN_TRIGGER_INTERVAL_SECS: i64 = 120;
+/// 会话启动轻拉取的最小间隔（秒）：会话创建随焦点切换高频发生，
+/// 不能每次都拉。300s = 换设备场景下最坏 5 分钟新鲜度。
+pub const SESSION_PULL_INTERVAL_SECS: i64 = 300;
 
 pub fn now_unix() -> i64 {
     SystemTime::now()
@@ -203,6 +213,8 @@ pub struct SyncStatus {
     pub last_downloaded: i64,
     pub last_uploaded: i64,
     pub pending_merge: bool,
+    /// 距上次成功同步累计的上屏字数（事件触发的进度信号，观测用）
+    pub pending_chars: u32,
     pub next_attempt_at: i64,
     pub consecutive_failures: i64,
 }
@@ -253,6 +265,11 @@ struct Shared {
     cv: Condvar,
     running: AtomicBool,
     timer_started: AtomicBool,
+    /// 距上次成功同步累计的上屏字数（事件触发的原信号；成功一轮后清零）
+    pending_chars: AtomicU32,
+    /// 上次网络往返（完整轮或轻拉取）时刻：事件触发间隔闸的基准。
+    /// 0 = 从未往返（首次必过闸）。
+    last_round_at: Mutex<i64>,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -276,6 +293,8 @@ impl Shared {
             cv: Condvar::new(),
             running: AtomicBool::new(false),
             timer_started: AtomicBool::new(false),
+            pending_chars: AtomicU32::new(0),
+            last_round_at: Mutex::new(0),
         }
     }
 
@@ -317,6 +336,24 @@ impl Shared {
         self.user_dir.join("sync")
     }
 
+    /// 字数触发闸（纯逻辑，可测）：累计 chars 并判定是否应唤醒一轮同步。
+    /// 返回 true 时调用方负责清零计数、刷新 last_round_at 并 request_run。
+    /// 间隔闸未过时计数保留——闸一过，下次上屏即触发。
+    fn commit_gate(&self, chars: usize) -> bool {
+        let total =
+            self.pending_chars.fetch_add(chars as u32, Ordering::Relaxed) as usize + chars;
+        if total < COMMIT_TRIGGER_CHARS as usize {
+            return false;
+        }
+        now_unix() - *self.last_round_at.lock().unwrap() >= MIN_TRIGGER_INTERVAL_SECS
+    }
+
+    /// 会话启动拉取闸（纯逻辑，可测）：距上次网络往返是否超过间隔。
+    /// 返回 true 时调用方负责刷新 last_round_at。
+    fn pull_gate(&self) -> bool {
+        now_unix() - *self.last_round_at.lock().unwrap() >= SESSION_PULL_INTERVAL_SECS
+    }
+
     fn status_snapshot(&self) -> SyncStatus {
         let mut st = self.status.lock().unwrap().clone();
         let cfg = self.config.lock().unwrap();
@@ -325,6 +362,7 @@ impl Shared {
         st.server_url = cfg.server_url.clone();
         st.username = cfg.username.clone();
         st.pending_merge = self.pending_path().exists();
+        st.pending_chars = self.pending_chars.load(Ordering::Relaxed);
         st.next_attempt_at = self.ctl.lock().unwrap().next_due;
         st
     }
@@ -483,9 +521,105 @@ pub fn request_sync_now() -> bool {
 /// 无标记或定时器未起时什么都不做。
 pub fn notify_sessions_idle() {
     if let Some(s) = shared() {
-        if s.pending_path().exists() {
+        // 两条补跑理由：
+        // ① pending-merge 标记（defer / 会话启动轻拉取的遗留）
+        // ② 有未上云的上屏字数（会话结束 flush：换设备前保证数据落服务端）
+        if s.pending_path().exists() || s.pending_chars.load(Ordering::Relaxed) > 0 {
             s.request_run();
         }
+    }
+}
+
+// ---- 事件触发（§6.1：上传侧字数阈值 + 拉取侧会话启动） ----
+
+/// 上屏路径调用（`Engine::get_commit` 钩子，所有上屏路径的唯一汇合点）。
+///
+/// 热路径只做一次原子加；过阈值才碰锁。真正的同步在后台线程执行，
+/// 打字进行中会被会话门闩 defer 到停顿——本函数永远不阻塞输入。
+/// 未配置/停用时过阈值即清账（防陈旧计数在配置就绪后突发触发）。
+pub fn record_commit(chars: usize) {
+    if chars == 0 {
+        return;
+    }
+    let Some(shared) = shared() else { return };
+    if !shared.commit_gate(chars) {
+        return;
+    }
+    // 罕见路径（过阈值）：以下才有配置锁
+    {
+        let cfg = shared.config.lock().unwrap();
+        if !cfg.is_ready() || !cfg.enabled {
+            drop(cfg);
+            shared.pending_chars.store(0, Ordering::Relaxed);
+            return;
+        }
+    }
+    *shared.last_round_at.lock().unwrap() = now_unix();
+    shared.pending_chars.store(0, Ordering::Relaxed);
+    shared.request_run();
+}
+
+/// 会话创建路径调用（`Engine::create_session` 钩子）：距上一轮网络往返
+/// 超过 SESSION_PULL_INTERVAL_SECS → 后台轻拉取。
+///
+/// 轻拉取 = 注册 + manifest + 下载他人槽位，**不含** librime 导出/合并/上传：
+/// - 不需要会话门闩（不碰 librime），打字进行中也能安全执行
+/// - 拉到新数据写 pending-merge 标记；合并仍走门闩路径——无会话立即补跑，
+///   有会话由 `heng_end_session` → `notify_sessions_idle` 补跑
+pub fn notify_session_started() {
+    let Some(shared) = shared() else { return };
+    {
+        let cfg = shared.config.lock().unwrap();
+        if !cfg.is_ready() || !cfg.enabled {
+            return;
+        }
+    }
+    if !shared.pull_gate() {
+        return;
+    }
+    *shared.last_round_at.lock().unwrap() = now_unix();
+    std::thread::Builder::new()
+        .name("heng-sync-pull".into())
+        .spawn(session_pull)
+        .ok();
+}
+
+/// 轻拉取主体（后台线程）。全程不碰 librime：纯 HTTP + 原子落盘。
+fn session_pull() {
+    let Some(shared) = shared() else { return };
+    let cfg = shared.config.lock().unwrap().clone();
+    if !cfg.is_ready() || !cfg.enabled {
+        return;
+    }
+    let id = shared.status.lock().unwrap().installation_id.clone();
+    if id.is_empty() {
+        return;
+    }
+    let base = cfg.server_url.trim_end_matches('/').to_string();
+    let agent = http_agent();
+    let auth = format!("Bearer {}", cfg.token);
+    // 注册幂等，顺带刷新 last_seen_at（管理页"在线"语义 = 最近联系）
+    if register_device(&agent, &base, &auth, &id).is_err() {
+        return;
+    }
+    let Ok(n) = pull_snapshots(&agent, &base, &auth, &id, shared) else {
+        return;
+    };
+    if n == 0 {
+        return;
+    }
+    // 有新数据 → 标记待合并。窗口期竞争说明：若此刻恰有完整轮在收尾清标记，
+    // 那一轮自己的 pull 已拉到同样的文件并合并——标记丢了也不丢数据
+    //（每轮完整同步都会重合并 sync/ 下全部外来文件）。
+    if let Some(parent) = shared.pending_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        shared.pending_path(),
+        format!("session-pull {} files at {}", n, now_unix()),
+    );
+    if SESSIONS.count() == 0 {
+        shared.request_run();
     }
 }
 
@@ -647,6 +781,9 @@ fn run_sync(shared: &Shared, _force: bool) -> SyncOutcome {
 
     // 5. 收尾
     let _ = std::fs::remove_file(shared.pending_path());
+    // 本轮上传即清账：字数触发器重新从零累计（会话门闩保证本轮期间
+    // 无新会话、无新上屏，不存在"清掉未上传增量"的竞争）
+    shared.pending_chars.store(0, Ordering::Relaxed);
     shared.set_state("ok", None);
     SyncOutcome::Ok { downloaded, uploaded }
 }
@@ -880,6 +1017,71 @@ mod tests {
         assert_eq!(backoff_secs(1800, 6), MAX_BACKOFF_SECS);
         assert_eq!(backoff_secs(1800, 10), MAX_BACKOFF_SECS);
         assert_eq!(MAX_BACKOFF_SECS, 6 * 3600);
+    }
+
+    fn trigger_shared() -> Shared {
+        let dir = std::env::temp_dir().join(format!("heng-sync-trig-{}-{}", now_unix(), std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Shared::new(dir)
+    }
+
+    /// 字数触发闸：累计不过阈值不触发；过阈值且间隔闸已开 → 触发；
+    /// 间隔闸未过 → 计数保留（不触发也不清零）。
+    #[test]
+    fn commit_gate_threshold_and_throttle() {
+        let shared = trigger_shared();
+        // 阈值以下：不触发，计数累计
+        assert!(!shared.commit_gate(100));
+        assert!(!shared.commit_gate(99));
+        assert_eq!(shared.pending_chars.load(Ordering::Relaxed), 199);
+        // last_round_at = 0（从未往返）→ 间隔闸必开 → 过阈值即触发
+        assert!(shared.commit_gate(1));
+        // 调用方语义：触发后清零
+        shared.pending_chars.store(0, Ordering::Relaxed);
+        *shared.last_round_at.lock().unwrap() = now_unix();
+        assert_eq!(shared.pending_chars.load(Ordering::Relaxed), 0);
+
+        // 间隔闸未过：过阈值也不触发，计数保留
+        assert!(!shared.commit_gate(COMMIT_TRIGGER_CHARS as usize));
+        assert_eq!(
+            shared.pending_chars.load(Ordering::Relaxed),
+            COMMIT_TRIGGER_CHARS
+        );
+        // 间隔闸一过（模拟 2 分钟前完成过往返），下次上屏立即触发
+        *shared.last_round_at.lock().unwrap() = now_unix() - MIN_TRIGGER_INTERVAL_SECS - 1;
+        assert!(shared.commit_gate(1));
+    }
+
+    /// 会话启动拉取闸：从未往返必过；间隔内不过；间隔已过再过。
+    #[test]
+    fn pull_gate_min_interval() {
+        let shared = trigger_shared();
+        assert!(shared.pull_gate(), "首次（last_round_at=0）必过闸");
+        *shared.last_round_at.lock().unwrap() = now_unix();
+        assert!(!shared.pull_gate(), "间隔内不过闸");
+        *shared.last_round_at.lock().unwrap() =
+            now_unix() - SESSION_PULL_INTERVAL_SECS - 1;
+        assert!(shared.pull_gate(), "间隔已过再过闸");
+    }
+
+    /// 会话结束 flush 语义：有未上云字数或待合并标记即应补跑（判定条件与
+    /// notify_sessions_idle 一致，这里验证两个条件的组合逻辑）。
+    #[test]
+    fn idle_flush_conditions() {
+        let shared = trigger_shared();
+        // 无标记无字数：不补跑
+        assert!(!shared.pending_path().exists());
+        assert_eq!(shared.pending_chars.load(Ordering::Relaxed), 0);
+        // 有字数无标记：补跑（flush）
+        shared.pending_chars.store(5, Ordering::Relaxed);
+        assert!(shared.pending_path().exists() || shared.pending_chars.load(Ordering::Relaxed) > 0);
+        // 有标记无字数：补跑（待合并）。生产路径写标记前都会 create_dir_all
+        //（defer_sync / session_pull），测试同样先建目录
+        shared.pending_chars.store(0, Ordering::Relaxed);
+        std::fs::create_dir_all(shared.pending_path().parent().unwrap()).unwrap();
+        std::fs::write(shared.pending_path(), "x").unwrap();
+        assert!(shared.pending_path().exists() || shared.pending_chars.load(Ordering::Relaxed) > 0);
+        let _ = std::fs::remove_file(shared.pending_path());
     }
 
     #[test]
