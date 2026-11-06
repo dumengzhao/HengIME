@@ -1,3 +1,22 @@
+diff --git a/Makefile b/Makefile
+index 15589be..b7186c4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -99,6 +99,14 @@ endif
+ 
+ BUILD_SETTINGS += COMPILER_INDEX_STORE_ENABLE=YES
+ 
++# 用固定的自签证书签名，而不是默认的 ad-hoc（"Sign to Run Locally"）。
++# ad-hoc 签名的 CDHash 每次编译都变，系统会当成另一个 app，
++# 「输入监控 / 辅助功能」的 TCC 授权随之失效 —— CGEventTap 直接拿不到权限。
++# 固定证书的 designated requirement 不含 CDHash，授权一次即可长期有效。
++# 可用 `security find-identity -v -p codesigning` 查看本机身份。
++HENG_SIGN_IDENTITY ?= ClipSync Dev
++BUILD_SETTINGS += CODE_SIGN_IDENTITY="$(HENG_SIGN_IDENTITY)" CODE_SIGNING_REQUIRED=YES CODE_SIGNING_ALLOWED=YES
++
+ release: $(DEPS_CHECK)
+ 	mkdir -p $(DERIVED_DATA_PATH)
+ 	bash package/add_data_files
 diff --git a/Squirrel.xcodeproj/project.pbxproj b/Squirrel.xcodeproj/project.pbxproj
 index d805aa7..0f7eaaa 100644
 --- a/Squirrel.xcodeproj/project.pbxproj
@@ -154,10 +173,10 @@ index 4ce2c7b..ae02e11 100644
 +}
 diff --git a/sources/HengWindowRenderer.swift b/sources/HengWindowRenderer.swift
 new file mode 100644
-index 0000000..d217224
+index 0000000..942b207
 --- /dev/null
 +++ b/sources/HengWindowRenderer.swift
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,613 @@
 +//
 +//  HengWindowRenderer.swift
 +//  Squirrel
@@ -479,11 +498,17 @@ index 0000000..d217224
 +      ? .borderless
 +      : .nonactivatingPanel
 +
-+    let panel = NSPanel(
-+      contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
-+      styleMask: style,
-+      backing: .buffered,
-+      defer: false)
++    let panel = (kind == .settings)
++      ? NSPanel(
++          contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
++          styleMask: style,
++          backing: .buffered,
++          defer: false)
++      : HengOverlayPanel(
++          contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
++          styleMask: style,
++          backing: .buffered,
++          defer: false)
 +    // 透明三件套：不设这些，圆角外就是系统灰底方块
 +    panel.isOpaque = false
 +    panel.backgroundColor = .clear
@@ -753,15 +778,69 @@ index 0000000..d217224
 +    }
 +  }
 +}
-\ No newline at end of file
++/// 候选窗/字母区专用面板：拒绝成为 key / main 窗口。
++///
++/// CGShieldingWindowLevel 的窗口一旦拿到 key 状态，宿主应用的
++/// NSTextInputContext 就再也收不到键盘事件（Qt / QtWebEngine 尤其明显），
++/// 表现为「打出第一个字、候选窗出现之后整个键盘失效」，连 ⌘Z 都没反应
++/// —— 键全被这个看不见焦点的面板吃掉了。
++/// 点击选词不依赖 key 状态（nonactivatingPanel 本来就能不激活收点击），
++/// 所以这里直接封死。
++final class HengOverlayPanel: NSPanel {
++  override var canBecomeKey: Bool { false }
++  override var canBecomeMain: Bool { false }
++}
 diff --git a/sources/SquirrelApplicationDelegate.swift b/sources/SquirrelApplicationDelegate.swift
-index 896d8d2..abb9e6b 100644
+index 896d8d2..0ac1fbc 100644
 --- a/sources/SquirrelApplicationDelegate.swift
 +++ b/sources/SquirrelApplicationDelegate.swift
-@@ -145,6 +145,12 @@ final class SquirrelApplicationDelegate: NSObject, NSApplicationDelegate, SPUSta
+@@ -143,8 +143,55 @@ final class SquirrelApplicationDelegate: NSObject, NSApplicationDelegate, SPUSta
+     createDirIfNotExist(path: SquirrelApp.logDir)
+   }
  
++  /// 系统级键盘事件捕获（CGEventTap）。**只监听，不干预。**
++  ///
++  /// 曾试过 `.defaultTap` + 吞掉 Cmd+F 再重投（`CGEvent.post`），结论是：
++  /// 1. Cmd+F 依旧弹不出查找框 —— 宿主认的显然不是这份事件；
++  /// 2. 装上可改写 tap 后 Cmd+C / Cmd+X 全部失效 —— tap 让事件流多绕一跳，
++  ///    ⌘ 的 flagsChanged 比 keyDown 晚到，组合态没来得及清，投递门被挡。
++  /// 净效果是负的，已回退为只读监听。辅助功能授权保留但不再使用。
++  private var eventTap: CFMachPort?
++
++  /// 当前焦点位置 IMK 是否会把按键投给 handle()。
++  /// nil = 尚未判定（下一键延迟 12ms 探测一次）；true/false = 已判定。
++  /// HBuilderX 原生区域为 true、代码区（QtWebEngine）为 false。
++  /// 判定结果缓存，后续按键同步处理 —— 延迟执行会让宿主的输入上下文
++  /// 发生漂移，insertText 会被丢弃（表现为「按很多次才中一次」）。
++  static var imkWorks: Bool?
++
++  private func probeEventTapAccess() {
++    let listen = CGPreflightListenEventAccess()
++    let post = CGPreflightPostEventAccess()
++    let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
++    var created = false
++    if let tap = CGEvent.tapCreate(
++      tap: .cgSessionEventTap,
++      place: .headInsertEventTap,
++      options: .listenOnly,
++      eventsOfInterest: mask,
++      callback: { _, _, event, _ in
++        Unmanaged.passUnretained(event)
++      },
++      userInfo: nil
++    ) {
++      created = true
++      let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
++      CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
++      CGEvent.tapEnable(tap: tap, enable: true)
++      eventTap = tap
++    }
++    HengWindowRenderer.log("TAP listenOnly listen=\(listen) post=\(post) created=\(created)")
++  }
++
    func startRime(fullCheck: Bool) {
      print("Initializing heng-core...")
++    probeEventTapAccess()
 +    // M-P4：注册窗口后端。core 只做slint 渲染，窗口贴帧由外壳在主线程执行。
 +    // 必须在 heng_create 之前—— core 启动 UI 线程后会立刻回调要窗口。
 +    let regRc = HengWindowRenderer.shared.register()
@@ -772,10 +851,10 @@ index 896d8d2..abb9e6b 100644
      let sharedPath = Bundle.main.sharedSupportPath ?? ""
      let userPath = SquirrelApp.userDir.path
 diff --git a/sources/SquirrelInputController.swift b/sources/SquirrelInputController.swift
-index f09e8ab..ce95855 100644
+index f09e8ab..ade642f 100644
 --- a/sources/SquirrelInputController.swift
 +++ b/sources/SquirrelInputController.swift
-@@ -15,8 +15,25 @@ final class SquirrelInputController: IMKInputController {
+@@ -15,14 +15,149 @@ final class SquirrelInputController: IMKInputController {
    private static let keyRollOver = 50
    private static var unknownAppCnt: UInt = 0
  
@@ -796,12 +875,136 @@ index f09e8ab..ce95855 100644
 +  }
 +
    private weak var client: IMKTextInput?
++  /// CGEventTap 回调里需要拿到当前 controller 才能用 IMK client 上屏。
++  /// tap 回调是 C 函数指针，捕获不到实例，只能走这个静态弱引用。
++  static weak var lastActive: SquirrelInputController?
++  /// IMK 最近一次把按键投给 handle() 的时间（monotonic）。tap 用它判断
++  /// 「这个位置 IMK 到底转不转发按键」——HBuilderX 原生区域转发、代码区
++  /// （QtWebEngine）不转发，只有后者才需要 tap 接管。
++  static var lastHandleTime: TimeInterval = 0
++
++  /// tap 接管通道：走与 handle() 相同的 core 处理流程，但上屏不用 marked text。
++  /// 仅在 IMK 未转发该键时由 CGEventTap 调用。
++  func tapHandleKey(keyCode: UInt16, flags: NSEvent.ModifierFlags, chars: String) {
++    guard session != 0, !chars.isEmpty, let char = chars.first else { return }
++    let rimeKeycode = SquirrelKeycode.osxKeycodeToRime(
++      keycode: keyCode, keychar: char,
++      shift: flags.contains(.shift), caps: flags.contains(.capsLock))
++    guard rimeKeycode != 0 else { return }
++    let rimeModifiers = SquirrelKeycode.osxModifiersToRime(modifiers: flags)
++    let handled = processKey(rimeKeycode, modifiers: rimeModifiers)
++    if !handled {
++      // core 不消费（英文模式 / 标点直通）：宿主自己也不会插入，
++      // 因为走不到 IMK。这里显式补上原字符。
++      // 注意不能先 rimeUpdate()：它会同步窗口状态、在组合串为空时
++      // 触发 hide 流程，扰动宿主的输入上下文，随后的 insertText 会丢。
++      if let client = client {
++        // 与 commit() 里 force_marked_text_for_direct_commit 同理：
++        // Qt 的 insertText 在 m_composingText 为空时走另一条路径，
++        // 连续插入相同内容会被吞（表现为「同一个字母只能出一个」）。
++        // 先建立一次 marked text 让它进入组合态，再 insertText 替换掉。
++        let attr = NSAttributedString(string: chars)
++        client.setMarkedText(
++          attr,
++          selectionRange: NSRange(location: chars.utf16.count, length: 0),
++          replacementRange: .empty)
++        client.insertText(chars, replacementRange: .empty)
++        HengWindowRenderer.log("TAP-PASS \(chars) marked+ok")
++      } else {
++        HengWindowRenderer.log("TAP-PASS \(chars) NO-CLIENT")
++      }
++    } else {
++      rimeUpdate()
++    }
++  }
++
++  /// 验证：代码区（IMK 不转发按键）能否通过 IMK client 直接上屏。
++  /// 只用于探针，成功后替换为真正的 rime 组字结果。
++  func tapProbeInsert(_ text: String) {
++    guard let client = client else {
++      HengWindowRenderer.log("TAP-INSERT no-client")
++      return
++    }
++    client.insertText(text, replacementRange: .empty)
++    HengWindowRenderer.log("TAP-INSERT \(text) via=\(type(of: client))")
++  }
++  /// 结束当前组合态（丢弃零宽占位，不落文档）。
++  ///
++  /// **必须用 setMarkedText("")，不能用 insertText("")。**
++  /// 实测（2026-11-06 探针）：`insertText("")` 是**空操作**。Qt 的
++  /// `-[QNSView insertText:replacementRange:]` 在 commitString 为空时直接
++  /// `return`，既不发 QInputMethodEvent 也不清 `m_composingText`。
++  /// 于是「清组合态」这件事从未真正发生：
++  ///     FLAG down mrk=0,1   ← ⌘ 按下时占位还在
++  ///     ENDC                ← 我们以为清了
++  ///     CMD   mrk=0,1       ← 0.84s 后再读，长度仍是 1
++  /// 后果是 QtWebEngine → Chromium 侧组合态长期挂着，编辑器 JS 把带
++  /// `isComposing` 的 keydown 一律忽略 —— Cmd+F / Cmd+S 这类**页面级**快捷键
++  /// 全部失效，而 Cmd+C/V/X/Z 走 Chromium 原生编辑命令所以看不出问题。
++  /// setMarkedText 是把 `m_composingText` 直接赋成空串，没有早退分支。
++  /// 空串不会在文档里留下任何东西。
++  private func endComposition(_ client: IMKTextInput?) {
++    guard let client else { return }
++    let before = client.markedRange()
++    client.setMarkedText(
++      NSAttributedString(string: ""),
++      selectionRange: NSRange(location: 0, length: 0),
++      replacementRange: .empty)
++    let after = client.markedRange()
++    HengWindowRenderer.log("ENDC mrk \(before.length)->\(after.length)")
++  }
++
++  /// HBuilderX：放零宽占位（维持 IME 转发）。
++  ///
++  /// **有选区时必须跳过。** QtWebEngine 收到带 preedit 的 QInputMethodEvent
++  /// 等于「开始一次组合」，Chromium 会用组合串替换当前选区 → 选中文本被删。
++  /// 表现就是 Cmd+C 复制完、松开 ⌘ 补占位的一瞬间变成「剪切」。
++  /// （Cmd+X 看不出问题是因为 Qt 已经先删了选区，轮到补占位时已无可替换。）
++  ///
++  /// 跳过不会卡住转发：下一个按键处理完（选区已被替换/清空）自然会补上。
++  /// HBuilderX：是否常驻零宽占位（维持 IME 转发）。
++  ///
++  /// **必须为 true。** 2026-11-06 再次验证：关掉后 HBuilderX 代码区连
++  /// keyDown 都不再交给输入法（日志里一个 KD 都没有，只剩 Shift 的
++  /// flagsChanged），字母/中文/快捷键全废。占位是 Qt 把按键交给我们的唯一开关。
++  /// 「不要给 HBuilderX 强开 no_marked_text」「不要再关占位」都已实测证伪，别再试。
++  private let hbPlaceholderEnabled = true
++
++  private func refreshPlaceHolder(_ client: IMKTextInput?) {
++    guard hbPlaceholderEnabled else { return }
++    guard let client, !placeHolderSuspended else { return }
++    let sel = client.selectedRange()
++    if sel.location != NSNotFound && sel.length > 0 {
++      HengWindowRenderer.log("PH skip sel=\(sel.location),\(sel.length)")
++      return
++    }
++    client.setMarkedText(
++      NSAttributedString(string: "\u{200B}"),
++      selectionRange: NSRange(location: 1, length: 0),
++      replacementRange: .empty)
++    HengWindowRenderer.log("PH set sel=\(sel.location),\(sel.length)")
++  }
++
    private var preedit: String = ""
 +  private var preeditDirty: Bool = false
++  /// HBuilderX：按住 ⌘ 期间临时撤掉续转发的零宽占位。
++  /// Qt 6.5.3 QNSView::handleKeyEvent 把快捷键识别关在
++  /// `if (m_composingText.isEmpty())` 里，占位常驻会让 Cmd+Z / Cmd+C
++  /// 根本进不了 QShortcutMap（表现就是「撤销没反应」）。
++  private var placeHolderSuspended = false
    private var selRange: NSRange = .empty
    private var caretPos: Int = 0
    private var lastModifiers: NSEvent.ModifierFlags = .init()
-@@ -30,6 +47,15 @@ final class SquirrelInputController: IMKInputController {
+   private var session: RimeSessionId = 0
+   private var schemaId: String = ""
+   private var inlinePreedit = false
++  /// app_options/<bundle>/no_marked_text：跳过 setMarkedText 会话
++  /// （HBuilderX 编辑器缺陷专用，见 show() 内注释）
++  private var noMarkedText = false
+   private var inlineCandidate = false
+   private var chordKeyCodes: [UInt32] = .init(repeating: 0, count: SquirrelInputController.keyRollOver)
+   private var chordModifiers: [UInt32] = .init(repeating: 0, count: SquirrelInputController.keyRollOver)
+@@ -30,10 +165,20 @@ final class SquirrelInputController: IMKInputController {
    private var chordTimer: Timer?
    private var chordDuration: TimeInterval = 0
    private var currentApp: String = ""
@@ -817,7 +1020,164 @@ index f09e8ab..ce95855 100644
  
    // swiftlint:disable:next cyclomatic_complexity
    override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
-@@ -222,6 +248,8 @@ final class SquirrelInputController: IMKInputController {
+     guard let event = event else { return false }
++    SquirrelInputController.lastHandleTime = ProcessInfo.processInfo.systemUptime
+     let modifiers = event.modifierFlags
+     let changes = lastModifiers.symmetricDifference(modifiers)
+ 
+@@ -55,6 +200,32 @@ final class SquirrelInputController: IMKInputController {
+ 
+     switch event.type {
+     case .flagsChanged:
++      // HBuilderX(QtWebEngine)：⌘ 组合键（Cmd+Z 撤销、Cmd+C/V、Cmd+S…）走的是
++      // QNSView::handleKeyEvent 里的 Shortcut 分支，而那道分支被
++      //     if (m_composingText.isEmpty()) { ...sendWindowSystemEvent... }
++      // 守在内层。我们为续 IME 转发常驻的零宽占位让它恒非空 → 组合键全废。
++      // 修饰键事件比 keyDown 先到，所以在 ⌘ 按下时撤占位、松开时放回，
++      // 命中那条 keyDown 就能走完整的快捷键路径。
++      // 组字中（preedit 非空）不动：此时 marked text 是真实上屏内容，撤了会丢显示。
++      if currentApp == "io.dcloud.HBuilderX" && preedit.isEmpty {
++        let cmdPressed = modifiers.contains(.command)
++        if cmdPressed && !placeHolderSuspended {
++          placeHolderSuspended = true
++          // 只有组合态真的非空才清。
++          // 空清会向 QtWebEngine 发一个「空 preedit」的 QInputMethodEvent，
++          // Chromium 侧会把它当成一次 IME 组合的开始/结束，污染输入状态；
++          // 系统输入法从不发这种空事件 —— 这是两者唯一的差别。
++          let mrk = client?.markedRange() ?? NSRange(location: NSNotFound, length: 0)
++          HengWindowRenderer.log("FLAG down mrk=\(mrk.location),\(mrk.length)")
++          if mrk.length > 0 {
++            endComposition(client)
++          }
++        } else if !cmdPressed && placeHolderSuspended {
++          placeHolderSuspended = false
++          refreshPlaceHolder(client)
++        }
++      }
++
+       if lastModifiers == modifiers {
+         handled = true
+         break
+@@ -96,8 +267,58 @@ final class SquirrelInputController: IMKInputController {
+       rimeUpdate()
+ 
+     case .keyDown:
++      let dbgChars = event.charactersIgnoringModifiers ?? ""
++      HengWindowRenderer.log("KD kc=\(event.keyCode) ch=\(dbgChars) m=\(modifiers.rawValue) pre=\(preedit)")
+       // Let client apps handle Command shortcuts.
+       if modifiers.contains(.command) {
++        if currentApp == "io.dcloud.HBuilderX" {
++          // 同样只在真有组合态时才清，避免发出无意义的空组合事件。
++          let mrk = client?.markedRange() ?? NSRange(location: NSNotFound, length: 0)
++          let sel = client?.selectedRange() ?? NSRange(location: NSNotFound, length: 0)
++          HengWindowRenderer.log("CMD mrk=\(mrk.location),\(mrk.length) sel=\(sel.location),\(sel.length)")
++          if mrk.length > 0 {
++            endComposition(client)
++          }
++        }
++        break
++      }
++
++      // HBuilderX(QtWebEngine)：回车/退格/Tab/方向键这类控制键必须交回宿主自己
++      // 执行（换行、删字、移光标）。用 insertText 硬插只会把 \r、\b、\u{1B}
++      // 这类控制码写进文档 —— 编辑器把它们渲染成「BS」这种占位符号，复制出去
++      // 又不可见，正是本 bug 的来历。
++      //
++      // 依据 HBuilderX 自带 Qt 6.5.3 源码（qnsview_keys.mm）：按键要真正投给
++      // Qt，必须过 handleKeyEvent 末尾这道门
++      //     if (m_sendKeyEvent && m_composingText.isEmpty()) { ...send... }
++      // 而我们为续 IME 转发放的零宽占位让 m_composingText 恒非空 → 控制键
++      // 永远到不了宿主。清除必须发生在 handleEvent 返回**之前**（同一调用栈）：
++      // 异步延后清无效，Qt 那一行早就判完了。
++      // 用 setMarkedText("") 而不是 unmarkText：前者在 Qt 侧只发一个空 preedit
++      // 的 QInputMethodEvent、不带 commitString，占位被丢弃而不落进文档；
++      // unmarkText 会把 m_composingText 当 commitString 提交。
++      // preedit 非空说明 core 正在组字，此时控制键要交给 rime（回车=上屏），不能拦。
++      // 判定「不该当文本插入的键」：控制码（回车 \r、退格 \u{7F}、Tab \t、
++      // Esc \u{1B}、小键盘回车 \u{3}）与 macOS 功能键私用区码点
++      // （0xF700–0xF8FF：方向键 / F1-F35 / PageUp / Home…）。
++      // 比写死 keyCode 表稳：键盘布局、Fn 层、外接键盘都覆盖得到。
++      let rawChars = event.charactersIgnoringModifiers ?? ""
++      // 空串也必须算「非文本键」：Qt 下 Esc 的 charactersIgnoringModifiers 就是
++      // 空的（实测日志 `KD kc=53 ch=`），只按「含控制码」判定会漏掉它，
++      // 于是掉进后面的英文直通分支，把 \u{1B} 插进文档 —— 编辑器把它渲染成
++      // 「ESC」这样的占位字样，复制出去又不可见。回车打「BS」是同一个坑。
++      let isNonTextKey = rawChars.isEmpty || rawChars.unicodeScalars.contains {
++        $0.value < 0x20 || $0.value == 0x7F || (0xF700...0xF8FF).contains($0.value)
++      }
++      if currentApp == "io.dcloud.HBuilderX" && preedit.isEmpty && isNonTextKey {
++        endComposition(client)
++        // 宿主处理完这一键就把占位放回去，否则下一个字母退回「只能打一个」。
++        // 用下一轮 runloop 而不是定时器：此时 keyDown 整条调用栈已退出，
++        // 投递已完成，恢复占位不会干扰本键。
++        DispatchQueue.main.async { [weak self] in
++          guard let self, self.currentApp == "io.dcloud.HBuilderX" else { return }
++          self.refreshPlaceHolder(self.client)
++        }
+         break
+       }
+ 
+@@ -116,6 +337,25 @@ final class SquirrelInputController: IMKInputController {
+           let rimeModifiers = SquirrelKeycode.osxModifiersToRime(modifiers: modifiers)
+           handled = processKey(rimeKeycode, modifiers: rimeModifiers)
+           rimeUpdate()
++          // HBuilderX(QtWebEngine)：我们为维持 IME 转发放了零宽占位，Qt 因此
++          // 认为「正在组合」，core 不消费时它也不会自己插字符（QNSView 只在
++          // m_composingText 为空时才按普通键盘事件处理）。这里补上该字符。
++          // 依 Qt 源码（qnsview_complextext.mm / qnsview_keys.mm）：insertText
++          // 在组合态非空时插入一次；若 handle() 返回 false，Qt 还会把
++          // m_sendKeyEvent 置回 true 再插一次 —— 所以补完必须置 handled=true。
++          // 插完立刻重新占位，把「组合中」状态续上，否则下一个键不再转发。
++          if !handled && currentApp == "io.dcloud.HBuilderX" {
++            // 组合态下按 Esc / 回车等 core 不消费的键，绝不能走 insertText，
++            // 否则控制码照样落进文档（isNonTextKey 的定义见上面 keyDown 开头）。
++            let printable = !(keyChars ?? "").isEmpty && !(keyChars ?? "").unicodeScalars.contains {
++              $0.value < 0x20 || $0.value == 0x7F || (0xF700...0xF8FF).contains($0.value)
++            }
++            if printable {
++              client?.insertText(keyChars ?? "", replacementRange: .empty)
++            }
++            refreshPlaceHolder(client)
++            handled = true
++          }
+         }
+       }
+ 
+@@ -163,7 +403,10 @@ final class SquirrelInputController: IMKInputController {
+   }
+ 
+   override func recognizedEvents(_ sender: Any!) -> Int {
+-    return Int(NSEvent.EventTypeMask.Element(arrayLiteral: .keyDown, .flagsChanged).rawValue)
++    // keyDown + flagsChanged，与上游一致。声明里不要带鼠标事件：
++    // 那等于告诉 IMK「本输入法要处理鼠标」，宿主会据此改变会话策略。
++    let mask = NSEvent.EventTypeMask.Element(arrayLiteral: .keyDown, .flagsChanged)
++    return Int(mask.rawValue)
+   }
+ 
+   // 方向键不走 handle(event)：client 把它们绑定为 NSResponder action（moveLeft: 等）
+@@ -211,6 +454,21 @@ final class SquirrelInputController: IMKInputController {
+       lastModifiers.remove(.capsLock)
+     }
+     preedit = ""
++    SquirrelInputController.lastActive = self
++    // 换焦点位置 → 之前的「IMK 是否转发」判定作废，下一键重新探测。
++    // HBuilderX 原生区域转发、代码区不转发，两者共用同一 controller。
++    SquirrelApplicationDelegate.imkWorks = nil
++    // 唤醒 QtWebEngine 的输入法通道。
++    // 实测：Qt 只在 m_composingText 非空（即它认为输入法正处于组合中）时
++    // 才把 keyDown 交给 [inputContext handleEvent:]。我们组字为空时
++    // 不调用 setMarkedText，Qt 于是永远认为输入法空闲 → 永不转发 → 死锁
++    //（这就是代码区零投递、切到系统输入法立刻正常的全部原因）。
++    // 这里放一个零宽空格占位，不上屏、不可见，只为让 Qt 保持「组合中」。
++    if currentApp == "io.dcloud.HBuilderX" {
++      // 有选区时不能放：QtWebEngine 会把占位当成「组合开始」替换掉选区。
++      refreshPlaceHolder(client)
++    }
++    HengWindowRenderer.log("SESS activate sess=\(session) app=\(currentApp)")
+     if session != 0 {
+       let state = hengGetOption(session, "ascii_mode")
+       let label = hengStateLabel(session, "ascii_mode", state, abbreviated: true)
+@@ -222,6 +480,8 @@ final class SquirrelInputController: IMKInputController {
      self.client = client as? IMKTextInput
      super.init(server: server, delegate: delegate, client: client)
      createSession()
@@ -826,7 +1186,17 @@ index f09e8ab..ce95855 100644
  
      NotificationCenter.default.addObserver(
        forName: .init("SquirrelSetASCIIModeNotification"),
-@@ -248,9 +276,139 @@ final class SquirrelInputController: IMKInputController {
+@@ -241,16 +501,166 @@ final class SquirrelInputController: IMKInputController {
+   }
+ 
+   override func deactivateServer(_ sender: Any!) {
++    HengWindowRenderer.log("SESS deactivate sess=\(session)")
+     hidePalettes()
+     commitComposition(sender)
++    // 切走时别把「⌘ 按住中」的状态带过去，否则新应用里占位一直是撤掉的。
++    placeHolderSuspended = false
+     client = nil
+   }
  
    override func hidePalettes() {
      NSApp.squirrelAppDelegate.panel?.hide()
@@ -963,10 +1333,27 @@ index f09e8ab..ce95855 100644
 +    hengSetInlinePreedit(on)
 +  }
 +
++  /// no_marked_text 开关读取（app_options/<bundle>/no_marked_text）。
++  /// 放在每轮 rimeUpdate 而不是 createSession：createSession 时
++  /// SquirrelConfig 尚未 openBaseConfig（loadSettings 才打开），
++  /// 那时读必为空；且 createSession 自己设 currentApp，handle 的
++  /// app 变化分支被跳过。每轮刷一次，config open 后立即生效。
++  private func refreshNoMarkedText() {
++    guard !currentApp.isEmpty else { return }
++    let v = NSApp.squirrelAppDelegate.config?.getAppOptions(currentApp)["no_marked_text"] ?? false
++    // 注意：不要在这里给 HBuilderX 强开 no_marked_text。
++    // 实测该做法既不能让 Cmd+F 恢复，又会让组字串从文档里消失
++    //（微信输入法在 HBuilderX 里是**有**内联组字的，说明内联组字本身不是障碍）。
++    if v != noMarkedText {
++      noMarkedText = v
++      HengWindowRenderer.log("APP=\(currentApp) noMarkedText=\(noMarkedText)")
++    }
++  }
++
    override func commitComposition(_ sender: Any!) {
      self.client ?= sender as? IMKTextInput
      if session != 0 {
-@@ -261,56 +419,43 @@ final class SquirrelInputController: IMKInputController {
+@@ -261,56 +671,43 @@ final class SquirrelInputController: IMKInputController {
      }
    }
  
@@ -1016,14 +1403,14 @@ index f09e8ab..ce95855 100644
 -
 -  @objc func syncUserData() {
 -    NSApp.squirrelAppDelegate.syncUserData()
+-  }
+-
+-  @objc func openLogFolder() {
+-    NSApp.squirrelAppDelegate.openLogFolder()
 +  @objc func openSettings() {
 +    _ = heng_settings_show(SettingsPage.service.rawValue)
    }
  
--  @objc func openLogFolder() {
--    NSApp.squirrelAppDelegate.openLogFolder()
--  }
--
 -  @objc func openRimeFolder() {
 -    NSApp.squirrelAppDelegate.openRimeFolder()
 +  @objc func openAbout() {
@@ -1041,7 +1428,7 @@ index f09e8ab..ce95855 100644
    private(set) var specialCommentIndices: [ReservedPropertyKey: Set<Int>] = [:]
  
    func handleReservedProperty(key rawKey: String, value rawValue: String, for sessionId: RimeSessionId) throws(ReservedPropertyError) {
-@@ -328,6 +473,9 @@ final class SquirrelInputController: IMKInputController {
+@@ -328,6 +725,9 @@ final class SquirrelInputController: IMKInputController {
    }
  
    deinit {
@@ -1051,7 +1438,15 @@ index f09e8ab..ce95855 100644
      destroySession()
    }
  }
-@@ -402,7 +550,7 @@ private extension SquirrelInputController {
+@@ -387,6 +787,7 @@ private extension SquirrelInputController {
+       return "UnknownApp\(SquirrelInputController.unknownAppCnt)"
+     }()
+     print("createSession: \(app)")
++    HengWindowRenderer.log("SESS create app=\(app)")
+     currentApp = app
+     session = app.withCString { heng_start_session($0) }
+     schemaId = ""
+@@ -402,11 +803,12 @@ private extension SquirrelInputController {
      }
      // v6 行为统一层：app_options 与选项初值由 core 在 set_session_owner 时统一应用，
      // 外壳不再自行读取/下发（与 Windows/Linux 外壳一致）。
@@ -1060,7 +1455,12 @@ index f09e8ab..ce95855 100644
    }
  
    func destroySession() {
-@@ -417,6 +565,16 @@ private extension SquirrelInputController {
+     if session != 0 {
++      HengWindowRenderer.log("SESS destroy sess=\(session)")
+       heng_end_session(session)
+       session = 0
+     }
+@@ -417,7 +819,20 @@ private extension SquirrelInputController {
      // 注：不再同步 _linear/_vertical 到 core。这两个原版 Squirrel 的 UI 提示选项
      // 会让 librime 把方向键路由到组合串光标移动，破坏 key_binder 的
      // Left→Up / Right→Down 候选切换（与 Windows 端行为统一的关键）。
@@ -1069,15 +1469,19 @@ index f09e8ab..ce95855 100644
 +    // 这一步不能省 —— heng_process_key 只调engine.process_key，不含 UI 导航，
 +    // 方向键会被 librime 当成组合串光标移动吃掉，预选高亮永远不动。
 +    // 未被消费（返回 false）才继续走普通按键流程。
-+    if heng_ui_nav_key(session, Int32(rimeKeycode), Int32(rimeModifiers)) != 0 {
++    let navConsumed = heng_ui_nav_key(session, Int32(rimeKeycode), Int32(rimeModifiers)) != 0
++    if navConsumed {
++      HengWindowRenderer.log("PROC keycode=\(rimeKeycode) nav=1")
 +      rimeUpdate()
 +      return true
 +    }
 +
      let handled = heng_process_key(session, Int32(rimeKeycode), Int32(rimeModifiers)) != 0
++    HengWindowRenderer.log("PROC keycode=\(rimeKeycode) mask=\(rimeModifiers) nav=0 handled=\(handled)")
  
      if !handled {
-@@ -446,6 +604,11 @@ private extension SquirrelInputController {
+       let isVimBackInCommandMode = rimeKeycode == XK_Escape || ((rimeModifiers & kControlMask.rawValue != 0) && (rimeKeycode == XK_c || rimeKeycode == XK_C || rimeKeycode == XK_bracketleft))
+@@ -446,6 +861,11 @@ private extension SquirrelInputController {
      if let text = hengTakeCommit(session) {
        commit(string: text)
      }
@@ -1089,8 +1493,17 @@ index f09e8ab..ce95855 100644
    }
  
    // Preserve reserved comment marks when librime requests a UI-only refresh.
-@@ -463,11 +626,13 @@ private extension SquirrelInputController {
+@@ -457,24 +877,31 @@ private extension SquirrelInputController {
+ 
+     var status = HengStatus()
+     status.data_size = Int32(MemoryLayout<HengStatus>.size)
+-    if heng_get_status(session, &status) != 0 {
++    let statusRet = heng_get_status(session, &status)
++    if statusRet != 0 {
+       // swiftlint:disable:next identifier_name
+       if let schema_id = status.schema_id, schemaId == "" || schemaId != String(cString: schema_id) {
          schemaId = String(cString: schema_id)
++        HengWindowRenderer.log("SCHEMA \(schemaId) sess=\(session)")
          NSApp.squirrelAppDelegate.loadSettings(for: schemaId)
          if let panel = NSApp.squirrelAppDelegate.panel {
 -          inlinePreedit = (panel.inlinePreedit && !hengGetOption(session, "no_inline")) || hengGetOption(session, "inline")
@@ -1102,10 +1515,21 @@ index f09e8ab..ce95855 100644
 +      // weasel.custom.yaml（设置窗 / 高级用户直改）显式值覆盖之。
 +      // 放在 schema 分支外 —— 不换 schema 也要能热生效（改配置即生效）。
 +      refreshInlinePreedit()
++      refreshNoMarkedText()
        heng_free_status(&status)
      }
  
-@@ -554,12 +719,16 @@ private extension SquirrelInputController {
+     var ctx = HengContext()
+     ctx.data_size = Int32(MemoryLayout<HengContext>.size)
+-    if heng_get_context(session, &ctx) != 0 {
++    let ctxRet = heng_get_context(session, &ctx)
++    if ctxRet != 0 {
+       let preedit = ctx.preedit.map({ String(cString: $0) }) ?? ""
++      HengWindowRenderer.log("CTX ret=\(ctxRet) sess=\(session) preedit=\(preedit) cand=\(ctx.candidate_count)")
+ 
+       let start = stringIndex(utf8Offset: Int(ctx.sel_start), in: preedit)
+       let end = stringIndex(utf8Offset: Int(ctx.sel_end), in: preedit)
+@@ -554,17 +981,23 @@ private extension SquirrelInputController {
        let lastPage = ctx.is_last_page != 0
  
        let selRange = NSRange(location: start.utf16Offset(in: preedit), length: preedit.utf16.distance(from: start, to: end))
@@ -1119,6 +1543,7 @@ index f09e8ab..ce95855 100644
        heng_free_context(&ctx)
      } else {
 -      hidePalettes()
++      HengWindowRenderer.log("CTX ret=\(ctxRet) sess=\(session) FAILED")
 +      // 取不到 context **不等于**没有候选词：只说明这一次快照失败。
 +      // 旧代码在这里直接 hidePalettes() → 候选窗闪没，而 core 侧随后
 +      // 又会 sync 回来，于是用户看到「窗口毫无规律的消失又出现」。
@@ -1126,7 +1551,13 @@ index f09e8ab..ce95855 100644
      }
    }
  
-@@ -583,15 +752,35 @@ private extension SquirrelInputController {
+   func commit(string: String) {
+     guard let client = client else { return }
++    HengWindowRenderer.log("COMMIT \(string)")
+ 
+     let forceMarkedText =
+       session != 0 &&
+@@ -583,13 +1016,69 @@ private extension SquirrelInputController {
      }
  
      client.insertText(string, replacementRange: .empty)
@@ -1158,9 +1589,62 @@ index f09e8ab..ce95855 100644
 +    //（早退在「commit 后 preedit 与入参同为 ""」时会吞掉 setMarkedText，
 +    //  导致 IMK marked range 不刷新 → core 判定无组合串 → 藏窗。）
 +    if !preeditDirty && self.preedit == preedit && self.caretPos == caretPos && self.selRange == selRange {
++      HengWindowRenderer.log("MT dedup-skip text=\(preedit) dirty=\(preeditDirty)")
++      return
++    }
++    preeditDirty = false
++
++    // 空组合串绝不主动 setMarkedText("")。
++    // Qt 6.5 的 QNSView 在 setMarkedText 时置 m_composingText，只有 insertText
++    // 或再给一段 marked text 才解除；空串 setMarkedText 会让它长期停在
++    // 「输入法占用组合态」，此后宿主本该自己插入的裸字符全被 IME 接管、
++    // 而 IME 又返回 false → 字符凭空消失。这正是 HBuilderX 里英文模式
++    // 按字母毫无反应、切回中文按 d 组字成功却紧接着又失效的根因
++    //（15:47:03 日志：三条空 COMMIT 置脏 → show("") 越过早退 → 调了空串）。
++    // 仅在宿主确实残留 marked text（Esc 取消组合等）时才清一次。
++    if preedit.isEmpty {
++      let had = !self.preedit.isEmpty
++      self.preedit = preedit
++      self.caretPos = caretPos
++      self.selRange = selRange
++      // HBuilderX(QtWebEngine)：组合串一空（上屏、清空），Qt 立刻认为输入法
++      // 空闲并停止转发按键 —— 表现就是「只有第一个键能动，之后全哑」。
++      // 这里每轮重新放一次零宽占位，把「组合中」状态续上，转发才不会断。
++      if currentApp == "io.dcloud.HBuilderX" {
++        // 按住 ⌘ 期间、或还有选区时都不补（见 refreshPlaceHolder 注释）。
++        refreshPlaceHolder(client)
++        return
++      }
++      if had {
++        let mr = client.markedRange()
++        if mr.location != NSNotFound && mr.length > 0 {
++          endComposition(client)
++          HengWindowRenderer.log("MT clear resid marked=\(mr.location),\(mr.length)")
++        } else {
++          HengWindowRenderer.log("MT SKIP empty (no resid)")
++        }
++      } else {
++        HengWindowRenderer.log("MT SKIP empty")
++      }
        return
      }
-+    preeditDirty = false
  
-     self.preedit = preedit
+@@ -597,6 +1086,18 @@ private extension SquirrelInputController {
      self.caretPos = caretPos
+     self.selRange = selRange
+ 
++    HengWindowRenderer.log("MT text=\(preedit) sel=\(selRange.location),\(selRange.length) caret=\(caretPos)")
++    if noMarkedText {
++      // HBuilderX 编辑器缺陷（DCloud 社区 ask.dcloud.net.cn/question/216975 等
++      // 多例，鼠须管/落格同中招，Intel/ARM 多版本复现）：组字调用
++      // setMarkedText 之后，宿主不再给输入法转键，首键之后全部按键无响应。
++      // 跳过 marked-text 会话，组字完全走 core 自绘候选窗；光标锚点由
++      // updateCaretAnchor 的 fallback 兜底（无会话时光标矩形 API 返零
++      // 是已知行为，保持上次锚点/屏幕中心偏上）。
++      HengWindowRenderer.log("MT SKIP no_marked_text=1")
++      return
++    }
++
+     let start = selRange.location
+     let attrString = NSMutableAttributedString(string: preedit)
+     if start > 0 {
