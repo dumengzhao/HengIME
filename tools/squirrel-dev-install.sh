@@ -4,7 +4,7 @@
 # 与 /Library 下的正式版完全隔离）。
 #
 # 身份差异：
-#   Bundle ID / 输入源 ID: im.heng.inputmethod.Squirrel.dev(.Hans/.Hant)
+#   Bundle ID / 输入源 ID: im.heng.inputmethod.Squirrel.dev(.Hans)
 #   IMK 连接名:            im_heng_inputmethod_Squirrel_dev_Connection
 #   rime 用户目录:         ~/Library/Rime-dev（Info.plist HengRimeUserDirName）
 #   显示名:                衡Dev / Heng Dev（三语言 InfoPlist.strings 品牌化）
@@ -168,6 +168,7 @@ plutil -lint "$P"
 
 # 1.5 InfoPlist.strings：以输入源 ID 为 key 的名字必须同步到新 bundle ID，
 #     否则系统取不到名字，输入源列表里会退化成显示 bundle ID。
+#     Hant 的 key 直接删掉（mode 字典里也没了，留着会显示孤儿条目）。
 for lp in zh-Hans zh-Hant en; do
   F="$STAGING/Contents/Resources/$lp.lproj/InfoPlist.strings"
   plutil -convert xml1 "$F"
@@ -177,9 +178,28 @@ for lp in zh-Hans zh-Hant en; do
   $PB -c "Set :CFBundleName $NAME" "$F"
   $PB -c "Set :$DEV_ID $NAME" "$F"
   $PB -c "Set :$DEV_ID.Hans $NAME" "$F"
-  $PB -c "Set :$DEV_ID.Hant $NAME" "$F"
+  $PB -c "Delete :$DEV_ID.Hant" "$F" 2>/dev/null || true
   plutil -lint "$F"
 done
+
+# 1.6 只保留 Hans 一个 input mode：简繁切换走 librime simplification 选项
+#     （core 设置窗/快捷键），不做成两个菜单条目 —— 与别家输入法一致。
+#     Hant 残留会成为孤儿条目（菜单显示第二个「衡Dev」），必须删。
+#     ⚠️ mode 字典嵌套在 ComponentInputModeDict 下，路径必须带前缀——
+#     少了前缀 PlistBuddy 报 Does Not Exist，被 || true 吞掉 → 静默不删。
+$PB -c "Delete :ComponentInputModeDict:tsInputModeListKey:$DEV_ID.Hant" "$P" 2>/dev/null \
+  || $PB -c "Delete :ComponentInputModeDict:tsInputModeListKey:im.rime.inputmethod.Squirrel.Hant" "$P" 2>/dev/null \
+  || true
+# 可见 mode 顺序数组里的 Hant ID 同样要摘掉，否则 TIS 照旧登记孤儿输入源
+$PB -c "Delete :ComponentInputModeDict:tsVisibleInputModeOrderedArrayKey" "$P" 2>/dev/null || true
+$PB -c "Add :ComponentInputModeDict:tsVisibleInputModeOrderedArrayKey array" "$P" 2>/dev/null || true
+$PB -c "Add :ComponentInputModeDict:tsVisibleInputModeOrderedArrayKey:0 string $DEV_ID.Hans" "$P" 2>/dev/null || true
+if $PB -c "Print :ComponentInputModeDict:tsInputModeListKey:$DEV_ID.Hant" "$P" >/dev/null 2>&1; then
+  echo "  ⚠️ Hant mode 条目未删净，菜单可能出现第二个衡Dev"
+fi
+if $PB -c "Print :ComponentInputModeDict:tsVisibleInputModeOrderedArrayKey" "$P" 2>/dev/null | /usr/bin/grep -q "$DEV_ID.Hant"; then
+  echo "  ⚠️ Hant 仍在可见 mode 顺序数组里，菜单可能出现第二个衡Dev"
+fi
 echo "strings ok"
 
 # dev 图标（灰底，区别于正式版蓝底）
@@ -214,8 +234,20 @@ fi
 
 # 重签必须带 entitlements：Xcode 原产物含 disable-library-validation，
 # codesign -s - 不带 --entitlements 会丢弃，系统随后无法激活该输入法。
+#
+# 签名身份必须固定（默认复用本机已有的自签证书），不能用 `-s -`：
+# ad-hoc 的 designated requirement 锚的是 CDHash，每次编译都变，
+# 系统会把新版当成另一个 app，「输入监控 / 辅助功能」授权随之失效，
+# CGEventTap 直接拿不到权限。固定证书的 DR 只锚证书指纹，稳定。
 ENTITLEMENTS="${HENG_ENTITLEMENTS:-$(dirname "$0")/../third_party/src/squirrel/resources/Squirrel.entitlements}"
-codesign --force --deep -s - --entitlements "$ENTITLEMENTS" "$STAGING" 2>/dev/null
+SIGN_IDENTITY="${HENG_SIGN_IDENTITY:-ClipSync Dev}"
+if [[ "$(security find-identity -v -p codesigning 2>/dev/null | grep -cF "$SIGN_IDENTITY")" -gt 0 ]]; then
+  codesign --force --deep -s "$SIGN_IDENTITY" --entitlements "$ENTITLEMENTS" "$STAGING" 2>/dev/null \
+    && echo "  signed: $SIGN_IDENTITY"
+else
+  codesign --force --deep -s - --entitlements "$ENTITLEMENTS" "$STAGING" 2>/dev/null
+  echo "  ⚠️ 未找到签名身份「$SIGN_IDENTITY」，回退 ad-hoc（TCC 授权每次编译都会失效）"
+fi
 echo "staging ok"
 echo "  icns    : $(stat -f%z "$STAGING/Contents/Resources/Rime.icns") bytes"
 echo "  rime.pdf: $(stat -f%z "$STAGING/Contents/Resources/rime.pdf") bytes"
@@ -234,7 +266,8 @@ lsr_dedup_id "$DEV_ID" "$APP_DST"
 
 # 4. 修正 AppleEnabledInputSources
 #    TISEnableInputSource 对 Input Mode 类型只改会话内存视图，不落盘；
-#    Hans/Hant 必须以 "Input Mode" 条目存在于 AppleEnabledInputSources 才生效。
+#    Hans 必须以 "Input Mode" 条目存在于 AppleEnabledInputSources 才生效。
+#    （旧版还写 Hant，双 mode 设计已废弃：简繁走 simplification 选项。）
 #    另注意 plist 可能带 uchg 标志，会让所有写入被静默丢弃。
 #    这里用 Python 处理：PlistBuddy 无法写含空格的 key（"Bundle ID" 会被
 #    解析成 key=Bundle + type=ID），且需要先 chflags nouchg。
@@ -245,7 +278,8 @@ lsr_dedup_id "$DEV_ID" "$APP_DST"
 #    会把第 3、4 步之前注册的输入源冲掉，所以必须补这一步。
 "$APP_DST/Contents/MacOS/Squirrel" --register-input-source || true
 "$APP_DST/Contents/MacOS/Squirrel" --enable-input-source Hans || true
-"$APP_DST/Contents/MacOS/Squirrel" --enable-input-source Hant || true
+# 旧版双 mode 残留的 Hant 输入源要禁用，否则菜单仍显示第二个「衡Dev」
+"$APP_DST/Contents/MacOS/Squirrel" --disable-input-source Hant || true
 
 # 6. 收尾：再兜一次 LS 去重 + 把 staging 挪出 .app 形态
 #    中途 heng-fix-plist.py 会 killall cfprefsd / TextInputMenuAgent，

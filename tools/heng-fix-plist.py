@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""把「衡」输入法的 Hans / Hant 以 Input Mode 形式写入 AppleEnabledInputSources。
+"""把「衡」输入法的 Hans 以 Input Mode 形式写入 AppleEnabledInputSources。
+
+只保留 Hans 一个 input mode：简繁切换走 librime simplification 选项
+（core 设置窗/快捷键），不做成两个菜单条目 —— 与别家输入法一致。
+Hant 若在历史安装里注册过，顺手清掉。
 
 背景 1：com.apple.HIToolbox.plist 曾被加 uchg(immutable) 标志，导致 cfprefsd 与
 PlistBuddy 的写入全部返回 EPERM 并被静默丢弃（defaults write exit=0 但读不回来，
@@ -21,9 +25,11 @@ HOME = os.path.expanduser("~")
 P = os.path.join(HOME, "Library/Preferences/com.apple.HIToolbox.plist")
 # 默认正式版；dev 版传 im.heng.inputmethod.Squirrel.dev
 BUNDLE_ID = sys.argv[1] if len(sys.argv) > 1 else "im.rime.inputmethod.Squirrel"
-MODES = ("Hans", "Hant")
+MODES = ("Hans",)
 # 历史遗留的废弃 bundle ID（不含 .inputmethod. 段，系统永远不会收录），写入时顺手清掉
 STALE_IDS = ("im.heng.ime.Squirrel.dev",)
+# 旧版双 mode 设计留下的 Hant 条目，写入时顺手清掉
+STALE_MODE_SUFFIX = ".Hant"
 
 
 def sh(cmd):
@@ -91,6 +97,14 @@ def main():
         arr = [d for d in arr if d.get("Bundle ID") not in STALE_IDS]
         print(f"  清理废弃 ID 条目 {len(stale)} 条")
 
+    # 清掉旧版双 mode 残留的 Hant 条目（简繁已改为 simplification 选项，不占菜单）
+    hant = [d for d in arr if isinstance(d, dict)
+            and str(d.get("Input Mode", "")).endswith(STALE_MODE_SUFFIX)
+            and str(d.get("Bundle ID", "")).startswith(BUNDLE_ID.rsplit(".", 1)[0])]
+    if hant:
+        arr = [d for d in arr if d not in hant]
+        print(f"  清理 Hant mode 条目 {len(hant)} 条")
+
     have = {d.get("Input Mode") for d in arr if isinstance(d, dict)}
     for mode in MODES:
         key = f"{BUNDLE_ID}.{mode}"
@@ -118,7 +132,7 @@ def main():
     if f"{BUNDLE_ID}.Hans" not in modes:
         print("  FAIL Hans 未落盘")
         return 1
-    print("  OK Hans/Hant 已落盘")
+    print("  OK Hans 已落盘")
     print(" ", lock_state())
 
     print("== 5. 确认保持可写（不要恢复 uchg）==")
