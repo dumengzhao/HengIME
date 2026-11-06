@@ -164,6 +164,12 @@ $PB -c "Add :tsInputMethodCharacterRepertoireKey:0 string Hans" "$P" 2>/dev/null
   || $PB -c "Set :tsInputMethodCharacterRepertoireKey:0 Hans" "$P"
 $PB -c "Add :tsInputMethodCharacterRepertoireKey:1 string Hant" "$P" 2>/dev/null \
   || $PB -c "Set :tsInputMethodCharacterRepertoireKey:1 Hant" "$P"
+# `Latn`：对齐微信输入法的声明（Hans/Hant/Latn），让 TIS 把输入源标成
+# IsASCIICapable=1。**这不是 HBuilderX ⌘F 失效的修法**（补上后仍失效，已实测）；
+# 只是让元数据与商业输入法一致，避免系统在「ASCII 场景自动切换输入源」这类
+# 判断上把我们当异类。真因见 data/squirrel.yaml 的 keyboard_layout。
+$PB -c "Add :tsInputMethodCharacterRepertoireKey:2 string Latn" "$P" 2>/dev/null \
+  || $PB -c "Set :tsInputMethodCharacterRepertoireKey:2 Latn" "$P"
 plutil -lint "$P"
 
 # 1.5 InfoPlist.strings：以输入源 ID 为 key 的名字必须同步到新 bundle ID，
@@ -201,6 +207,25 @@ if $PB -c "Print :ComponentInputModeDict:tsVisibleInputModeOrderedArrayKey" "$P"
   echo "  ⚠️ Hant 仍在可见 mode 顺序数组里，菜单可能出现第二个衡Dev"
 fi
 echo "strings ok"
+
+# 1.7 输入模式声明向微信输入法对齐（2026-11-06）
+#
+# 症状：HBuilderX（QtWebEngine）代码区里 ⌘F/⌘S/⌘⇧F 这类「要在编辑器里处理的」
+# 快捷键全部失效，而 ⌘C/V/X/Z（Chromium 原生编辑命令）和 ⌘H（AppKit 菜单项）正常。
+#
+# 结论：**这两项不是修法**。它们只让元数据与微信一致（微信声明具体语言脚本、
+# 且不带模式级字符集），实测改完 ⌘F 仍失效。真正的根因在宿主侧——Qt 用「当前
+# 输入源」的 kTISPropertyUnicodeKeyLayoutData 构建快捷键映射表，不带布局数据
+# 的输入源会让表为空。修法见 data/squirrel.yaml 的 `keyboard_layout: default`
+# （→ activateServer 调 client.overrideKeyboard(ABC)）。这两项保留只为对齐声明。
+#
+#   tsInputModeScriptKey: smUnicodeScript → smSimpChinese
+#     smUnicodeScript 是「万能 Unicode 输入法」的标记；微信这类商业输入法统一
+#     声明具体语言脚本。
+#   模式级 tsInputModeCharacterRepertoireKey（Hans/Hant）→ 删除（微信没有）
+MODE=":ComponentInputModeDict:tsInputModeListKey:$DEV_ID.Hans"
+$PB -c "Set $MODE:tsInputModeScriptKey smSimpChinese" "$P" 2>/dev/null || true
+$PB -c "Delete $MODE:tsInputModeCharacterRepertoireKey" "$P" 2>/dev/null || true
 
 # dev 图标（灰底，区别于正式版蓝底）
 DEV_ICNS="${HENG_DEV_ICNS:-$(dirname "$0")/icons/HengDev.icns}"
