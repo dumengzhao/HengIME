@@ -67,6 +67,23 @@ if ((Test-Path $srcData) -and -not (Test-Path $dstData)) {
   Write-Host "[OK] 雾凇共享数据初始化 -> output-dev\data（约 50MB，请稍候）"
 }
 
+# AppContainer（UWP）宿主需读到 TSF DLL 才能加载输入法：Windows 搜索框
+# （SearchApp.exe，Microsoft.Windows.Search 包）运行在 AppContainer 中，按
+# InprocServer32 路径加载 weaselx64.dll。Program Files 自带 ALL APPLICATION
+# PACKAGES 的继承 ACE，用户目录没有；缺该 ACE 时 TSF 加载失败，搜索框内只剩
+# 字母输入。
+# 判定用 SDDL：该账号的 NTAccount 无法 Translate 回 SID（抛异常），而 SDDL 中
+# ALL APPLICATION PACKAGES 的别名是 AC，字符串判断不受系统语言影响。
+$acl = Get-Acl $outDev
+if ($acl.Sddl -notmatch ';;;AC\)') {
+  $acSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-15-2-1'
+  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $acSid, 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+  $acl.AddAccessRule($rule)
+  Set-Acl -Path $outDev -AclObject $acl
+  Write-Host "[OK] output-dev\ 已授予 AppContainer 读权限（UWP 宿主如搜索框可加载输入法）"
+}
+
 if (-not $StartOnly) {
   $regsvr = Join-Path $env:SystemRoot "System32\regsvr32.exe"
   & $regsvr /s $dll | Out-Null
