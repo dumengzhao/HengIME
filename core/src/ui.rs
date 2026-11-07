@@ -4277,19 +4277,30 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         let current = current.clone();
         let tx = tx.clone();
         move |tag| {
-            let Ok(engine) = engine() else { return };
+            ui_log(&format!("toggle_clicked: tag={tag}"));
+            let Ok(engine) = engine() else {
+                ui_log("toggle_clicked: engine() 不可用");
+                return;
+            };
             let _guard = OP_LOCK.lock().unwrap();
             let settings = Settings::new(&engine);
-            let Some(st) = sstate.borrow().as_ref().map(|s| s.clone()) else { return };
+            let Some(st) = sstate.borrow().as_ref().map(|s| s.clone()) else {
+                ui_log("toggle_clicked: sstate 为空");
+                return;
+            };
             match tag.as_str() {
                 "inline" => {
-                    if settings.set_inline_preedit(!st.inline).is_ok() {
-                        // 同上：样式开关不走 redeploy、不重读部署缓存
-                        let mut ns = st.clone();
-                        ns.inline = !st.inline;
-                        *sstate.borrow_mut() = Some(ns.clone());
-                        settings_apply_page(&sui, &ns, sui.get_page());
-                        let _ = tx.send(UiCmd::Hide);
+                    match settings.set_inline_preedit(!st.inline) {
+                        Ok(()) => {
+                            ui_log("toggle_clicked: inline 写入成功");
+                            // 同上：样式开关不走 redeploy、不重读部署缓存
+                            let mut ns = st.clone();
+                            ns.inline = !st.inline;
+                            *sstate.borrow_mut() = Some(ns.clone());
+                            settings_apply_page(&sui, &ns, sui.get_page());
+                            let _ = tx.send(UiCmd::Hide);
+                        }
+                        Err(e) => ui_log(&format!("toggle_clicked: inline 写入失败: {e}")),
                     }
                 }
                 "punct" => {
@@ -4336,14 +4347,26 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         let ui_c = ui.clone();
         let tx_c = tx.clone();
         move |ratio: f32| {
-            let Ok(engine) = engine() else { return };
+            ui_log(&format!("scale_clicked: ratio={ratio}"));
+            let Ok(engine) = engine() else {
+                ui_log("scale_clicked: engine() 不可用");
+                return;
+            };
             let _guard = OP_LOCK.lock().unwrap();
             let settings = Settings::new(&engine);
-            let Some(st) = sstate.borrow().as_ref().map(|s| s.clone()) else { return };
+            let Some(st) = sstate.borrow().as_ref().map(|s| s.clone()) else {
+                ui_log("scale_clicked: sstate 为空");
+                return;
+            };
             // 点击位置 → 7 档刻度（0-6），字号 = 14 + 档位（默认 16 = 第 3 档）
             let level = ((ratio * 6.0) + 0.5).floor().clamp(0.0, 6.0) as i32;
             let n = 14 + level;
-            if n != st.font && settings.set_font_point_size(n as i64).is_ok() {
+            if n == st.font {
+                ui_log(&format!("scale_clicked: 字号未变 n={n}"));
+            } else if let Err(e) = settings.set_font_point_size(n as i64) {
+                ui_log(&format!("scale_clicked: 写入失败: {e}"));
+            } else {
+                ui_log(&format!("scale_clicked: 写入成功 n={n}"));
                 // 样式改动不走 redeploy（会作废活动会话）；字号实时应用到
                 // 候选窗与字母区，容器尺寸（格高/条高/字母区高）一起缩放
                 ui_c.set_cand_font(n);
@@ -4600,6 +4623,12 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         let sc = ui_scale();
                         let w = (640.0 * sc).round() as u32;
                         let h = (480.0 * sc).round() as u32;
+                        ui_log(&format!(
+                            "SettingsShow: scale={sc} size={}x{} user_dir={}",
+                            w,
+                            h,
+                            Settings::new(&engine).user_dir().display()
+                        ));
                         backend.configure(1, (sw - w as i32) / 2, (sh - h as i32) / 2, w, h);
                         backend.set_mapped(1, true);
                         let _ = sui.show();
