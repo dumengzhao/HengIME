@@ -227,26 +227,26 @@ if (Test-Path $targetDll) {
 Sweep-Parked $Target
 foreach ($f in @($targetCore, $targetDll, $targetExe)) { Clear-LockedTarget $f }
 $rc = (Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\robocopy.exe') -Wait -PassThru -NoNewWindow `
-        -ArgumentList @("`"$Source`"", "`"$Target`"", '/E', '/COPY:DAT', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS')).ExitCode
+        -ArgumentList @("`"$Source`"", "`"$Target`"", '/E', '/COPY:DAT', '/R:1', '/W:1', '/XD', 'runtime-user', '/NFL', '/NDL', '/NJH', '/NJS')).ExitCode
 if ($rc -gt 7) { Write-Host "[FAIL] robocopy 退出码 $rc"; exit 1 }
 Write-Host "[OK] 已同步到 $Target"
 
-# 3b) dev 版的用户数据在 exe 同级 runtime-user\（WeaselUtility.cpp 的 HENG_DEV 分支），
-#     搬进 Program Files 后它会在新位置找一个空的，原有词库不会跟过来。目标为空时
-#     把源目录整体复制过去；目标已有内容则不动，避免覆盖正在用的词库。
+# 3b) dev 版的用户目录：%AppData%\Rime-Dev（WeaselUtility.cpp 的 HENG_DEV 分支）。
+#     曾放在 exe 同级 runtime-user\，但 dev 与正式一样装在 Program Files，
+#     带(uiAccess 标志的)普通令牌写不进去：设置写入、词库落盘全部静默失败。
+#     robocopy 时已排除 runtime-user，避免仓库里的旧词库盖掉正在用的；
+#     这里把旧 exe 同级位置残存的词库迁到新目录（目标已有内容则不动）。
 if ($Dev) {
-    $srcUser = Join-Path $Source 'runtime-user'
-    $dstUser = Join-Path $Target 'runtime-user'
-    if (Test-Path $srcUser) {
-        if (Test-Path (Join-Path $dstUser 'build')) {
-            Write-Host '[i] 目标已有 runtime-user，跳过词库搬迁'
-        } else {
-            Write-Host '[i] 搬迁 dev 词库（runtime-user）…'
-            $rc2 = (Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\robocopy.exe') -Wait -PassThru -NoNewWindow `
-                    -ArgumentList @("`"$srcUser`"", "`"$dstUser`"", '/E', '/COPY:DAT', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS')).ExitCode
-            if ($rc2 -gt 7) { Write-Host "[FAIL] 词库搬迁失败，robocopy 退出码 $rc2"; exit 1 }
-            Write-Host "[OK] 词库已复制到 $dstUser（源目录保留，确认无误后可自行删除）"
-        }
+    $devUser = Join-Path $env:APPDATA 'Rime-Dev'
+    $oldUser = Join-Path $Target 'runtime-user'
+    if ((Test-Path $oldUser) -and -not (Test-Path (Join-Path $devUser 'build'))) {
+        Write-Host '[i] 迁移 dev 词库 -> %AppData%\Rime-Dev …'
+        $rc2 = (Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\robocopy.exe') -Wait -PassThru -NoNewWindow `
+                -ArgumentList @("`"$oldUser`"", "`"$devUser`"", '/E', '/MOVE', '/COPY:DAT', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS')).ExitCode
+        if ($rc2 -gt 7) { Write-Host "[FAIL] 词库迁移失败，robocopy 退出码 $rc2"; exit 1 }
+        Write-Host "[OK] 词库已迁到 $devUser"
+    } elseif (Test-Path (Join-Path $devUser 'build')) {
+        Write-Host '[i] %AppData%\Rime-Dev 已有词库，跳过迁移'
     }
 }
 

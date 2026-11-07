@@ -2591,25 +2591,32 @@ index ac5b0bf..b7acb7e 100644
    </PropertyGroup>
    <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
 diff --git a/RimeWithWeasel/WeaselUtility.cpp b/RimeWithWeasel/WeaselUtility.cpp
-index 9a07343..d09124f 100644
+index 9a07343..dfbc38e 100644
 --- a/RimeWithWeasel/WeaselUtility.cpp
 +++ b/RimeWithWeasel/WeaselUtility.cpp
-@@ -4,6 +4,14 @@
+@@ -4,6 +4,21 @@
  #include <WeaselUtility.h>
  
  fs::path WeaselUserDataPath() {
 +#ifdef HENG_DEV
-+  // dev 版用户目录与正式版隔离：exe 同级 runtime-user\（heng_create 自动创建）。
++  // dev 版用户目录与正式版隔离：%AppData%\Rime-Dev。
 +  // 正式版走注册表 HKCU\Software\Rime\Weasel\RimeUserDir / %AppData%\Rime；
 +  // dev 版绝不能共用，否则两边词库/用户配置互相污染。
++  // 不能放 exe 同级：dev 与正式一样要装进 Program Files（uiAccess 只认这里），
++  // 普通令牌写不进去，设置写入、词库落盘全部静默失败——带 uiAccess 标志的
++  // 令牌并不是高完整性令牌，Program Files 对它依然是只读的。
 +  WCHAR _path[MAX_PATH] = {0};
-+  GetModuleFileNameW(NULL, _path, _countof(_path));
-+  return fs::path(_path).remove_filename().append(L"runtime-user");
++  DWORD n = GetEnvironmentVariableW(L"APPDATA", _path, _countof(_path));
++  if (n == 0 || n >= _countof(_path)) {
++    ExpandEnvironmentStringsW(L"%AppData%\\Rime-Dev", _path, _countof(_path));
++    return fs::path(_path);
++  }
++  return fs::path(_path).append(L"Rime-Dev");
 +#else
    WCHAR _path[MAX_PATH] = {0};
    const WCHAR KEY[] = L"Software\\Rime\\Weasel";
    HKEY hKey;
-@@ -22,6 +30,7 @@ fs::path WeaselUserDataPath() {
+@@ -22,6 +37,7 @@ fs::path WeaselUserDataPath() {
    // default location
    ExpandEnvironmentStringsW(L"%AppData%\\Rime", _path, _countof(_path));
    return fs::path(_path);
