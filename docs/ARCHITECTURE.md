@@ -48,6 +48,40 @@ heng-core（Rust，编译成 heng_core.dll / .so / .dylib）
 librime 与候选窗都在 `WeaselServer.exe` 内，该进程直接调用 `heng_*`，按键不经过
 任何管道。（上游小狼毫用命名管道把每次按键转发到服务进程，本项目未沿用该结构。）
 
+### 2.2 候选窗的 z 带与 uiAccess（Windows）
+
+Windows 8 起顶层窗口按 z 带分组，band 号大的整带压在号小的之上，`SetWindowPos`
+只在同一带内调整前后关系。实测数据：
+
+| 窗口 | 带 |
+|---|---|
+| 任务栏搜索面板（`SearchApp.exe` / `Windows.UI.Core.CoreWindow`） | 13（ZBID_IMMERSIVE_SEARCH） |
+| 普通应用窗口、任务栏、输入框宿主 | 1（ZBID_DESKTOP） |
+| 带 uiAccess 令牌的进程创建的窗口 | 2（ZBID_UIACCESS） |
+
+带号大小不等于前后关系：band 2 排在各 immersive 带之上。同样落在搜索面板矩形
+内的候选窗，band 1 被面板盖住，band 2 正常显示。普通进程用
+`CreateWindowInBand` 建 2 带返回 `ACCESS_DENIED`，`SetWindowBand` 调用一律失败。
+
+候选窗与字母区因此优先按 2 带创建（`core/src/ui.rs` 的 `window_in_uia_band`），
+失败回退桌面带。2 带要求四个条件同时成立：
+
+| 条件 | 由谁满足 |
+|---|---|
+| 清单 `requestedExecutionLevel uiAccess="true"` | `third_party/src/weasel/uia-sign.ps1`（构建末尾写入） |
+| Authenticode 签名且链到机器级受信根 | 同上签名 + `tools/weasel-uia-install.ps1 -CertPath` 导证书 |
+| 可执行文件位于普通用户不可写的目录 | 装到 `C:\Program Files\HengIME` |
+| 由 shell 启动 | `weaselx64.dll` 拉起服务时经 `explorer.exe` 转发；另有 `HKCU\...\Run\HengServer` 登录自启 |
+
+带 uiAccess 清单的 exe 拒绝由非受信进程启动（`CreateProcess` 直接
+`ACCESS_DENIED`，计划任务报 `ERROR_ELEVATION_REQUIRED`），所以 TSF 侧不能直接
+拉起 `WeaselServer.exe`。`weaselx64.dll` 与服务的自我重启都先请 `explorer.exe`
+转发，只在转发失败（explorer 未运行）时才直接启动；直接启动的服务功能正常，
+但令牌落不下来，候选窗留在桌面带，靠改位置避开宿主浮层。
+
+桌面带下的回退：定位候选窗前检查前台窗口是否处于更高的带，若两者矩形相交就把
+候选窗挪出该矩形（优先横移到侧边，其次上下，最后夹进显示器工作区）。
+
 ---
 
 ## 3. core 内部
@@ -255,7 +289,15 @@ librime 的 `InstallationUpdate` 只认已存在的值）。进程内 timer 线�
 | ABI 全链路 | `cargo run --release -p heng-cli -- abitest` |
 | 视觉验证 | `HENG_UI_DUMP=1 heng-cli settings <page>` 抓帧到 `%TEMP%/*.ppm` |
 | Windows 外壳 | `third_party/src/weasel/build-x64.bat`（正式）/ `build-x64-dev.bat`（dev） |
+| Windows 正式安装 | `tools/weasel-uia-install.ps1`（管理员；装到 `Program Files` 并注册） |
+| 只换 core dll | 同上加 `-CoreOnly`（停服务 → 解占用 → 覆盖 `heng_core.dll` → 重启） |
+| dev 身份装到正式位置 | 同上加 `-Dev`（源换 `output-dev`，补签名，迁移 `runtime-user`） |
 | Windows dev 部署 | `tools/weasel-dev-install.ps1`（注册需管理员） |
+| 候选窗带号自检 | `python tools/heng-bandcheck.py`（打印服务令牌的 uiAccess 与候选窗 band） |
+
+正式构建需要环境变量 `HENG_SIGN_THUMBPRINT` 指向签名证书指纹，构建末尾会把
+`uiAccess` 写进清单并签名（见 §2.2）。未设置时该步骤整段跳过，产出的 exe 仍可
+运行，只是候选窗留在桌面带。
 
 ## 9.1 GitHub Actions
 

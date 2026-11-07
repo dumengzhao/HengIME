@@ -1397,6 +1397,36 @@ fn work_area_env() -> Option<(i32, i32)> {
     None
 }
 
+/// 光标锚点坐标的域：Windows 外壳把 Win32 的 `RECT` 原样上报，是**设备像素**；
+/// macOS 外壳按 IMK 屏幕坐标直传、Linux 外壳取 fcitx5 的 `cursorRect`，都是**逻辑点**。
+/// 定位参数必须与锚点同域（Windows 的 SetWindowPos 要设备像素，macOS 的
+/// setFrameOrigin 要点），而 `work_area_at` 的返回与窗口高 `h_total` 恒为设备像素。
+/// 跨域的换算集中在这两个函数里，避免就近乘一个 scale 造成双重缩放。
+#[inline]
+fn caret_in_device_px() -> bool {
+    cfg!(target_os = "windows")
+}
+
+/// 光标锚点值 → 设备像素
+#[inline]
+fn caret_to_dev(v: i32, scale: f32) -> i32 {
+    if caret_in_device_px() {
+        v
+    } else {
+        (v as f32 * scale).round() as i32
+    }
+}
+
+/// 设备像素 → 光标锚点域
+#[inline]
+fn dev_to_caret(v: i32, scale: f32) -> i32 {
+    if caret_in_device_px() {
+        v
+    } else {
+        (v as f32 / scale).round() as i32
+    }
+}
+
 /// 查询指定点所在显示器的工作区（任务栏除外）的上下边界（设备 px）。
 /// 用于展开面板的向上翻转判断：光标下方放不下时朝上展开。
 /// 返回 (top, bottom)；查不到返回 None（此时不翻转，维持向下展开）。
@@ -2368,22 +2398,24 @@ mod win_backend {
 use std::cell::RefCell;
     use std::mem::size_of;
     use windows_sys::Win32::Foundation::{
-        GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+        GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
     };
     use windows_sys::Win32::Graphics::Gdi::{
         BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EndPaint,
-        GetDC, InvalidateRect, ReleaseDC, ScreenToClient, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER,
-        BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, PAINTSTRUCT,
-        BI_RGB, SRCCOPY,
+        GetDC, GetMonitorInfoW, InvalidateRect, MonitorFromWindow, ReleaseDC, ScreenToClient,
+        SelectObject, AC_SRC_ALPHA, AC_SRC_OVER,
+        BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, MONITORINFO,
+        MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, BI_RGB, SRCCOPY,
     };
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SetFocus, TME_LEAVE, TrackMouseEvent, TRACKMOUSEEVENT,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, LoadCursorW,
-        PeekMessageW, RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow,
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetForegroundWindow,
+        GetWindowRect, HWND_TOPMOST,
+        LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow, SetWindowPos, ShowWindow,
         TranslateMessage, UpdateLayeredWindow, HTCAPTION, HTCLIENT, HTTRANSPARENT, IDC_ARROW, MSG,
         PM_REMOVE,
         SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOZORDER,
@@ -2405,6 +2437,119 @@ use std::cell::RefCell;
 
     fn utf16z(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// GetWindowBand：Win8 起窗口按 z 带分组，band 号大的整带压在号小的之上，
+    /// SetWindowPos 只在同一带内调整前后关系。user32 不导出该符号的头文件声明，
+    /// 运行时按名取；取不到（Win7 及更早）按「无带信息」处理。
+    type GetWindowBandFn = unsafe extern "system" fn(HWND, *mut u32) -> i32;
+    static BAND_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    unsafe fn window_band(hwnd: HWND) -> Option<u32> {
+        use std::sync::atomic::Ordering;
+        let mut addr = BAND_FN.load(Ordering::Relaxed);
+        if addr == 0 {
+            let lib = GetModuleHandleW(utf16z("user32.dll").as_ptr());
+            addr = if lib.is_null() {
+                usize::MAX
+            } else {
+                match GetProcAddress(lib, b"GetWindowBand\0".as_ptr()) {
+                    Some(f) => f as usize,
+                    None => usize::MAX,
+                }
+            };
+            BAND_FN.store(addr, Ordering::Relaxed);
+        }
+        if addr == usize::MAX {
+            return None;
+        }
+        let f: GetWindowBandFn = std::mem::transmute(addr);
+        let mut band: u32 = 0;
+        if f(hwnd, &mut band) != 0 {
+            Some(band)
+        } else {
+            None
+        }
+    }
+
+    /// 窗口所在显示器的工作区（设备像素，排除任务栏）。
+    unsafe fn work_rect(hwnd: HWND) -> Option<(i32, i32, i32, i32)> {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if hmon.is_null() {
+            return None;
+        }
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(hmon, &mut mi) == 0 {
+            return None;
+        }
+        if mi.rcWork.right <= mi.rcWork.left || mi.rcWork.bottom <= mi.rcWork.top {
+            return None;
+        }
+        Some((
+            mi.rcWork.left,
+            mi.rcWork.top,
+            mi.rcWork.right,
+            mi.rcWork.bottom,
+        ))
+    }
+
+    /// 宿主浮层处在更高 z 带时把窗口挪出它的矩形。
+    ///
+    /// 例：任务栏搜索框的 SearchApp.exe 在 ZBID_IMMERSIVE_SEARCH(13)，
+    /// 本进程窗口在 ZBID_DESKTOP(1)，跨带置顶无效（SetWindowPos 改不动带，
+    /// CreateWindowInBand 建 13 带返回 ACCESS_DENIED），候选窗落在面板矩形内
+    /// 就必然被盖住。此时只能改位置：优先横移到浮层侧边（保持与输入行同高，
+    /// 距离最近），两侧都放不下再往上下让，最后一律夹进显示器工作区。
+    unsafe fn avoid_higher_band(hwnd: HWND, w: i32, h: i32, x: i32, y: i32) -> (i32, i32) {
+        const GAP: i32 = 4;
+        let fg = GetForegroundWindow();
+        if fg.is_null() || fg == hwnd {
+            return (x, y);
+        }
+        let (fg_band, my_band) = match (window_band(fg), window_band(hwnd)) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return (x, y),
+        };
+        // 2 带排在各 immersive 带之上（带号大小不等于前后关系），已经在 2 带
+        // 就没有必要再躲宿主浮层。
+        if my_band == ZBID_UIACCESS {
+            return (x, y);
+        }
+        if fg_band <= my_band {
+            return (x, y);
+        }
+        let mut r: RECT = std::mem::zeroed();
+        if GetWindowRect(fg, &mut r) == 0 {
+            return (x, y);
+        }
+        if x + w <= r.left || x >= r.right || y + h <= r.top || y >= r.bottom {
+            return (x, y);
+        }
+        let (wl, wt, wr, wb) = match work_rect(hwnd) {
+            Some(v) => v,
+            None => return (x, y),
+        };
+        let clamp_y = |v: i32| v.clamp(wt, (wb - h).max(wt));
+        // 先横移、保持与输入行同高：浮层贴边的那一侧空间通常更富余。
+        let right = r.right + GAP;
+        if right + w <= wr {
+            return (right, clamp_y(y));
+        }
+        let left = r.left - GAP - w;
+        if left >= wl {
+            return (left, clamp_y(y));
+        }
+        // 两侧都放不下，再往上下让。
+        let up = r.top - GAP - h;
+        if up >= wt {
+            return (x.clamp(wl, (wr - w).max(wl)), up);
+        }
+        let down = r.bottom + GAP;
+        if down + h <= wb {
+            return (x.clamp(wl, (wr - w).max(wl)), down);
+        }
+        (x, clamp_y(y))
     }
 
     unsafe extern "system" fn wnd_proc(
@@ -2585,6 +2730,75 @@ use std::cell::RefCell;
         mapped: bool,
     }
 
+    /// CreateWindowInBand：把窗口放进指定 z 带。
+    ///
+    /// ZBID_UIACCESS(2) 排在各 immersive 带之上——实测 band 2 的窗口可以压在
+    /// 任务栏搜索面板（band 13）之上。普通进程调用返回 ACCESS_DENIED，只有带
+    /// uiAccess 令牌的进程才建得出来（令牌要求：清单 uiAccess="true" + 有效
+    /// Authenticode 签名 + 位于 Program Files + 由 shell 启动）。
+    type CreateWindowInBandFn = unsafe extern "system" fn(
+        u32,
+        *const u16,
+        *const u16,
+        u32,
+        i32,
+        i32,
+        i32,
+        i32,
+        HWND,
+        *mut core::ffi::c_void,
+        HINSTANCE,
+        *mut core::ffi::c_void,
+        u32,
+    ) -> HWND;
+    static CWIB_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    const ZBID_UIACCESS: u32 = 2;
+
+    /// 建 2 带窗口；取不到导出符号或没有 uiAccess 令牌时返回空，由调用方回退。
+    unsafe fn window_in_uia_band(
+        ex: u32,
+        class: *const u16,
+        title: *const u16,
+        style: u32,
+        w: i32,
+        h: i32,
+        inst: HINSTANCE,
+    ) -> HWND {
+        use std::sync::atomic::Ordering;
+        let mut addr = CWIB_FN.load(Ordering::Relaxed);
+        if addr == 0 {
+            let lib = GetModuleHandleW(utf16z("user32.dll").as_ptr());
+            addr = if lib.is_null() {
+                usize::MAX
+            } else {
+                match GetProcAddress(lib, b"CreateWindowInBand\0".as_ptr()) {
+                    Some(f) => f as usize,
+                    None => usize::MAX,
+                }
+            };
+            CWIB_FN.store(addr, Ordering::Relaxed);
+        }
+        if addr == usize::MAX {
+            return std::ptr::null_mut();
+        }
+        let f: CreateWindowInBandFn = std::mem::transmute(addr);
+        f(
+            ex,
+            class,
+            title,
+            style,
+            0,
+            0,
+            w,
+            h,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            inst,
+            std::ptr::null_mut(),
+            ZBID_UIACCESS,
+        )
+    }
+
     /// 候选窗创建参数（分层 + 置顶 + 不激活 + 工具窗）
     const CAND_EX: u32 = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
     const CAND_STYLE: u32 = WS_POPUP;
@@ -2642,20 +2856,38 @@ use std::cell::RefCell;
             };
             // 已注册时返回 0，忽略（同线程每类只建一次）
             RegisterClassW(&wc);
-            let hwnd = CreateWindowExW(
-                ex,
-                classw.as_ptr(),
-                utf16z(title).as_ptr(),
-                style,
-                200,
-                500,
-                w,
-                h,
-                std::ptr::null_mut(), // 无父窗口
-                std::ptr::null_mut(), // 无菜单
-                hinstance,
-                std::ptr::null(),
-            );
+            // 候选窗与字母区优先放进 ZBID_UIACCESS：uiAccess 构建能建出来，
+            // 就能压在任务栏搜索面板等 immersive 带之上；普通构建（dev）该调用
+            // 返回 ACCESS_DENIED，回退到桌面带创建，行为与改动前一致。
+            // 设置窗口是用户主动调出的普通窗口，留在桌面带。
+            let mut hwnd = std::ptr::null_mut();
+            if !is_set_win {
+                hwnd = window_in_uia_band(
+                    ex,
+                    classw.as_ptr(),
+                    utf16z(title).as_ptr(),
+                    style,
+                    w,
+                    h,
+                    hinstance,
+                );
+            }
+            if hwnd.is_null() {
+                hwnd = CreateWindowExW(
+                    ex,
+                    classw.as_ptr(),
+                    utf16z(title).as_ptr(),
+                    style,
+                    200,
+                    500,
+                    w,
+                    h,
+                    std::ptr::null_mut(), // 无父窗口
+                    std::ptr::null_mut(), // 无菜单
+                    hinstance,
+                    std::ptr::null(),
+                );
+            }
             if hwnd.is_null() {
                 eprintln!(
                     "heng-ui: CreateWindowExW 失败 (GetLastError={})",
@@ -2843,14 +3075,27 @@ use std::cell::RefCell;
             };
             s.pos = (x, y);
             unsafe {
+                // 候选窗/字母区：先躲更高 z 带的宿主浮层，再定位。
+                // 设置窗口不参与（可激活、不置顶、且用户主动调出）。
+                let (x, y) = if win == 1 {
+                    (x, y)
+                } else {
+                    avoid_higher_band(s.hwnd, w as i32, h as i32, x, y)
+                };
+                s.pos = (x, y);
+                let (after, flags) = if win == 1 {
+                    (std::ptr::null_mut(), SWP_NOACTIVATE | SWP_NOZORDER)
+                } else {
+                    (HWND_TOPMOST, SWP_NOACTIVATE)
+                };
                 SetWindowPos(
                     s.hwnd,
-                    std::ptr::null_mut(),
+                    after,
                     x,
                     y,
                     w as i32,
                     h as i32,
-                    SWP_NOACTIVATE | SWP_NOZORDER,
+                    flags,
                 );
             }
         }
@@ -3627,15 +3872,36 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         // y 是光标行的 flip 底边，窗口顶边从这条线再往下挪 CARET_GAP 点，
         // 让候选窗和输入文字之间留一条呼吸缝（完全贴住看着像粘连）。
         const CARET_GAP: i32 = 4;
-        let y_eff = if flip.get() {
-            // flip_top 来自 work_area，是**设备像素**；last_caret_top 与
-            // h_total/scale 都是**点** —— 直接比较会因量纲错而把窗口顶边
-            // 强行压到设备像素的 flip_top 上（尺度差一个 scale）。
-            // 这里折回点域再取 max，保证「不越过工作区上边界」这条夹紧生效。
-            let flip_top_pt = (flip_top.get() as f32 / scale).round() as i32;
-            (last_caret_top.get() - (h_total as f32 / scale).round() as i32).max(flip_top_pt)
+        // 向上翻转时窗口底边与输入行顶边之间的缝。向下展开时靠 CARET_GAP 留缝，
+        // 向上时若贴死行顶，视觉上会像压在文字上（圆角与字形上缘只差几像素）。
+        const FLIP_GAP: i32 = 5;
+        // 窗口高折到锚点域：锚点是设备像素时直接取 h_total，是逻辑点时取
+        // h_total/scale。两者混用会让翻转后的底边少退 (1-1/scale)×条高，
+        // 1.5625 缩放下正好把窗口压进输入行约 21px。
+        let bar_in = if caret_in_device_px() {
+            h_total as i32
         } else {
-            y + CARET_GAP
+            (h_total as f32 / scale).round() as i32
+        };
+        let y_eff = if flip.get() {
+            (last_caret_top.get() - bar_in - FLIP_GAP).max(dev_to_caret(flip_top.get(), scale))
+        } else {
+            let y0 = y + CARET_GAP;
+            // 贴底场景（任务栏搜索框、屏幕下沿的输入行）：光标下方放不下时
+            // 抬到光标行上方。Win32 后端只做 SetWindowPos、不夹紧，不处理时
+            // 窗口落在任务栏之后或屏幕下缘之外，表现为「能上屏但看不到候选窗」。
+            // bottom 是设备像素，所以比较前把 y0+条高折到设备域。
+            match work_area_at(last_x.get(), last_y.get()) {
+                Some((top, bottom))
+                    if bottom > top
+                        && bottom > 0
+                        && last_caret_top.get() > 0
+                        && caret_to_dev(y0 + bar_in, scale) > bottom =>
+                {
+                    (last_caret_top.get() - bar_in - FLIP_GAP).max(dev_to_caret(top, scale))
+                }
+                _ => y0,
+            }
         };
         // x 不做水平夹紧：x 是外壳报的**点**，窗口宽 w 是**设备像素**，
         // 两者不同域，夹紧必然算错。越界由外壳侧（知道真实屏幕点制尺寸）解决。
@@ -4400,13 +4666,9 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         let panel_h_phys = last_panel_h.get();
                         match work_area_at(last_x.get(), last_y.get()) {
                             Some((top, bottom)) if bottom > top && bottom > 0 => {
-                                // 量纲对齐：work_area 的 top/bottom 与 panel_h_phys
-                                // 都是**设备像素**，而 last_y 来自外壳的光标锚点，是**点**
-                                // （外壳按 IMK 的屏幕坐标直传，未乘 scale）。
-                                // 直接相加会得到「点 + 设备像素」的混合值，
-                                // 判定恒为「下方有空间」→ 永不翻转
-                                //（实测 last_y=1066 vs bottom=2400，差得太远）。
-                                let caret_y_phys = (last_y.get() as f32 * scale).round() as i32;
+                                // 量纲对齐：bottom 与 panel_h_phys 是**设备像素**，
+                                // last_y 的域随平台而变（见 caret_to_dev）。
+                                let caret_y_phys = caret_to_dev(last_y.get(), scale);
                                 if caret_y_phys + panel_h_phys as i32 + 8 > bottom {
                                     flip.set(true);
                                     flip_top.set(top);
@@ -4843,6 +5105,10 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 sync_apply_status(&sui, &crate::sync::status_snapshot());
             }
         }
+
+        // 3e. 置顶维持已取消：宿主浮层处在更高的 z 带（任务栏搜索面板
+        //     SearchApp.exe = ZBID_IMMERSIVE_SEARCH），跨带重申 topmost 无效，
+        //     改为定位时把候选窗挪出该浮层矩形（见 win_backend::avoid_higher_band）。
 
         std::thread::sleep(Duration::from_millis(8));
     }
