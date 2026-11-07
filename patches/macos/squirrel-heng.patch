@@ -866,7 +866,7 @@ index 896d8d2..0a8518e 100644
      let sharedPath = Bundle.main.sharedSupportPath ?? ""
      let userPath = SquirrelApp.userDir.path
 diff --git a/sources/SquirrelInputController.swift b/sources/SquirrelInputController.swift
-index f09e8ab..6f79948 100644
+index f09e8ab..38986f9 100644
 --- a/sources/SquirrelInputController.swift
 +++ b/sources/SquirrelInputController.swift
 @@ -15,14 +15,79 @@ final class SquirrelInputController: IMKInputController {
@@ -1048,7 +1048,7 @@ index f09e8ab..6f79948 100644
          }
        }
  
-@@ -126,6 +257,55 @@ final class SquirrelInputController: IMKInputController {
+@@ -126,6 +257,62 @@ final class SquirrelInputController: IMKInputController {
      return handled
    }
  
@@ -1060,10 +1060,17 @@ index f09e8ab..6f79948 100644
 +  /// 不消费就原样放行（英文、回车、方向键仍由宿主自己处理）。
 +  /// ⌘ / ⌃ 组合键一律放行 —— Cmd+F、Cmd+S、Cmd+C/V/X/Z 全部回到宿主自己的路径。
 +  ///
-+  /// 安全性：只在最前台是 HBuilderX 时介入，且只处理「非修饰键组合」，
-+  /// 其它应用、其它按键一律不碰。
++  /// 安全性：**只有本输入法当前处于激活态时才介入**（`client` 非 nil），
++  /// 且只在最前台是 HBuilderX 时、只处理「非修饰键组合」。
++  ///
++  /// `client` 这道闸必须有。deactivateServer 会把 client 置 nil，而
++  /// `currentApp` 是我们缓存的旧值、失活后仍然是 HBuilderX —— 少了这道闸，
++  /// 用户切到别的输入法（例如微信）后，tap 仍然吞掉 HBuilderX 里的按键，
++  /// 而 `client?.insertText` 此时是空操作 → 键被吃掉、字却上不了屏，
++  /// 表现就是「别的输入法在这个应用里彻底不能用」。
++  ///（2026-11-07 实锤：日志里 `SESS deactivate` 之后仍有成串 `PROC ... handled=false`。）
 +  func handleTapKey(_ event: CGEvent) -> Bool {
-+    guard session != 0 else { return false }
++    guard let client = client, session != 0 else { return false }
 +    guard currentApp == "io.dcloud.HBuilderX" else { return false }
 +    guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "io.dcloud.HBuilderX" else {
 +      return false
@@ -1089,7 +1096,7 @@ index f09e8ab..6f79948 100644
 +      $0.value < 0x20 || $0.value == 0x7F || (0xF700...0xF8FF).contains($0.value)
 +    }
 +    if printable {
-+      client?.insertText(chars, replacementRange: .empty)
++      client.insertText(chars, replacementRange: .empty)
 +      return true
 +    }
 +    // 组字中遇到 rime 不要的键（Tab 等）：先丢掉组字，再把键还给宿主，
@@ -1104,7 +1111,7 @@ index f09e8ab..6f79948 100644
    func selectCandidate(_ index: Int) -> Bool {
      let success = heng_select_candidate_on_current_page(session, Int32(index)) != 0
      if success {
-@@ -163,7 +343,10 @@ final class SquirrelInputController: IMKInputController {
+@@ -163,7 +350,10 @@ final class SquirrelInputController: IMKInputController {
    }
  
    override func recognizedEvents(_ sender: Any!) -> Int {
@@ -1116,7 +1123,7 @@ index f09e8ab..6f79948 100644
    }
  
    // 方向键不走 handle(event)：client 把它们绑定为 NSResponder action（moveLeft: 等）
-@@ -183,11 +366,20 @@ final class SquirrelInputController: IMKInputController {
+@@ -183,11 +373,20 @@ final class SquirrelInputController: IMKInputController {
          return true
        }
      }
@@ -1138,7 +1145,7 @@ index f09e8ab..6f79948 100644
      var keyboardLayout = NSApp.squirrelAppDelegate.config?.getString("keyboard_layout") ?? ""
      if keyboardLayout == "last" || keyboardLayout == "" {
        keyboardLayout = ""
-@@ -211,6 +403,18 @@ final class SquirrelInputController: IMKInputController {
+@@ -211,6 +410,18 @@ final class SquirrelInputController: IMKInputController {
        lastModifiers.remove(.capsLock)
      }
      preedit = ""
@@ -1157,7 +1164,7 @@ index f09e8ab..6f79948 100644
      if session != 0 {
        let state = hengGetOption(session, "ascii_mode")
        let label = hengStateLabel(session, "ascii_mode", state, abbreviated: true)
-@@ -222,6 +426,8 @@ final class SquirrelInputController: IMKInputController {
+@@ -222,6 +433,8 @@ final class SquirrelInputController: IMKInputController {
      self.client = client as? IMKTextInput
      super.init(server: server, delegate: delegate, client: client)
      createSession()
@@ -1166,7 +1173,7 @@ index f09e8ab..6f79948 100644
  
      NotificationCenter.default.addObserver(
        forName: .init("SquirrelSetASCIIModeNotification"),
-@@ -241,16 +447,166 @@ final class SquirrelInputController: IMKInputController {
+@@ -241,16 +454,171 @@ final class SquirrelInputController: IMKInputController {
    }
  
    override func deactivateServer(_ sender: Any!) {
@@ -1176,6 +1183,11 @@ index f09e8ab..6f79948 100644
 +    // 切走时别把「⌘ 按住中」的挂起状态带过去，否则新应用里占位一直补不上。
 +    placeHolderSuspended = false
      client = nil
++    // 失活后事件层必须彻底撒手：tap 回调靠 lastActive 找 controller，
++    // 置 nil 它就不会再接管任何按键（详见 handleTapKey 的 client 闸）。
++    if SquirrelInputController.lastActive === self {
++      SquirrelInputController.lastActive = nil
++    }
    }
  
    override func hidePalettes() {
@@ -1333,7 +1345,7 @@ index f09e8ab..6f79948 100644
    override func commitComposition(_ sender: Any!) {
      self.client ?= sender as? IMKTextInput
      if session != 0 {
-@@ -261,56 +617,43 @@ final class SquirrelInputController: IMKInputController {
+@@ -261,56 +629,43 @@ final class SquirrelInputController: IMKInputController {
      }
    }
  
@@ -1408,7 +1420,7 @@ index f09e8ab..6f79948 100644
    private(set) var specialCommentIndices: [ReservedPropertyKey: Set<Int>] = [:]
  
    func handleReservedProperty(key rawKey: String, value rawValue: String, for sessionId: RimeSessionId) throws(ReservedPropertyError) {
-@@ -328,6 +671,9 @@ final class SquirrelInputController: IMKInputController {
+@@ -328,6 +683,9 @@ final class SquirrelInputController: IMKInputController {
    }
  
    deinit {
@@ -1418,7 +1430,7 @@ index f09e8ab..6f79948 100644
      destroySession()
    }
  }
-@@ -387,6 +733,7 @@ private extension SquirrelInputController {
+@@ -387,6 +745,7 @@ private extension SquirrelInputController {
        return "UnknownApp\(SquirrelInputController.unknownAppCnt)"
      }()
      print("createSession: \(app)")
@@ -1426,7 +1438,7 @@ index f09e8ab..6f79948 100644
      currentApp = app
      session = app.withCString { heng_start_session($0) }
      schemaId = ""
-@@ -402,11 +749,12 @@ private extension SquirrelInputController {
+@@ -402,11 +761,12 @@ private extension SquirrelInputController {
      }
      // v6 行为统一层：app_options 与选项初值由 core 在 set_session_owner 时统一应用，
      // 外壳不再自行读取/下发（与 Windows/Linux 外壳一致）。
@@ -1440,7 +1452,7 @@ index f09e8ab..6f79948 100644
        heng_end_session(session)
        session = 0
      }
-@@ -417,7 +765,20 @@ private extension SquirrelInputController {
+@@ -417,7 +777,20 @@ private extension SquirrelInputController {
      // 注：不再同步 _linear/_vertical 到 core。这两个原版 Squirrel 的 UI 提示选项
      // 会让 librime 把方向键路由到组合串光标移动，破坏 key_binder 的
      // Left→Up / Right→Down 候选切换（与 Windows 端行为统一的关键）。
@@ -1461,7 +1473,7 @@ index f09e8ab..6f79948 100644
  
      if !handled {
        let isVimBackInCommandMode = rimeKeycode == XK_Escape || ((rimeModifiers & kControlMask.rawValue != 0) && (rimeKeycode == XK_c || rimeKeycode == XK_C || rimeKeycode == XK_bracketleft))
-@@ -446,6 +807,11 @@ private extension SquirrelInputController {
+@@ -446,6 +819,11 @@ private extension SquirrelInputController {
      if let text = hengTakeCommit(session) {
        commit(string: text)
      }
@@ -1473,7 +1485,7 @@ index f09e8ab..6f79948 100644
    }
  
    // Preserve reserved comment marks when librime requests a UI-only refresh.
-@@ -457,24 +823,31 @@ private extension SquirrelInputController {
+@@ -457,24 +835,31 @@ private extension SquirrelInputController {
  
      var status = HengStatus()
      status.data_size = Int32(MemoryLayout<HengStatus>.size)
@@ -1509,7 +1521,7 @@ index f09e8ab..6f79948 100644
  
        let start = stringIndex(utf8Offset: Int(ctx.sel_start), in: preedit)
        let end = stringIndex(utf8Offset: Int(ctx.sel_end), in: preedit)
-@@ -554,17 +927,23 @@ private extension SquirrelInputController {
+@@ -554,17 +939,23 @@ private extension SquirrelInputController {
        let lastPage = ctx.is_last_page != 0
  
        let selRange = NSRange(location: start.utf16Offset(in: preedit), length: preedit.utf16.distance(from: start, to: end))
@@ -1537,7 +1549,7 @@ index f09e8ab..6f79948 100644
  
      let forceMarkedText =
        session != 0 &&
-@@ -583,13 +962,69 @@ private extension SquirrelInputController {
+@@ -583,13 +974,69 @@ private extension SquirrelInputController {
      }
  
      client.insertText(string, replacementRange: .empty)
@@ -1609,7 +1621,7 @@ index f09e8ab..6f79948 100644
        return
      }
  
-@@ -597,6 +1032,18 @@ private extension SquirrelInputController {
+@@ -597,6 +1044,18 @@ private extension SquirrelInputController {
      self.caretPos = caretPos
      self.selRange = selRange
  
