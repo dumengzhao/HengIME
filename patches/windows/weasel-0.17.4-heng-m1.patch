@@ -6259,8 +6259,7 @@ index 4439e57..e33d23b 100644
    </PropertyGroup>
    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
 diff --git a/test/TestWeaselIPC/TestWeaselIPC.vcxproj b/test/TestWeaselIPC/TestWeaselIPC.vcxproj
-index eb773d4..0f98744 10warning: in the working copy of 'uia-sign.ps1', LF will be replaced by CRLF the next time Git touches it
-0644
+index eb773d4..0f98744 100644
 --- a/test/TestWeaselIPC/TestWeaselIPC.vcxproj
 +++ b/test/TestWeaselIPC/TestWeaselIPC.vcxproj
 @@ -119,7 +119,7 @@
