@@ -1,10 +1,13 @@
 name: CI
 
+# 只手动触发（workflow_dispatch）。push 与 pull_request 都不建运行：
+# 本地构建链已经覆盖同样的步骤，CI 的价值在于「换一台干净机器复验」，
+# 那是有需要时主动跑一次的事，不必每次推送都占队列。
+# 手动触发：Actions 页面「Run workflow」，或
+#   curl -X POST -H "Authorization: Bearer <token>" \
+#     https://api.github.com/repos/dumengzhao/HengIME/actions/workflows/ci.yml/dispatches \
+#     -d '{"ref":"main"}'
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
