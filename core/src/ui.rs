@@ -411,8 +411,8 @@ slint::slint! {
             text: root.probe-text;
             font-size: root.probe-font * 1px;
         }
-        width: root.hint-only ? 36px : root.panel-width * 1px;
-        height: root.hint-only ? 36px
+        width: root.hint-only ? 30px : root.panel-width * 1px;
+        height: root.hint-only ? 30px
             : (root.letters-row-h
             + (root.menu-open ? root.menu-height * 1px
             : (root.expanded ? root.panel-height * 1px
@@ -641,12 +641,12 @@ slint::slint! {
             y: root.hint-only ? 0px : (root.letters-row-h + 4px);
             width: root.hint-only ? parent.width : 120px;
             height: root.hint-only ? parent.height : 32px;
-            border-radius: root.hint-only ? 10px : 8px;
+            border-radius: 8px;
             background: root.hint-only ? transparent : (root.hint == 1 ? #2164f1 : #9aa3ad);
             Text {
                 text: root.hint == 1 ? "中" : "英";
                 color: #ffffff;
-                font-size: root.hint-only ? 24px : 20px;
+                font-size: 20px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -4460,12 +4460,23 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         }
     });
 
+    // 空闲时把「等下一条命令」交给 channel 阻塞（见循环末尾），
+    // 这样窗口全隐藏时不必每 8ms 醒一次。
+    let mut pending_cmd: Option<UiCmd> = None;
     loop {
         // 0. 动画/定时器心跳：自定义平台必须显式驱动，否则所有 animate
         //    （设置页开关白点等）永远停在初始值
         slint::platform::update_timers_and_animations();
         // 1. 命令
-        while let Ok(cmd) = rx.try_recv() {
+        let mut cmd_opt = pending_cmd.take();
+        loop {
+            let cmd = match cmd_opt.take() {
+                Some(c) => c,
+                None => match rx.try_recv() {
+                    Ok(c) => c,
+                    Err(_) => break,
+                },
+            };
             match cmd {
                 UiCmd::Sync { rime_id, x, y, top } => {
                     // 气泡显示期间来了输入 → 立即退出气泡态，走正常候选渲染
@@ -4959,8 +4970,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         last_y.set(_bottom);
                         last_caret_top.set(top.clamp(_bottom - 400, _bottom));
                     }
-                    let bw = (36.0 * scale).round() as u32;
-                    let bh = (36.0 * scale).round() as u32;
+                    let bw = (30.0 * scale).round() as u32;
+                    let bh = (30.0 * scale).round() as u32;
                     let (sw, sh) = screen_size();
                     // 从未获得过光标位置（last_caret_top 为 0 = 外壳未上报过）
                     // → 兜底屏幕右下角（通知风格），否则锚光标行顶上方
@@ -4973,8 +4984,10 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         )
                     };
                     paint(&mut backend, bw, bh, hx, hy, true);
+                    // 停留 1000ms：900ms 观感是「闪一下就没了」，1400ms 又太长。
+                    // 气泡是给余光看的，尺寸 30×30、字号 20px（原 36/24 偏大）。
                     hint_deadline
-                        .set(Some(std::time::Instant::now() + Duration::from_millis(900)));
+                        .set(Some(std::time::Instant::now() + Duration::from_millis(1000)));
                 }
                 UiCmd::SetExpanded(v) => {
                     if v || !*visible.borrow() {
@@ -5110,7 +5123,15 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         //     SearchApp.exe = ZBID_IMMERSIVE_SEARCH），跨带重申 topmost 无效，
         //     改为定位时把候选窗挪出该浮层矩形（见 win_backend::avoid_higher_band）。
 
-        std::thread::sleep(Duration::from_millis(8));
+        // 空闲节拍：有窗口可见时保持 8ms（动画与按键响应优先），
+        // 全部隐藏时直接阻塞等命令、最多 50ms —— 唤醒频率从 125Hz 降到 20Hz，
+        // 空闲时既不吃 CPU 也不妨碍 App Nap。命令一到立刻被唤醒，不影响响应。
+        let idle_wait = if *visible.borrow() || settings_visible.get() || hint_deadline.get().is_some() {
+            Duration::from_millis(8)
+        } else {
+            Duration::from_millis(50)
+        };
+        pending_cmd = rx.recv_timeout(idle_wait).ok();
     }
 }
 
