@@ -301,7 +301,10 @@ librime 的 `InstallationUpdate` 只认已存在的值）。进程内 timer 线�
 
 ## 9.1 GitHub Actions
 
-`.github/workflows/ci.yml` 四个 job，`push` 与 `pull_request` 到 `main` 时触发。
+`.github/workflows/ci.yml` 六个 job，只由 `workflow_dispatch` 手动触发（Actions
+页面「Run workflow」，或 `POST /repos/dumengzhao/HengIME/actions/workflows/ci.yml/dispatches`
+带 `{"ref":"main"}`）。`push` 与 `pull_request` 不建运行：本地构建链覆盖同样的步骤，
+CI 的用途是换一台干净机器复验。
 
 | job | runner | 内容 |
 |---|---|---|
