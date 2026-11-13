@@ -12,6 +12,17 @@ third_party/externals/*
 # 本地运行时数据（RIME 用户目录、部署产物、日志）
 runtime/
 runtime-dev/
+# 例外：工具窗口彩色 emoji 雪碧图是**运行必需资源**（Slint 画不出 CBDT
+# 彩色字形），必须随仓库分发到六端。由 tools/gen-emoji-sheet.py 生成。
+!runtime/
+runtime/*
+!runtime/rime-shared/
+runtime/rime-shared/*
+!runtime/rime-shared/others/
+runtime/rime-shared/others/*
+!runtime/rime-shared/others/emoji-sheet.png
+!runtime/rime-shared/others/emoji-sheet.json
+!runtime/rime-shared/others/emoji-names-zh.json
 
 # Rust
 target/

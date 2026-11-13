@@ -209,6 +209,10 @@ static SESSION_MAP: LazyLock<Mutex<HashMap<u64, RimeSessionId>>> =
 /// 会话归属应用（M0.5-Q3：SetSessionOwner 语义，app_options 应用与开关传播的基础）
 static OWNER_MAP: LazyLock<Mutex<HashMap<u64, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// 最近一次登记的会话句柄：工具窗口点击上屏用。候选窗 `current` 只在
+/// 打字触发 Sync 时才有值，而工具窗常在"打完一段话后"使用，此时若
+/// 焦点仍在宿主编辑器，会话仍活着但未必被 Sync 记过 —— 用最近句柄兜底。
+static LAST_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub struct SessionRegistry;
 
@@ -217,10 +221,21 @@ impl SessionRegistry {
     pub fn insert(&self, rime_id: RimeSessionId, owner: Option<String>) -> u64 {
         let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
         SESSION_MAP.lock().unwrap().insert(id, rime_id);
+        LAST_SESSION.store(id, Ordering::Relaxed);
         if let Some(app) = owner {
             OWNER_MAP.lock().unwrap().insert(id, app);
         }
         id
+    }
+
+    /// 最近登记的会话句柄（工具窗口点击上屏兜底）。
+    pub fn last_handle(&self) -> Option<u64> {
+        let id = LAST_SESSION.load(Ordering::Relaxed);
+        if id != 0 && SESSION_MAP.lock().unwrap().contains_key(&id) {
+            Some(id)
+        } else {
+            None
+        }
     }
 
     pub fn rime_id(&self, id: u64) -> Option<RimeSessionId> {

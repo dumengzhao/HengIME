@@ -189,7 +189,7 @@ new file mode 100644
 index 0000000..f3e5e51
 --- /dev/null
 +++ b/sources/HengWindowRenderer.swift
-@@ -0,0 +1,644 @@
+@@ -0,0 +1,647 @@
 +//
 +//  HengWindowRenderer.swift
 +//  Squirrel
@@ -224,6 +224,8 @@ index 0000000..f3e5e51
 +    case candidate = 0   // 候选窗
 +    case settings = 1   // 设置窗口
 +    case letters = 2    // 顶部字母区
++    case tools = 3      // 符号窗口（长驻、nonactivating）
++    case emoji = 4      // 表情窗口（长驻、nonactivating，与符号窗独立）
 +  }
 +
 +  /// 操作类型，与 core 的 op 参数一一对应
@@ -563,10 +565,10 @@ index 0000000..f3e5e51
 +    panel.level = .init(Int(CGShieldingWindowLevel()))
 +    panel.isReleasedWhenClosed = false
 +
-+    // ===== 候选窗要能点选，必须显式开这两项 =====
++    // ===== 候选窗/工具窗要能点选，必须显式开这两项 =====
 +    // nonactivatingPanel 默认 ignoresMouseEvents = true，点它等于点穿到下层应用，
-+    // 候选格永远收不到点击。设置窗是 .borderless 不受影响，但统一开更安全。
-+    if kind == .candidate {
++    // 候选格/符号格永远收不到点击。设置窗是 .borderless 不受影响。
++    if kind == .candidate || kind == .tools {
 +      panel.ignoresMouseEvents = false
 +      // 不激活也能收点击：候选窗是 nonactivatingPanel，点击它不应抢走
 +      // 宿主应用（TextEdit 等）的键盘焦点，否则用户点一下候选词就丢了编辑焦点。
@@ -758,21 +760,22 @@ index 0000000..f3e5e51
 +    // 按事件落点分发到对应窗口 —— 两个 monitor 会被后装的截走，反而漏事件。
 +    monitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
 +      guard let self else { return event }
-+      // 候选窗优先：它在最上层（CGShieldingWindowLevel），
-+      // 设置窗打开时也可能被点到，两者重叠时以候选窗为准。
-+      if let win = self.windowUnderMouse(event), win == Win.candidate.rawValue {
++      // 按落点分发：候选窗 / 设置窗 / 工具窗各自收自己的事件。
++      // 工具窗是 nonactivatingPanel，点击不抢宿主键盘焦点。
++      if let win = self.windowUnderMouse(event) {
 +        self.forward(event, win: win)
-+      } else if panels[Win.settings.rawValue] != nil {
-+        self.forward(event, win: Win.settings.rawValue)
 +      }
 +      return event
 +    }
 +  }
 +
-+  /// 事件落在哪个候选窗/设置窗上（点坐标 → 窗口 frame 命中测试）。
++  /// 事件落在哪个窗口上（点坐标 → 窗口 frame 命中测试）。
 +  private func windowUnderMouse(_ event: NSEvent) -> Int? {
 +    let loc = NSEvent.mouseLocation
-+    for win in [Win.candidate.rawValue, Win.settings.rawValue] {
++    for win in [
++      Win.candidate.rawValue, Win.settings.rawValue,
++      Win.tools.rawValue, Win.emoji.rawValue
++    ] {
 +      if let panel = panels[win], panel.frame.contains(loc) { return win }
 +    }
 +    return nil

@@ -112,6 +112,8 @@ unsafe extern "C" fn on_notify(
 pub struct Engine {
     api: *const rime_ffi::RimeApi,
     user_data_dir: std::path::PathBuf,
+    /// 共享数据目录（雾凇拼音配置、词表）。工具面板的数据源从这里静态直读。
+    shared_data_dir: Option<std::path::PathBuf>,
 }
 
 unsafe impl Send for Engine {}
@@ -190,6 +192,7 @@ impl Engine {
         Ok(Engine {
             api: api as *const rime_ffi::RimeApi,
             user_data_dir: config.user_data_dir,
+            shared_data_dir: config.shared_data_dir,
         })
     }
 
@@ -200,6 +203,11 @@ impl Engine {
     /// 用户数据目录（选项持久化文件 heng_options.yaml 的落点）
     pub fn user_data_dir(&self) -> &std::path::Path {
         &self.user_data_dir
+    }
+
+    /// 共享数据目录（工具面板静态数据源）
+    pub fn shared_data_dir(&self) -> Option<&std::path::Path> {
+        self.shared_data_dir.as_deref()
     }
 
     /// 重新部署（full_check）：设置中心写入 custom.yaml patch 后调用。

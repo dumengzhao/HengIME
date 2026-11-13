@@ -296,6 +296,9 @@ pub extern "C" fn heng_describe() -> *const c_char {
                 "heng_config_open_schema", "heng_config_get_double",
                 "heng_clear", "heng_free_string", "heng_last_error",
                 "heng_settings_show", "heng_settings_hide",
+                "heng_tools_show", "heng_tools_hide",
+                "heng_emoji_show", "heng_emoji_hide",
+                "heng_symbols_show", "heng_symbols_hide",
                 "heng_sync_configure", "heng_sync_set_enabled", "heng_sync_config",
                 "heng_sync_now", "heng_sync_status", "heng_installation_id"
             ]
@@ -871,7 +874,27 @@ pub extern "C" fn heng_process_key_ex(
             return HENG_FALSE;
         };
         let _guard = crate::global::OP_LOCK.lock().unwrap();
-        // 0. 自绘候选窗键盘语义（微信同款）。整段逻辑抽在 ui_nav_key 里，
+        // 0. Caps Lock 开启时字母一律大写直出：不进组字流程，也就不会弹候选窗。
+        //    锁定位沿用 librime/X 的 LockMask(1<<1)，外壳把 CapsLock 状态并入 mask。
+        //    大写锁定期间 Shift 不改变大小写（中英切换也由外壳禁用），故只让
+        //    Ctrl/Alt/Super 组合键绕开；其余输入一律大写。
+        const LOCK_MASK: c_int = 1 << 1;
+        const BLOCK_MODS: c_int = (1 << 2) | (1 << 3) | (1 << 6);
+        if mask & LOCK_MASK != 0 && mask & BLOCK_MODS == 0 {
+            if let Ok(b) = u8::try_from(keysym) {
+                if b.is_ascii_alphabetic() {
+                    // 大写字母不参与组字：丢掉未完成的组合串，直接上屏
+                    let _ = engine.clear_composition(rime_id);
+                    if !out_commit.is_null() {
+                        if let Ok(c) = CString::new(vec![b.to_ascii_uppercase()]) {
+                            unsafe { *out_commit = c.into_raw() };
+                        }
+                    }
+                    return HENG_TRUE;
+                }
+            }
+        }
+        // 1. 自绘候选窗键盘语义（微信同款）。整段逻辑抽在 ui_nav_key 里，
         //    与 heng_ui_nav_key（macOS 专用入口）共用同一实现，避免两端漂移。
         //    keyup（RELEASE_MASK）不拦截，否则一次按键 = keydown+keyup 两次导航。
         let ui_nav = if mask & (1 << 30) == 0 {
@@ -879,7 +902,7 @@ pub extern "C" fn heng_process_key_ex(
         } else {
             false
         };
-        // 1. 按键
+        // 2. 按键
         let handled = if ui_nav {
             true
         } else {
@@ -891,7 +914,7 @@ pub extern "C" fn heng_process_key_ex(
                 }
             }
         };
-        // 2. 取走待上屏文本（消费语义）
+        // 3. 取走待上屏文本（消费语义）
         if !out_commit.is_null() {
             match engine.get_commit(rime_id) {
                 Ok(text) if !text.is_empty() => match CString::new(text) {
@@ -908,7 +931,7 @@ pub extern "C" fn heng_process_key_ex(
                 }
             }
         }
-        // 3. 组合串与候选快照
+        // 4. 组合串与候选快照
         if !out_ctx.is_null() {
             match engine.get_context(rime_id) {
                 Ok(snapshot) => {
@@ -1023,6 +1046,70 @@ pub extern "C" fn heng_settings_show(page: c_int) -> c_int {
 pub extern "C" fn heng_settings_hide() -> c_int {
     ffi_guard!(HENG_FALSE, {
         crate::ui::ui_settings_hide();
+        HENG_TRUE
+    })
+}
+
+/// 打开工具窗口（v12；长驻、手动关闭，宿主可绑快捷键）。
+/// tab = 0 最近使用 / 1 表情 / 2 符号（最近为空时 UI 侧自动落到表情）。
+/// 窗口不夺焦点，点击格子连续上屏。
+#[no_mangle]
+pub extern "C" fn heng_tools_show(tab: c_int) -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        crate::ui::ui_tools_show(tab.max(0) as usize);
+        HENG_TRUE
+    })
+}
+
+/// 打开表情窗口（v13）。长驻、手动关闭、不夺焦点。
+#[no_mangle]
+pub extern "C" fn heng_emoji_show() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        crate::ui::ui_pane_show(0);
+        HENG_TRUE
+    })
+}
+
+/// 打开符号窗口（v13）。与表情窗互相独立，可同时打开。
+#[no_mangle]
+pub extern "C" fn heng_symbols_show() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        crate::ui::ui_pane_show(1);
+        HENG_TRUE
+    })
+}
+
+/// 关闭表情窗口（v13）。
+#[no_mangle]
+pub extern "C" fn heng_emoji_hide() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        crate::ui::ui_pane_hide(0);
+        HENG_TRUE
+    })
+}
+
+/// 关闭符号窗口（v13）。
+#[no_mangle]
+pub extern "C" fn heng_symbols_hide() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        crate::ui::ui_pane_hide(1);
+        HENG_TRUE
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn heng_tools_hide() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        crate::ui::ui_tools_hide();
         HENG_TRUE
     })
 }

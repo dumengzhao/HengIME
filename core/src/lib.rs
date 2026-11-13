@@ -28,6 +28,7 @@ pub mod engine;
 pub mod global;
 pub mod settings;
 pub mod sync;
+pub mod tools_data;
 
 #[cfg(feature = "ui")]
 pub mod ui;

@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use heng_core::{Engine, EngineConfig};
 
-const USAGE: &str = "用法: heng-cli <version|cand|commit|bench|serve|sync|abitest> [参数]\n       heng-cli sync <status|login|now|on|off>  用户词库同步";
+const USAGE: &str = "用法: heng-cli <version|cand|commit|bench|serve|sync|settings|tools|abitest> [参数]\n       heng-cli sync <status|login|now|on|off>  用户词库同步\n       heng-cli tools [tab]  工具窗口真机调试（0=最近 1=表情 2=符号，保持 120 秒）";
 const DEFAULT_PORT: u16 = 9371;
 
 fn runtime_dir() -> PathBuf {
@@ -376,6 +376,53 @@ fn cmd_uitest(seq: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 设置窗口调试：打开设置窗口保持数秒供人工检查 / HENG_UI_DUMP 抓帧
+/// 工具窗口真机调试：打开长驻窗口并保持进程，供 XTest 点击验证。
+/// 注册一个打印型 commit handler，点击格子产生的上屏文本会打到 stdout。
+extern "C" fn debug_tools_commit(
+    _ctx: *mut core::ffi::c_void,
+    _session: u64,
+    text: *const u8,
+) {
+    if text.is_null() {
+        return;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(text as *const std::os::raw::c_char) };
+    println!("[TOOLS-COMMIT] {}", s.to_string_lossy());
+}
+
+fn cmd_tools(pane: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
+    // 0 = 表情窗口（默认），1 = 符号窗口；两个窗口可同时开
+    let pane: usize = pane.and_then(|s| s.parse().ok()).unwrap_or(0).min(1);
+    // dev 外壳的 user dir 与 shared dir 是分开的，命令行调试时允许显式
+    // 指定共享数据目录（HENG_SHARED_DATA_DIR），否则沿用默认配置
+    let mut cfg = heng_core::global::default_config();
+    if let Some(dir) = std::env::var_os("HENG_SHARED_DATA_DIR") {
+        cfg.shared_data_dir = Some(std::path::PathBuf::from(dir));
+    }
+    let engine = heng_core::global::engine_with(cfg)?;
+    // 走 C API 建会话：工具窗点击上屏要用 SESSIONS 里登记的句柄
+    let handle: u64 = unsafe {
+        heng_core::capi::heng_start_session(std::ptr::null()) as u64
+    };
+    let rime_id = heng_core::global::SESSIONS.rime_id(handle).unwrap_or(0);
+    let _ = engine.simulate_key_sequence(rime_id, "ni");
+    heng_core::capi::heng_set_commit_handler(Some(debug_tools_commit), std::ptr::null_mut());
+    heng_core::ui::ensure_started();
+    heng_core::ui::ui_pane_show(pane);
+    println!("工具窗口已打开（pane={pane}），保持 120 秒…");
+    if std::env::var_os("HENG_TOOLS_CYCLE").is_some() {
+        // 回归验证：关掉再打开，确认窗口不空白、仍能点击上屏
+        std::thread::sleep(Duration::from_secs(2));
+        heng_core::ui::ui_pane_hide(pane);
+        std::thread::sleep(Duration::from_secs(1));
+        heng_core::ui::ui_pane_show(pane);
+        println!("[CYCLE] 已关闭并重新打开");
+    }
+    std::thread::sleep(Duration::from_secs(if std::env::var_os("HENG_TOOLS_CYCLE").is_some() { 30 } else { 120 }));
+    Ok(())
+}
+
 fn cmd_settings(page: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
     let stay = page.is_some();
@@ -908,6 +955,7 @@ fn main() -> ExitCode {
         || args[0] == "pagetest"
         || args[0] == "bartest"
         || args[0] == "settings"
+        || args[0] == "tools"
         || args[0] == "sync"
     {
         let result: Result<(), Box<dyn std::error::Error>> = match args[0].as_str() {
@@ -922,6 +970,7 @@ fn main() -> ExitCode {
             "pagetest" => cmd_pagetest(),
             "bartest" => cmd_bartest(),
             "settings" => cmd_settings(args.get(1)),
+            "tools" => cmd_tools(args.get(1)),
             "sync" => cmd_sync(&args[1..]),
             _ => cmd_abitest(),
         };

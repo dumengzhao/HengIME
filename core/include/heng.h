@@ -177,7 +177,11 @@ HENG_API int heng_hello(int client_abi_version, HengHello* out);
  * out_commit / out_ctx 均可传 NULL 表示不需要。
  * 返回 HENG_TRUE=按键已处理；out_commit 采用消费语义（取后清空），
  * 非 NULL 时用 heng_free_string 释放；out_ctx 非 NULL 时用 heng_free_context 释放。
- */
+ *
+ * mask 位定义沿用 librime/X：1=Shift 2=CapsLock(Lock) 4=Ctrl 8=Alt 64=Super，
+ * 1<<30=keyup。CapsLock 置位且无 Ctrl/Alt/Super 时，ASCII 字母一律按大写
+ * 直接上屏（Shift 不改变大小写），不进入组字流程，避免大写模式下仍弹候选窗。 */
+
 HENG_API int heng_process_key_ex(heng_session_t session, int keysym, int mask,
                                  char** out_commit, HengContext* out_ctx);
 
@@ -322,6 +326,23 @@ HENG_API void heng_set_inline_preedit(int on);
  * 仅 win=1 的kind=5 会被转成 CloseRequested（关闭设置窗口）。 */
 HENG_API void heng_push_pointer_event(unsigned char win, unsigned char kind,
                                       float x, float y, float dx, float dy);
+
+/* 打开工具窗口（v12；tab = 0 最近使用 / 1 表情 / 2 符号；「最近」为空时
+ * 自动落到表情）。长驻、手动关闭：窗口不夺焦点，点击格子连续上屏并记入
+ * 最近使用，宿主可绑快捷键调起。 */
+HENG_API int heng_tools_show(int tab);
+
+/* 关闭工具窗口（v12）。 */
+HENG_API int heng_tools_hide(void);
+
+/* 打开表情窗口（v13）。与符号窗互相独立，可同时打开；不夺焦点、手动关闭。 */
+HENG_API int heng_emoji_show(void);
+/* 打开符号窗口（v13）。左侧分类栏（10 类）。 */
+HENG_API int heng_symbols_show(void);
+/* 关闭表情窗口（v13）。 */
+HENG_API int heng_emoji_hide(void);
+/* 关闭符号窗口（v13）。 */
+HENG_API int heng_symbols_hide(void);
 
 /* 关闭设置窗口（v9）。 */
 HENG_API int heng_settings_hide(void);

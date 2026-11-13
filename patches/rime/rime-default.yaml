@@ -53,9 +53,8 @@ switcher:
 
 # 中西文切换
 #
-# good_old_caps_lock:
-# true   切换大写
-# false  切换中英
+# CapsLock 只切换字母大小写，不参与中英切换（Caps_Lock: noop）；中英切换用
+# Shift 独按 / Ctrl+Space。good_old_caps_lock 只在 Caps_Lock 被绑成切换键时生效。
 # macOS 偏好设置的优先级更高，如果勾选【使用大写锁定键切换“ABC”输入法】则始终会切换输入法。
 #
 # 切换中英：
@@ -72,7 +71,7 @@ switcher:
 ascii_composer:
   good_old_caps_lock: true  # true | false
   switch_key:
-    Caps_Lock: clear      # commit_code | commit_text | clear
+    Caps_Lock: noop       # noop = 只切换大小写，不切换中英
     Shift_L: commit_code  # commit_code | commit_text | inline_ascii | clear | noop | set_ascii_mode | unset_ascii_mode
     Shift_R: noop         # commit_code | commit_text | inline_ascii | clear | noop | set_ascii_mode | unset_ascii_mode
     Control_L: noop       # commit_code | commit_text | inline_ascii | clear | noop | set_ascii_mode | unset_ascii_mode

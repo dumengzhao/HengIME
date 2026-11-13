@@ -32,13 +32,19 @@ namespace fcitx {
 namespace {
 
 // fcitx5 KeyState -> X modifier mask（librime 沿用 X 修饰键位）：
-// Shift=1<<0 Control=1<<2 Alt(Mod1)=1<<3 Super(Mod4)=1<<6
-int maskFromStates(KeyStates states) {
+// Shift=1<<0 Lock(CapsLock)=1<<1 Control=1<<2 Alt(Mod1)=1<<3 Super(Mod4)=1<<6
+//
+// 注意：归一化后的 key().states() 不含 CapsLock（实测 X11 / GTK IM 都是 0），
+// 大写锁定位只能从 rawKey() 取。core 据此把字母按大写直出，不再交给 pinyin
+// 组字，否则大写模式下仍会弹候选窗。
+int maskFromStates(const KeyEvent &event) {
+    KeyStates states = event.key().states();
     int mask = 0;
     if (states.test(KeyState::Shift)) mask |= 1 << 0;
     if (states.test(KeyState::Ctrl)) mask |= 1 << 2;
     if (states.test(KeyState::Alt)) mask |= 1 << 3;
     if (states.test(KeyState::Super)) mask |= 1 << 6;
+    if (event.rawKey().states().test(KeyState::CapsLock)) mask |= 1 << 1;
     return mask;
 }
 
@@ -188,18 +194,25 @@ void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
     auto key = keyEvent.key();
     auto ickey = icKey(ic->uuid());
 
+    // 大写锁定开启：中英切换整体禁用（Caps 期间不切模式、不弹切换提示）。
+    // caps 状态只能从 rawKey 取——归一化后的 key().states() 里没有这一位。
+    const bool caps_on = keyEvent.rawKey().states().test(KeyState::CapsLock);
+
     // Shift 独按释放 → 中英切换（ascii_mode 经 heng_set_option，含传播策略）
     if (key.isModifier()) {
         if (key.sym() == FcitxKey_Shift_L || key.sym() == FcitxKey_Shift_R) {
             if (keyEvent.isRelease()) {
                 if (shift_pending_[ickey]) {
                     shift_pending_[ickey] = false;
+                    if (caps_on) {
+                        return; // 大写锁定期间 Shift 不切中英
+                    }
                     heng_session_t session = sessionFor(ic);
                     if (session != 0) {
                         int cur = heng_get_option(session, "ascii_mode");
                         int next = cur == HENG_TRUE ? HENG_FALSE : HENG_TRUE;
                         heng_set_option(session, "ascii_mode", next);
-                        // 切换瞬态提示：气泡锚定光标行顶上方（ex 版）
+                        // 不再弹「中 / 英」瞬态气泡：切换只改模式，界面零打扰。
                         auto rect = ic->cursorRect();
                         if (rect.left() != 0 || rect.top() != 0 || rect.right() != 0
                             || rect.bottom() != 0) {
@@ -207,7 +220,6 @@ void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
                             last_y_ = rect.bottom();
                             last_caret_top_ = rect.top();
                         }
-                        heng_ui_mode_hint_ex(next, last_x_, last_y_, last_caret_top_);
                         ic->updateUserInterface(UserInterfaceComponent::InputPanel);
                     }
                     keyEvent.filterAndAccept();
@@ -225,6 +237,22 @@ void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
         return;
     }
 
+    // Ctrl+Shift+E / Ctrl+Shift+S：分别打开表情窗与符号窗。
+    // 自绘候选窗在某些 XWayland 会话里不显示，☰ 菜单点不到 —— 给两条
+    // 不依赖候选窗的入口。两窗都 NOACTIVATE、不抢焦点、常驻、由 ✕ 关闭。
+    if (key.states().test(KeyState::Ctrl) && key.states().test(KeyState::Shift)) {
+        if (key.sym() == FcitxKey_E || key.sym() == FcitxKey_e) {
+            heng_emoji_show();
+            keyEvent.filterAndAccept();
+            return;
+        }
+        if (key.sym() == FcitxKey_S || key.sym() == FcitxKey_s) {
+            heng_symbols_show();
+            keyEvent.filterAndAccept();
+            return;
+        }
+    }
+
     heng_session_t session = sessionFor(ic);
     if (session == 0) {
         const char *err = heng_last_error();
@@ -239,7 +267,7 @@ void HengEngine::keyEvent(const InputMethodEntry &, KeyEvent &keyEvent) {
     ctx.data_size = sizeof(HengContext);
     char *commit = nullptr;
     int handled = heng_process_key_ex(session, static_cast<int>(key.sym()),
-                                      maskFromStates(key.states()), &commit, &ctx);
+                                      maskFromStates(keyEvent), &commit, &ctx);
     if (!handled) {
         // 引擎不处理（数字/空组串下的退格回车/标点直通等）-> 透传给应用
         heng_free_context(&ctx);

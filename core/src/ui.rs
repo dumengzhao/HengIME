@@ -116,9 +116,9 @@ enum UiCmd {
     SelectHL,
     /// 收起横条：按全局横条下标选词（鼠标点击 / 数字键）
     BarSelect(usize),
-    /// 打开 ☰ 菜单（占位：符号/常用语/设置）
+    /// 打开 ☰ 菜单（表情 / 符号 / 设置）
     MenuOpen,
-    /// ☰ 菜单项点击（0=符号 1=常用语 2=设置，内部命令）
+    /// ☰ 菜单项点击（0=表情 1=符号 2=设置，内部命令）
     MenuItem(i32),
     /// ☰ 菜单空白处点击 / 其它 dismissal：整窗关闭（不回横条，打字才回）
     MenuDismiss,
@@ -132,6 +132,14 @@ enum UiCmd {
     SettingsShow(i32),
     /// 关闭设置窗口
     SettingsHide,
+    /// 打开 / 关闭工具窗口（参数：0 = 表情窗，1 = 符号窗）
+    PaneShow(u8),
+    PaneHide(u8),
+    /// 工具窗口内部动作：切分类 / 点常用格 / 点网格格 / 滚动（逻辑 px）
+    PaneCat(u8, usize),
+    PaneCommon(u8, usize),
+    PaneCell(u8, usize),
+    PaneScroll(u8, f32),
 }
 
 static UI_CMD_TX: LazyLock<Mutex<Option<Sender<UiCmd>>>> = LazyLock::new(|| Mutex::new(None));
@@ -315,6 +323,28 @@ pub fn ui_settings_show(page: i32) {
 /// 关闭设置窗口
 pub fn ui_settings_hide() {
     send_cmd(UiCmd::SettingsHide);
+}
+
+/// 打开表情窗口（0）/ 符号窗口（1）
+pub fn ui_pane_show(pane: usize) {
+    ui_log(&format!("ui_pane_show: pane={pane}"));
+    send_cmd(UiCmd::PaneShow(pane.min(1) as u8));
+}
+
+/// 关闭某个工具窗口（pane: 0 表情 / 1 符号）
+pub fn ui_pane_hide(pane: usize) {
+    send_cmd(UiCmd::PaneHide(pane.min(1) as u8));
+}
+
+/// 兼容旧入口：0/1 → 表情窗，2 → 符号窗
+pub fn ui_tools_show(tab: usize) {
+    ui_pane_show(if tab >= 2 { 1 } else { 0 });
+}
+
+/// 兼容旧入口：两个窗一起关
+pub fn ui_tools_hide() {
+    send_cmd(UiCmd::PaneHide(0));
+    send_cmd(UiCmd::PaneHide(1));
 }
 
 /// 惰性启动 UI 线程（首次 ui_sync 时）。启动失败（无 X 显示等）返回 false，
@@ -581,7 +611,7 @@ slint::slint! {
                 clicked => { root.menu_clicked(); }
             }
         }
-        // ☰ 菜单覆盖层（占位：符号/常用语/设置，功能后续迭代）
+        // ☰ 菜单覆盖层（表情 / 符号 打开长驻工具窗，设置打开设置窗）
         if root.menu-open && !root.hint-only: Rectangle {
             x: 0;
             y: root.letters-row-h;
@@ -597,7 +627,7 @@ slint::slint! {
             VerticalLayout {
                 padding: 4px;
                 spacing: 2px;
-                for name[mi] in ["符号", "常用语", "设置"]: Rectangle {
+                for name[mi] in ["表情", "符号", "设置"]: Rectangle {
                     height: 34px;
                     border-radius: 6px;
                     background: ta-mi.has-hover ? #e8ebef : transparent;
@@ -1218,6 +1248,183 @@ slint::slint! {
             }
         }
     }
+
+
+// 工具面板：长驻独立窗口。表情窗与符号窗共用同一组件，差异全部走属性：
+// 列数 / 行数 / 网格位置与尺寸 / 是否显示分类栏 / 是否显示「常用」行。
+// 两个窗口都没有一级 tab：每个窗口只放一种内容，顶部固定一行常用（不随滚动）。
+export component ToolsWindow inherits Window {
+    in property <string> caption;
+    in property <int> cols;
+    in property <[[string]]> rows;          // 网格：rows 行 × cols 列
+    in property <[string]> common-row;      // 常用行（长度 = cols，空串占位）
+    in property <bool> show-common;
+    in property <string> range-text;
+    in property <bool> empty;
+    in property <bool> show-cats;
+    in property <[string]> cat-row-a;
+    in property <[string]> cat-row-b;
+    in property <int> cat-index;
+    in property <length> thumb-y;
+    in property <length> thumb-h;
+    in property <bool> scrollable;
+    in property <length> win-w;
+    in property <length> win-h;
+    in property <length> grid-x;
+    in property <length> grid-y;
+    in property <length> grid-w;
+    in property <length> grid-h;
+    in property <length> common-y;
+    // 悬浮含义：为空表示光标不在有含义的字符上
+    in property <string> tip-text;
+
+    callback cell_clicked(int);             // 网格可见格号 = r*cols + c
+    callback common_clicked(int);           // 常用行第 i 格
+    callback cat_clicked(int);
+    callback close_clicked();
+
+    width: root.win-w;
+    height: root.win-h;
+    background: #f7f8fa;
+
+    // 顶栏：标题 + 关闭（无 tab；标题区兼作拖动留白）
+    Rectangle {
+        x: 0; y: 0; width: parent.width; height: 44px;
+        background: #eef0f4;
+        Text {
+            x: 16px; y: 0; width: parent.width - 80px; height: parent.height;
+            text: root.caption; font-size: 13px; color: #4b5563;
+            vertical-alignment: center;
+        }
+    }
+    Rectangle {
+        x: parent.width - 38px; y: 8px; width: 28px; height: 28px;
+        border-radius: 14px;
+        background: cta-close.has-hover ? #e0e3e8 : transparent;
+        Text { text: "×"; font-size: 18px; color: #666666;
+               horizontal-alignment: center; vertical-alignment: center; }
+        cta-close := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.close_clicked(); }
+        }
+    }
+
+    // 常用：固定一行，不随网格滚动
+    if root.show-common: Rectangle {
+        x: 16px; y: root.common-y; width: parent.width - 32px; height: 46px;
+        HorizontalLayout {
+            spacing: 2px;
+            for ccell[cc] in root.common-row: Rectangle {
+                width: 43px; height: 46px; border-radius: 6px;
+                background: ta-common.has-hover ? #e3e8f2 : transparent;
+                Text {
+                    text: ccell; font-size: 22px; color: #1f2328;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-common := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.common_clicked(cc); }
+                }
+            }
+        }
+    }
+
+    // 符号分类：网格左侧一列（上下布局中「下」这一行的左半边）
+    if root.show-cats: Rectangle {
+        x: 12px; y: root.grid-y; width: 104px; height: root.grid-h;
+        VerticalLayout {
+            spacing: 3px;
+            for cname[ci] in root.cat-row-a: Rectangle {
+                width: 104px; height: 26px; border-radius: 5px;
+                background: root.cat-index == ci ? #2164f1
+                    : (ta-cat.has-hover ? #e2e5ea : transparent);
+                Text {
+                    text: cname; font-size: 12px;
+                    color: root.cat-index == ci ? #ffffff : #4b5563;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-cat := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.cat_clicked(ci); }
+                }
+            }
+            for cname[ci] in root.cat-row-b: Rectangle {
+                width: 104px; height: 26px; border-radius: 5px;
+                background: root.cat-index == ci + 5 ? #2164f1
+                    : (ta-catb.has-hover ? #e2e5ea : transparent);
+                Text {
+                    text: cname; font-size: 12px;
+                    color: root.cat-index == ci + 5 ? #ffffff : #4b5563;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-catb := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.cat_clicked(ci + 5); }
+                }
+            }
+        }
+    }
+
+    // 字符网格
+    if !root.empty: Rectangle {
+        x: root.grid-x; y: root.grid-y; width: root.grid-w; height: root.grid-h;
+        VerticalLayout {
+            spacing: 2px;
+            for row[r] in root.rows: HorizontalLayout {
+                spacing: 2px;
+                for cell[c] in row: Rectangle {
+                    width: 43px; height: 46px;
+                    border-radius: 6px;
+                    // 常态透明：与窗口底色一体；仅悬停给出可点击反馈
+                    background: ta-cell.has-hover ? #e3e8f2 : transparent;
+                    Text {
+                        text: cell; font-size: 22px; color: #1f2328;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    ta-cell := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.cell_clicked(r * root.cols + c); }
+                    }
+                }
+            }
+        }
+    }
+    if root.empty: Text {
+        x: root.grid-x; y: root.grid-y; width: root.grid-w; height: root.grid-h;
+        text: "暂无数据"; font-size: 14px; color: #888d95;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+
+    // 滚动条：纯指示器（滚轮负责滚动）
+    if root.scrollable && !root.empty: Rectangle {
+        x: root.grid-x + root.grid-w + 4px; y: root.grid-y;
+        width: 6px; height: root.grid-h;
+        border-radius: 3px; background: #e3e7ee;
+        Rectangle {
+            x: 0; y: root.thumb-y; width: 6px; height: root.thumb-h;
+            border-radius: 3px; background: #b6bfcd;
+        }
+    }
+
+    // 底栏：显示区间而不是页码
+    Rectangle {
+        x: 0; y: parent.height - 44px; width: parent.width; height: 44px;
+        background: #eef0f4;
+        Text {
+            x: 16px; y: 0; width: 340px; height: parent.height;
+            text: root.range-text; font-size: 12px; color: #6b7480;
+            vertical-alignment: center;
+        }
+        Text {
+            x: parent.width - 280px; y: 0; width: 264px; height: parent.height;
+            text: root.tip-text != "" ? root.tip-text
+                : (root.scrollable ? "滚轮浏览" : "");
+            font-size: 12px;
+            color: root.tip-text != "" ? #1f2328 : #a6adb8;
+            horizontal-alignment: right; vertical-alignment: center;
+        }
+    }
+}
 }
 
 // 预乘 ARGB 像素（32 位视觉，支持窗口透明圆角）。
@@ -1259,8 +1466,8 @@ impl TargetPixel for Argb {
 }
 
 struct XPlatform {
-    /// 窗口创建计数：第 1 个组件 = 候选窗（MSW），第 2 个 = 设置窗口（MSW2）。
-    /// 字母区已并入候选窗，不再有第三个组件实例。
+    /// 窗口创建计数：第 1 个组件 = 候选窗（MSW），第 2 个 = 设置窗口（MSW2），
+    /// 第 3 个 = 工具窗口（MSW3）。字母区已并入候选窗，不占组件实例。
     n: std::cell::Cell<u32>,
 }
 impl Platform for XPlatform {
@@ -1269,12 +1476,11 @@ impl Platform for XPlatform {
     ) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
         let n = self.n.get();
         self.n.set(n + 1);
-        if n == 0 {
-            Ok(MSW.with(|w| w.clone()))
-        } else if n == 1 {
-            Ok(MSW2.with(|w| w.clone()))
-        } else {
-            Ok(MSW2.with(|w| w.clone()))
+        match n {
+            0 => Ok(MSW.with(|w| w.clone())),
+            1 => Ok(MSW2.with(|w| w.clone())),
+            2 => Ok(MSW3.with(|w| w.clone())),
+            _ => Ok(MSW4.with(|w| w.clone())),
         }
     }
     fn run_event_loop(&self) -> Result<(), slint::PlatformError> {
@@ -1290,6 +1496,12 @@ thread_local! {
         MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     /// 设置窗口（第 2 个组件实例经 XPlatform 计数路由到这里）
     static MSW2: Rc<MinimalSoftwareWindow> =
+        MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    /// 符号窗口（第 3 个组件实例；长驻、手动关闭）
+    static MSW3: Rc<MinimalSoftwareWindow> =
+        MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    /// 表情窗口（第 4 个组件实例；与符号窗互相独立）
+    static MSW4: Rc<MinimalSoftwareWindow> =
         MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
 }
 
@@ -1680,8 +1892,8 @@ pub mod mac_backend {
     }
 
     pub struct MacWindow {
-        /// 各窗口当前尺寸（拖动带 × 排除区计算用）。索引 0=候选 1=设置 2=字母区
-        widths: [u32; 3],
+        /// 各窗口当前尺寸（拖动带 × 排除区计算用）。索引 0=候选 1=设置 2=字母区 3=工具窗
+        widths: [u32; 5],
         /// 设置窗拖动中：(拖起时指针x, 指针y, 窗口x, 窗口y)，左上原点
         drag2: Option<(f32, f32, f32, f32)>,
         setting_x: f32,
@@ -1692,7 +1904,7 @@ pub mod mac_backend {
     impl MacWindow {
         pub fn new() -> Option<MacWindow> {
             Some(MacWindow {
-                widths: [0; 3],
+                widths: [0; 5],
                 drag2: None,
                 setting_x: 0.0,
                 setting_y: 0.0,
@@ -1708,7 +1920,7 @@ pub mod mac_backend {
 
     impl UiBackend for MacWindow {
         fn configure(&mut self, win: u8, x: i32, y: i32, w: u32, h: u32) {
-            let idx = (win as usize).min(2);
+            let idx = (win as usize).min(4);
             self.widths[idx] = w;
             if win == 1 {
                 self.setting_x = x as f32;
@@ -1769,7 +1981,7 @@ pub mod mac_backend {
         fn poll_events(&mut self, sink: &mut dyn FnMut(u8, WindowEvent)) {
             let queue = std::mem::take(&mut *PTR_QUEUE.lock().unwrap());
             for (win, ev) in queue {
-                let tag = win.min(2);
+                let tag = win.min(4);
                 match ev {
                     RawEvent::Moved(x, y) => sink(tag, WindowEvent::PointerMoved {
                         position: LogicalPosition::new(x, y),
@@ -1857,6 +2069,18 @@ mod x11_backend {
         win3: Option<u32>,
         gc3: Option<u32>,
         mapped3: bool,
+        // 工具窗口（惰性创建；override-redirect 不参与焦点管理，长驻手动关闭）
+        win4: Option<u32>,
+        gc4: Option<u32>,
+        mapped4: bool,
+        drag4: Option<(i32, i32, i32, i32)>,
+        win4_w: u32,
+        /// 表情窗（第 4 个窗口，独立于符号窗）
+        win5: Option<u32>,
+        gc5: Option<u32>,
+        mapped5: bool,
+        drag5: Option<(i32, i32, i32, i32)>,
+        win5_w: u32,
     }
 
     // void 请求统一校验：失败打印并返回 None（XWindow::new 用 ? 传导）
@@ -1947,7 +2171,7 @@ mod x11_backend {
             )?;
             check_void!(conn.create_gc(gc, win, &CreateGCAux::new()), "create_gc")?;
             conn.flush().ok()?;
-            Some(Self { conn, win, gc, mapped: false, win2: None, gc2: None, mapped2: false, win3: None, gc3: None, mapped3: false, drag2: None, win2_w: 0 })
+            Some(Self { conn, win, gc, mapped: false, win2: None, gc2: None, mapped2: false, win3: None, gc3: None, mapped3: false, drag2: None, win2_w: 0, win4: None, gc4: None, mapped4: false, drag4: None, win4_w: 0, win5: None, gc5: None, mapped5: false, drag5: None, win5_w: 0 })
         }
 
         /// 惰性创建顶部字母区窗口（override-redirect、不接收输入，纯展示）
@@ -2113,9 +2337,107 @@ mod x11_backend {
             win2
         }
 
+        /// 惰性创建工具窗口（与设置窗同样 override-redirect：点击不夺 X 焦点，
+        /// 否则插入的字符送不进宿主应用）。尺寸固定，位置由拖动记忆。
+        /// 创建工具窗口：emoji=true 建表情窗（win 4），否则建符号窗（win 3）。
+        /// 两者都是 override-redirect + 32 位视觉 + 不夺焦点。
+        fn ensure_pane(&mut self, emoji: bool) -> u32 {
+            if emoji {
+                if let Some(w) = self.win5 {
+                    return w;
+                }
+            } else if let Some(w) = self.win4 {
+                return w;
+            }
+            let conn = &self.conn;
+            let screen = self.conn.setup().roots.first().unwrap().clone();
+            let mut visual = None;
+            for d in &screen.allowed_depths {
+                if d.depth == 32 {
+                    for v in &d.visuals {
+                        if v.class == VisualClass::TRUE_COLOR {
+                            visual = Some(*v);
+                            break;
+                        }
+                    }
+                }
+            }
+            let Some(visual) = visual else {
+                eprintln!("heng-ui: 工具窗口未找到 32 位视觉");
+                return self.win;
+            };
+            let (Ok(win_id), Ok(gc), Ok(cmap)) =
+                (conn.generate_id(), conn.generate_id(), conn.generate_id())
+            else {
+                return self.win;
+            };
+            if check_void!(
+                conn.create_colormap(ColormapAlloc::NONE, cmap, screen.root, visual.visual_id),
+                "create_colormap4"
+            )
+            .is_none()
+            {
+                return self.win;
+            }
+            let aux = CreateWindowAux::new()
+                .colormap(cmap)
+                .border_pixel(0)
+                .override_redirect(1)
+                .event_mask(
+                    EventMask::EXPOSURE
+                        | EventMask::BUTTON_PRESS
+                        | EventMask::BUTTON_RELEASE
+                        | EventMask::POINTER_MOTION
+                        | EventMask::LEAVE_WINDOW,
+                );
+            let (cw, ch) = if emoji {
+                (super::PANE_EMOJI.win_w, super::PANE_EMOJI.win_h)
+            } else {
+                (super::PANE_SYMBOLS.win_w, super::PANE_SYMBOLS.win_h)
+            };
+            if check_void!(
+                conn.create_window(
+                    32,
+                    win_id,
+                    screen.root,
+                    420,
+                    180,
+                    (cw * super::ui_scale()).round() as u16,
+                    (ch * super::ui_scale()).round() as u16,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    visual.visual_id,
+                    &aux,
+                ),
+                "create_window4"
+            )
+            .is_none()
+            {
+                return self.win;
+            }
+            if check_void!(conn.create_gc(gc, win_id, &CreateGCAux::new()), "create_gc4").is_none() {
+                return self.win;
+            }
+            conn.flush().ok();
+            if emoji {
+                self.win5 = Some(win_id);
+                self.gc5 = Some(gc);
+            } else {
+                self.win4 = Some(win_id);
+                self.gc4 = Some(gc);
+            }
+            win_id
+        }
+
         fn configure(&mut self, win: u32, x: i32, y: i32, w: u32, h: u32) {
             if Some(win) == self.win2 {
                 self.win2_w = w;
+            }
+            if Some(win) == self.win4 {
+                self.win4_w = w;
+            }
+            if Some(win) == self.win5 {
+                self.win5_w = w;
             }
             let aux = ConfigureWindowAux::new().x(x).y(y).width(w as u32).height(h as u32);
             let _ = match self.conn.configure_window(win, &aux) {
@@ -2130,10 +2452,16 @@ mod x11_backend {
         fn set_mapped(&mut self, win: u32, mapped: bool) {
             let is_set_win = self.win2 == Some(win);
             let is_letters = self.win3 == Some(win);
+            let is_tools = self.win4 == Some(win);
+            let is_emoji = self.win5 == Some(win);
             let cur = if is_set_win {
                 self.mapped2
             } else if is_letters {
                 self.mapped3
+            } else if is_tools {
+                self.mapped4
+            } else if is_emoji {
+                self.mapped5
             } else {
                 self.mapped
             };
@@ -2150,6 +2478,10 @@ mod x11_backend {
                     self.mapped2 = mapped;
                 } else if is_letters {
                     self.mapped3 = mapped;
+                } else if is_tools {
+                    self.mapped4 = mapped;
+                } else if is_emoji {
+                    self.mapped5 = mapped;
                 } else {
                     self.mapped = mapped;
                 }
@@ -2162,6 +2494,10 @@ mod x11_backend {
                 self.gc2.unwrap_or(self.gc)
             } else if self.win3 == Some(win) {
                 self.gc3.unwrap_or(self.gc)
+            } else if self.win4 == Some(win) {
+                self.gc4.unwrap_or(self.gc)
+            } else if self.win5 == Some(win) {
+                self.gc5.unwrap_or(self.gc)
             } else {
                 self.gc
             };
@@ -2229,12 +2565,31 @@ mod x11_backend {
                     1
                 } else if ev_win == self.win {
                     0
+                } else if Some(ev_win) == self.win4 {
+                    3
+                } else if Some(ev_win) == self.win5 {
+                    4
                 } else {
                     continue;
                 };
                 match event {
                     Event::MotionNotify(m) => {
                         // 拖拽中：指针事件只用于移动窗口，不透传给 UI
+                        if tag == 3 || tag == 4 {
+                            let (drag, win) = if tag == 4 {
+                                (self.drag5, self.win5)
+                            } else {
+                                (self.drag4, self.win4)
+                            };
+                            if let Some((sx, sy, wx, wy)) = drag {
+                                let nx = wx + (m.root_x as i32 - sx);
+                                let ny = wy + (m.root_y as i32 - sy);
+                                let aux = ConfigureWindowAux::new().x(nx).y(ny);
+                                let _ = self.conn.configure_window(win.unwrap_or(self.win), &aux);
+                                self.conn.flush().ok();
+                                continue;
+                            }
+                        }
                         if let Some((sx, sy, wx, wy)) = self.drag2 {
                             let nx = wx + (m.root_x as i32 - sx);
                             let ny = wy + (m.root_y as i32 - sy);
@@ -2306,6 +2661,53 @@ mod x11_backend {
                                 continue;
                             }
                         }
+                        // 工具窗顶部拖动带（顶部 44 逻辑px；避开左侧 tab 栏
+                        // 与右侧 ✕ 按钮，避免拖动吞掉点击）
+                        if b.detail == 1 && (tag == 3 || tag == 4) {
+                            let is_emoji = tag == 4;
+                            let dragging = if is_emoji {
+                                self.drag5.is_some()
+                            } else {
+                                self.drag4.is_some()
+                            };
+                            let win_w = if is_emoji { self.win5_w } else { self.win4_w };
+                            let scale = super::ui_scale();
+                            let top = (44.0 * scale).round() as i32;
+                            // 顶栏只有标题与 ✕，右边留出关闭按钮宽度即可
+                            let excl_x = win_w as i32 - (40.0 * scale).round() as i32;
+                            let (ex, ey) = (b.event_x as i32, b.event_y as i32);
+                            if !dragging && ey < top && ex < excl_x {
+                                let grab = self.conn.grab_pointer(
+                                    true,
+                                    b.event,
+                                    EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                                    GrabMode::ASYNC,
+                                    GrabMode::ASYNC,
+                                    x11rb::NONE,
+                                    x11rb::NONE,
+                                    x11rb::CURRENT_TIME,
+                                );
+                                if let Ok(cookie) = grab {
+                                    if let Ok(reply) = cookie.reply() {
+                                        if reply.status != GrabStatus::SUCCESS {
+                                            eprintln!("heng-ui: 工具窗拖动 grab 失败: {:?}", reply.status);
+                                        }
+                                    }
+                                }
+                                let st = (
+                                    b.root_x as i32,
+                                    b.root_y as i32,
+                                    b.root_x as i32 - ex,
+                                    b.root_y as i32 - ey,
+                                );
+                                if is_emoji {
+                                    self.drag5 = Some(st);
+                                } else {
+                                    self.drag4 = Some(st);
+                                }
+                                continue;
+                            }
+                        }
                         if b.detail == 1 {
                             sink(tag, WindowEvent::PointerPressed {
                                 position: LogicalPosition::new(b.event_x as f32, b.event_y as f32),
@@ -2314,8 +2716,10 @@ mod x11_backend {
                         }
                     }
                     Event::ButtonRelease(b) if b.detail == 1 => {
-                        if self.drag2.is_some() {
+                        if self.drag2.is_some() || self.drag4.is_some() || self.drag5.is_some() {
                             self.drag2 = None;
+                            self.drag4 = None;
+                            self.drag5 = None;
                             let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
                             self.conn.flush().ok();
                             continue;
@@ -2340,6 +2744,18 @@ mod x11_backend {
                 let win_id = self.ensure_letters();
                 return XWindow::configure(self, win_id, x, y, w, h);
             }
+            if win == 3 || win == 4 {
+                let emoji = win == 4;
+                let win_id = self.ensure_pane(emoji);
+                let (cw, ch) = if emoji {
+                    (super::PANE_EMOJI.win_w, super::PANE_EMOJI.win_h)
+                } else {
+                    (super::PANE_SYMBOLS.win_w, super::PANE_SYMBOLS.win_h)
+                };
+                let w = (cw * super::ui_scale()).round() as u32;
+                let h = (ch * super::ui_scale()).round() as u32;
+                return XWindow::configure(self, win_id, x, y, w, h);
+            }
             let w = if win == 1 {
                 self.ensure_set();
                 (640.0 * super::ui_scale()).round() as u32
@@ -2362,6 +2778,8 @@ mod x11_backend {
             let win_id = match win {
                 1 => self.ensure_set(),
                 2 => self.ensure_letters(),
+                3 => self.ensure_pane(false),
+                4 => self.ensure_pane(true),
                 _ => self.win,
             };
             XWindow::set_mapped(self, win_id, mapped)
@@ -2370,6 +2788,8 @@ mod x11_backend {
             let win_id = match win {
                 1 => self.ensure_set(),
                 2 => self.ensure_letters(),
+                3 => self.ensure_pane(false),
+                4 => self.ensure_pane(true),
                 _ => self.win,
             };
             XWindow::blit(self, win_id, buf, w, h)
@@ -2431,6 +2851,10 @@ use std::cell::RefCell;
         static EVENTS: RefCell<Vec<WindowEvent>> = RefCell::new(Vec::new());
         /// 设置窗口事件队列（独立 WndProc，避免与候选窗混淆）
         static EVENTS2: RefCell<Vec<WindowEvent>> = RefCell::new(Vec::new());
+        /// 工具窗口事件队列（tools_wnd_proc → poll_events 标 tag 3）
+        static EVENTS3: RefCell<Vec<WindowEvent>> = RefCell::new(Vec::new());
+        /// 表情窗口事件队列（emoji_wnd_proc → poll_events 标 tag 4）
+        static EVENTS4: RefCell<Vec<WindowEvent>> = RefCell::new(Vec::new());
         /// 设置窗口绘制状态：(hwnd, memdc, w, h)，WM_PAINT 时 BitBlt
         static SET_DC: RefCell<Option<(HWND, HDC, u32, u32)>> = const { RefCell::new(None) };
     }
@@ -2719,6 +3143,114 @@ use std::cell::RefCell;
         }
     }
 
+    /// 工具窗口 WndProc：事件走独立队列 EVENTS3 → poll_events 标 tag 3。
+    /// 分层窗口（CAND_EX）由 UpdateLayeredWindow 贴帧，WM_PAINT 不需要 BitBlt。
+    /// 工具窗（符号 / 表情）共用的事件处理：只有事件队列不同。
+    fn pane_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, emoji: bool) -> LRESULT {
+        let (x, y) = (
+            (lparam & 0xffff) as u16 as i16 as f32,
+            ((lparam >> 16) & 0xffff) as u16 as i16 as f32,
+        );
+        let push = |ev: WindowEvent| {
+            if emoji {
+                EVENTS4.with(|q| q.borrow_mut().push(ev));
+            } else {
+                EVENTS3.with(|q| q.borrow_mut().push(ev));
+            }
+        };
+        match msg {
+            WM_MOUSEMOVE => {
+                push(WindowEvent::PointerMoved {
+                    position: LogicalPosition::new(x, y),
+                });
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                TrackMouseEvent(&mut tme);
+                0
+            }
+            WM_LBUTTONDOWN => {
+                push(WindowEvent::PointerPressed {
+                    position: LogicalPosition::new(x, y),
+                    button: PointerEventButton::Left,
+                });
+                0
+            }
+            WM_LBUTTONUP => {
+                push(WindowEvent::PointerReleased {
+                    position: LogicalPosition::new(x, y),
+                    button: PointerEventButton::Left,
+                });
+                0
+            }
+            WM_MOUSELEAVE => {
+                push(WindowEvent::PointerExited);
+                0
+            }
+            WM_MOUSEWHEEL => {
+                // 一个 notch = 120 raw → ±50 逻辑 px（与 X11 侧一致）
+                let delta = ((wparam >> 16) & 0xffff) as u16 as i16 as f32 / 120.0 * 50.0;
+                push(WindowEvent::PointerScrolled {
+                    position: LogicalPosition::new(x, y),
+                    delta_x: 0.0,
+                    delta_y: delta,
+                });
+                0
+            }
+            WM_NCHITTEST => {
+                // 顶栏可拖动；右侧 40px 让给 ✕，避免拖动吞掉点击
+                let mut pt = POINT {
+                    x: (lparam & 0xffff) as u16 as i16 as i32,
+                    y: ((lparam >> 16) & 0xffff) as u16 as i16 as i32,
+                };
+                ScreenToClient(hwnd, &mut pt);
+                let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetClientRect(hwnd, &mut rc);
+                let scale = super::ui_scale();
+                let top = (44.0 * scale).round() as i32;
+                let excl_x = rc.right - (40.0 * scale).round() as i32;
+                if pt.y < top && pt.x < excl_x {
+                    HTCAPTION as isize
+                } else {
+                    HTCLIENT as isize
+                }
+            }
+            WM_ERASEBKGND => 1,
+            WM_PAINT => {
+                let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                EndPaint(hwnd, &ps);
+                0
+            }
+            WM_CLOSE => {
+                push(WindowEvent::CloseRequested);
+                0
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+
+    unsafe extern "system" fn tools_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        pane_wnd_proc(hwnd, msg, wparam, lparam, false)
+    }
+
+    unsafe extern "system" fn emoji_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        pane_wnd_proc(hwnd, msg, wparam, lparam, true)
+    }
+
     /// 单个原生窗口（候选窗 / 设置窗口共用）
     struct SubWin {
         hwnd: HWND,
@@ -2836,12 +3368,16 @@ use std::cell::RefCell;
             let classw = utf16z(class);
             let is_set_win = class == "heng_ui_set_win";
             let is_letters_win = class == "heng_ui_letters_win";
+            let is_tools_win = class == "heng_ui_tools_win";
+            let is_emoji_win = class == "heng_ui_emoji_win";
             let wc = WNDCLASSW {
                 style: 0,
                 lpfnWndProc: if is_set_win {
                     Some(set_wnd_proc)
                 } else if is_letters_win {
                     Some(letters_wnd_proc)
+                } else if is_tools_win {
+                    Some(tools_wnd_proc)
                 } else {
                     Some(wnd_proc)
                 },
@@ -2916,6 +3452,8 @@ use std::cell::RefCell;
         cand: SubWin,
         set: Option<SubWin>,
         letters: Option<SubWin>,
+        tools: Option<SubWin>,
+        emoji: Option<SubWin>,
     }
 
     impl WinWindow {
@@ -2931,6 +3469,8 @@ use std::cell::RefCell;
                 )?,
                 set: None,
                 letters: None,
+                tools: None,
+                emoji: None,
             })
         }
 
@@ -2973,6 +3513,37 @@ use std::cell::RefCell;
                 self.letters = Some(s);
             }
             self.letters.as_mut().unwrap()
+        }
+        /// 惰性创建工具窗口（分层 + NOACTIVATE：点击不夺前台焦点，插入的
+        /// 字符才能送回宿主应用；长驻、由窗口内 ✕ 关闭）
+        /// 惰性创建工具窗口：emoji=true 建表情窗，否则建符号窗。
+        /// 分层 + NOACTIVATE：点击不夺前台焦点，插入的字符才能送回宿主应用。
+        fn ensure_pane(&mut self, emoji: bool) -> &mut SubWin {
+            let slot = if emoji { &mut self.emoji } else { &mut self.tools };
+            if slot.is_none() {
+                let scale = super::ui_scale();
+                let (cw, ch, class, title) = if emoji {
+                    (
+                        super::PANE_EMOJI.win_w,
+                        super::PANE_EMOJI.win_h,
+                        "heng_ui_emoji_win",
+                        "衡 · 表情",
+                    )
+                } else {
+                    (
+                        super::PANE_SYMBOLS.win_w,
+                        super::PANE_SYMBOLS.win_h,
+                        "heng_ui_tools_win",
+                        "衡 · 符号",
+                    )
+                };
+                let w = (cw * scale).round() as i32;
+                let h = (ch * scale).round() as i32;
+                let s = create_subwin(class, title, CAND_EX, CAND_STYLE, w, h)
+                    .expect("heng-ui: 工具窗口创建失败");
+                *slot = Some(s);
+            }
+            slot.as_mut().unwrap()
         }
     }
 
@@ -3050,6 +3621,12 @@ use std::cell::RefCell;
                 if let Some(s) = self.letters.as_mut() {
                     subs.push(s);
                 }
+                if let Some(s) = self.tools.as_mut() {
+                    subs.push(s);
+                }
+                if let Some(s) = self.emoji.as_mut() {
+                    subs.push(s);
+                }
                 for s in subs {
                     if !s.hbmp.is_null() {
                         DeleteObject(s.hbmp);
@@ -3062,7 +3639,7 @@ use std::cell::RefCell;
 
     impl UiBackend for WinWindow {
         fn configure(&mut self, win: u8, x: i32, y: i32, w: u32, h: u32) {
-            if win > 2 {
+            if win > 4 {
                 return;
             }
             let s = match win {
@@ -3071,11 +3648,13 @@ use std::cell::RefCell;
                     self.ensure_set();
                     self.set.as_mut().unwrap()
                 }
-                _ => self.ensure_letters(),
+                2 => self.ensure_letters(),
+                3 => self.ensure_pane(false),
+                _ => self.ensure_pane(true),
             };
             s.pos = (x, y);
             unsafe {
-                // 候选窗/字母区：先躲更高 z 带的宿主浮层，再定位。
+                // 候选窗/字母区/工具窗：先躲更高 z 带的宿主浮层，再定位。
                 // 设置窗口不参与（可激活、不置顶、且用户主动调出）。
                 let (x, y) = if win == 1 {
                     (x, y)
@@ -3101,7 +3680,7 @@ use std::cell::RefCell;
         }
 
         fn set_mapped(&mut self, win: u8, mapped: bool) {
-            if win > 2 {
+            if win > 4 {
                 return;
             }
             let s = match win {
@@ -3110,7 +3689,9 @@ use std::cell::RefCell;
                     self.ensure_set();
                     self.set.as_mut().unwrap()
                 }
-                _ => self.ensure_letters(),
+                2 => self.ensure_letters(),
+                3 => self.ensure_pane(false),
+                _ => self.ensure_pane(true),
             };
             if s.mapped == mapped {
                 return;
@@ -3122,7 +3703,7 @@ use std::cell::RefCell;
                     SetForegroundWindow(s.hwnd);
                     SetFocus(s.hwnd);
                 } else {
-                    // 候选窗/字母区：SW_SHOWNA 显示但不激活（不夺前台焦点）
+                    // 候选窗/字母区/工具窗：SW_SHOWNA 显示但不激活（不夺前台焦点）
                     ShowWindow(s.hwnd, if mapped { SW_SHOWNA } else { SW_HIDE });
                 }
             }
@@ -3130,7 +3711,7 @@ use std::cell::RefCell;
         }
 
         fn blit(&mut self, win: u8, buf: &[Argb], w: u32, h: u32) {
-            if win > 2 {
+            if win > 4 {
                 return;
             }
             let s = match win {
@@ -3139,7 +3720,9 @@ use std::cell::RefCell;
                     self.ensure_set();
                     self.set.as_mut().unwrap()
                 }
-                _ => self.ensure_letters(),
+                2 => self.ensure_letters(),
+                3 => self.ensure_pane(false),
+                _ => self.ensure_pane(true),
             };
             if !s.ensure_bitmap(w, h) {
                 return;
@@ -3164,7 +3747,7 @@ use std::cell::RefCell;
                     InvalidateRect(s.hwnd, std::ptr::null(), 0);
                     return;
                 }
-                // 候选窗/字母区：分层窗口 UpdateLayeredWindow
+                // 候选窗/字母区/工具窗：分层窗口 UpdateLayeredWindow
                 let screen_dc = GetDC(std::ptr::null_mut());
                 let pt_dst = POINT { x: s.pos.0, y: s.pos.1 };
                 let size = SIZE { cx: w as i32, cy: h as i32 };
@@ -3220,6 +3803,16 @@ use std::cell::RefCell;
             EVENTS2.with(|q| {
                 for ev in q.borrow_mut().drain(..) {
                     sink(1, ev);
+                }
+            });
+            EVENTS3.with(|q| {
+                for ev in q.borrow_mut().drain(..) {
+                    sink(3, ev);
+                }
+            });
+            EVENTS4.with(|q| {
+                for ev in q.borrow_mut().drain(..) {
+                    sink(4, ev);
                 }
             });
         }
@@ -3741,6 +4334,533 @@ pub fn debug_render_cand(
     ok
 }
 
+/// 工具窗口的几何与内容差异（逻辑 px；实际像素 = × scale）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaneKind {
+    Emoji,
+    Symbols,
+}
+
+impl PaneKind {
+    fn title(self) -> &'static str {
+        match self {
+            PaneKind::Emoji => "表情",
+            PaneKind::Symbols => "符号",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PaneCfg {
+    kind: PaneKind,
+    cols: usize,
+    rows: usize,
+    /// 平台窗口编号：3 = 符号窗（沿用原工具窗），4 = 表情窗
+    win_id: u8,
+    win_w: f32,
+    win_h: f32,
+    grid_x: f32,
+    grid_y: f32,
+    grid_w: f32,
+    grid_h: f32,
+    /// 「常用」行顶边（固定显示，不随滚动）
+    common_y: f32,
+}
+
+/// 表情窗：16 列 × 6 行，无分类栏，常用行与网格同宽
+const PANE_EMOJI: PaneCfg = PaneCfg {
+    kind: PaneKind::Emoji,
+    cols: 16,
+    rows: 6,
+    win_id: 4,
+    win_w: 768.0,
+    win_h: 432.0,
+    grid_x: 25.0,
+    grid_y: 100.0,
+    grid_w: 718.0,
+    grid_h: 288.0,
+    common_y: 48.0,
+};
+
+/// 符号窗：10 列 × 6 行，左侧 10 个分类
+const PANE_SYMBOLS: PaneCfg = PaneCfg {
+    kind: PaneKind::Symbols,
+    cols: 10,
+    rows: 6,
+    win_id: 3,
+    win_w: 600.0,
+    win_h: 432.0,
+    grid_x: 128.0,
+    grid_y: 100.0,
+    grid_w: 448.0,
+    grid_h: 288.0,
+    common_y: 48.0,
+};
+
+/// 行高（格 46 + 间距 2）：滚动按像素累积，一档滚轮 ≈ 1 行
+const TOOLS_ROW_PITCH: f32 = 48.0;
+/// 列宽步长（格 43 + 间距 2），两个窗口一致，所以位图贴图共用一套算法
+const TOOLS_COL_PITCH: f32 = 45.0;
+
+/// 视口边界（唯一真相源）：返回 (实际首行, 总行数, 起始下标, 结束下标)。
+/// 首行按「最后一屏正好铺到底」收敛，拉到底不留整屏空白。
+fn view_bounds(
+    flat_len: usize,
+    row: usize,
+    cols: usize,
+    rows: usize,
+) -> (usize, usize, usize, usize) {
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    let total_rows = ((flat_len + cols - 1) / cols).max(1);
+    let max_row = total_rows.saturating_sub(rows);
+    let r = row.min(max_row);
+    let start = r * cols;
+    (r, total_rows, start, flat_len.min(start + rows * cols))
+}
+
+/// 把当前视口写进组件，返回 (首行, 总行数, 起始下标, 位图索引表)。
+/// base = 本列表在雪碧图里的起始扁平下标（表情窗有；符号靠字符查表为 None）。
+fn pane_apply_view(
+    comp: &ToolsWindow,
+    flat: &[String],
+    row: usize,
+    cols: usize,
+    rows: usize,
+    sheet: Option<&crate::tools_data::EmojiSheet>,
+    base: Option<usize>,
+) -> (usize, usize, usize, Vec<Option<usize>>) {
+    let (r, total_rows, start, end) = view_bounds(flat.len(), row, cols, rows);
+    let slice = &flat[start..end];
+    let cells = rows * cols;
+
+    let mut images: Vec<Option<usize>> = vec![None; cells];
+    for k in 0..cells {
+        let Some(text) = slice.get(k) else { continue };
+        images[k] = sheet.and_then(|s| match base {
+            Some(b) => s.index_of_flat(b + start + k),
+            None => s.lookup(text),
+        });
+    }
+
+    let mut model: Vec<ModelRc<SharedString>> = Vec::with_capacity(rows);
+    for vr in 0..rows {
+        let row_cells: Vec<SharedString> = (0..cols)
+            .map(|c| {
+                let k = vr * cols + c;
+                // 有位图的格子留空串 → Text 不渲染，位图叠在帧缓冲上
+                let text = if images[k].is_some() {
+                    ""
+                } else {
+                    slice.get(k).map(|s| s.as_str()).unwrap_or("")
+                };
+                SharedString::from(text)
+            })
+            .collect();
+        model.push(ModelRc::new(VecModel::from(row_cells)));
+    }
+    comp.set_rows(ModelRc::new(VecModel::from(model)));
+
+    let range = if flat.is_empty() {
+        "暂无数据".to_string()
+    } else {
+        format!("{}–{} / 共 {} 项", start + 1, end, flat.len())
+    };
+    comp.set_range_text(SharedString::from(range));
+
+    let scrollable = total_rows > rows;
+    let track = rows as f32 * TOOLS_ROW_PITCH;
+    let thumb_h = if scrollable {
+        (track * rows as f32 / total_rows as f32).clamp(18.0, track)
+    } else {
+        track
+    };
+    let max_row = total_rows.saturating_sub(rows) as f32;
+    let thumb_y = if max_row > 0.0 {
+        (track - thumb_h) * r as f32 / max_row
+    } else {
+        0.0
+    };
+    comp.set_scrollable(scrollable);
+    comp.set_thumb_y(thumb_y);
+    comp.set_thumb_h(thumb_h);
+    comp.set_empty(flat.is_empty());
+    (r, total_rows, start, images)
+}
+
+/// 取当前视口某格的文本（与 pane_apply_view 同一套切片规则）。
+fn pane_cell_text(
+    flat: &[String],
+    row: usize,
+    cols: usize,
+    rows: usize,
+    cell: usize,
+) -> Option<String> {
+    let (_, _, start, _) = view_bounds(flat.len(), row, cols, rows);
+    flat.get(start + cell).cloned()
+}
+/// 把彩色 emoji 位图叠到预乘 ARGB 帧缓冲（绕开 Slint 文字渲染）。
+/// 坐标与 slint! 里的格子布局绑定：格 (r,c) 中心 =
+/// (grid_x + c*45 + 21.5, grid_y + r*48 + 23) 逻辑 px；位图按 scale 最近邻放大后
+/// source-over 混合。cols/rows 由调用方给（常用行是 1 行）。
+fn pane_blit_images(
+    buf: &mut [Argb],
+    buf_w: usize,
+    scale: f32,
+    sheet: &crate::tools_data::EmojiSheet,
+    images: &[Option<usize>],
+    cols: usize,
+    rows: usize,
+    grid_x: f32,
+    grid_y: f32,
+) {
+    let buf_h = buf.len() / buf_w.max(1);
+    let cell = sheet.cell;
+    let dst_cell = ((cell as f32) * scale).round() as usize;
+    for r in 0..rows {
+        for c in 0..cols {
+            let Some(idx) = images.get(r * cols + c).copied().flatten() else {
+                continue;
+            };
+            let Some((sx, sy)) = sheet.origin(idx) else { continue };
+            let x0 = ((grid_x + (c as f32) * TOOLS_COL_PITCH + 21.5 - cell as f32 / 2.0)
+                * scale)
+                .round() as i32;
+            let y0 = ((grid_y + (r as f32) * TOOLS_ROW_PITCH + 23.0 - cell as f32 / 2.0)
+                * scale)
+                .round() as i32;
+            for dy in 0..dst_cell {
+                let sy_px = sy + ((dy as f32 / scale) as usize).min(cell - 1);
+                if sy_px >= sheet.h {
+                    continue;
+                }
+                let y = y0 + dy as i32;
+                if y < 0 || y as usize >= buf_h {
+                    continue;
+                }
+                for dx in 0..dst_cell {
+                    let sx_px = sx + ((dx as f32 / scale) as usize).min(cell - 1);
+                    if sx_px >= sheet.w {
+                        continue;
+                    }
+                    let x = x0 + dx as i32;
+                    if x < 0 || x as usize >= buf_w {
+                        continue;
+                    }
+                    let off = (sy_px * sheet.w + sx_px) * 4;
+                    if off + 3 >= sheet.pixels.len() {
+                        continue;
+                    }
+                    let (r8, g8, b8, a8) = (
+                        sheet.pixels[off] as u32,
+                        sheet.pixels[off + 1] as u32,
+                        sheet.pixels[off + 2] as u32,
+                        sheet.pixels[off + 3] as u32,
+                    );
+                    if a8 == 0 {
+                        continue;
+                    }
+                    let inv = 255 - a8;
+                    let d = &mut buf[y as usize * buf_w + x as usize];
+                    d.r = ((r8 * a8 + d.r as u32 * inv) / 255) as u8;
+                    d.g = ((g8 * a8 + d.g as u32 * inv) / 255) as u8;
+                    d.b = ((b8 * a8 + d.b as u32 * inv) / 255) as u8;
+                    d.a = ((255 * a8 + d.a as u32 * inv) / 255) as u8;
+                }
+            }
+        }
+    }
+}
+/// 一个工具窗口的完整状态：数据、滚动、常用行、帧缓冲、显隐。
+/// 两个窗口各持一份，逻辑完全共用。
+struct PaneState {
+    cfg: PaneCfg,
+    comp: Rc<ToolsWindow>,
+    msw: Rc<MinimalSoftwareWindow>,
+    buf: RefCell<Vec<Argb>>,
+    /// 分类表：表情窗是 1 个「全部」，符号窗是 10 个分类。
+    /// 用 Rc 包一层：刷新只递增引用计数，不复制上千条字符
+    cats: RefCell<Vec<Rc<crate::tools_data::ToolCat>>>,
+    cat: Cell<usize>,
+    row: Cell<usize>,
+    scroll_px: Cell<f32>,
+    images: RefCell<Vec<Option<usize>>>,
+    /// 常用行内容与位图（各窗口独立，持久化到各自文件）
+    common: RefCell<Vec<String>>,
+    common_images: RefCell<Vec<Option<usize>>>,
+    recent: RefCell<Option<crate::tools_data::RecentStore>>,
+    visible: Cell<bool>,
+    positioned: Cell<bool>,
+}
+
+impl PaneState {
+    fn new(
+        cfg: PaneCfg,
+        comp: Rc<ToolsWindow>,
+        msw: Rc<MinimalSoftwareWindow>,
+    ) -> Self {
+        // 几何只设一次：两个窗口尺寸/网格位置不同，全部走属性
+        comp.set_caption(SharedString::from(cfg.kind.title()));
+        comp.set_cols(cfg.cols as i32);
+        comp.set_win_w(cfg.win_w);
+        comp.set_win_h(cfg.win_h);
+        comp.set_grid_x(cfg.grid_x);
+        comp.set_grid_y(cfg.grid_y);
+        comp.set_grid_w(cfg.grid_w);
+        comp.set_grid_h(cfg.grid_h);
+        comp.set_common_y(cfg.common_y);
+        Self {
+            cfg,
+            comp,
+            msw,
+            buf: RefCell::new(Vec::new()),
+            cats: RefCell::new(Vec::new()),
+            cat: Cell::new(0),
+            row: Cell::new(0),
+            scroll_px: Cell::new(0.0),
+            images: RefCell::new(Vec::new()),
+            common: RefCell::new(Vec::new()),
+            common_images: RefCell::new(Vec::new()),
+            recent: RefCell::new(None),
+            visible: Cell::new(false),
+            positioned: Cell::new(false),
+        }
+    }
+
+    fn size_px(&self) -> (u32, u32) {
+        let s = ui_scale();
+        (
+            (self.cfg.win_w * s).round() as u32,
+            (self.cfg.win_h * s).round() as u32,
+        )
+    }
+
+    /// 装载分类（浅色数据，只在首次打开时做）
+    fn set_cats(&self, cats: Vec<crate::tools_data::ToolCat>) {
+        let cats: Vec<Rc<crate::tools_data::ToolCat>> = cats.into_iter().map(Rc::new).collect();
+        let names: Vec<SharedString> =
+            cats.iter().map(|c| SharedString::from(c.name.as_str())).collect();
+        // 侧栏两列属性：前 5 个 / 其余（表情窗只有 1 个分类，不走侧栏）
+        let a: Vec<SharedString> = names.iter().take(5).cloned().collect();
+        let b: Vec<SharedString> = names.iter().skip(5).cloned().collect();
+        self.comp.set_cat_row_a(ModelRc::new(VecModel::from(a)));
+        self.comp.set_cat_row_b(ModelRc::new(VecModel::from(b)));
+        *self.cats.borrow_mut() = cats;
+    }
+
+    fn cats_len(&self) -> usize {
+        self.cats.borrow().len()
+    }
+
+    /// 当前分类（Rc 克隆，O(1)）；无分类时返回 None。
+    /// 刷新热路径只借 slice，不做整表复制。
+    fn cur_cat(&self) -> Option<Rc<crate::tools_data::ToolCat>> {
+        self.cats.borrow().get(self.cat.get()).cloned()
+    }
+
+    /// 重算视口 → 写组件 → 记录首行与位图索引。返回 clamp 后的首行。
+    fn refresh(&self, sheet: Option<&crate::tools_data::EmojiSheet>) -> usize {
+        let cat = self.cur_cat();
+        let flat: &[String] = cat.as_ref().map(|c| c.items.as_slice()).unwrap_or(&[]);
+        let base = cat.as_ref().and_then(|c| c.base);
+        let (r, _, _, images) = pane_apply_view(
+            &self.comp,
+            flat,
+            self.row.get(),
+            self.cfg.cols,
+            self.cfg.rows,
+            sheet,
+            base,
+        );
+        self.row.set(r);
+        *self.images.borrow_mut() = images;
+        self.comp.set_show_cats(self.cats_len() > 1);
+        self.comp.set_cat_index(self.cat.get() as i32);
+        r
+    }
+
+    /// 常用行：取最近使用的前 cols 个，固定显示在网格上方
+    fn sync_common(&self, sheet: Option<&crate::tools_data::EmojiSheet>) {
+        let cols = self.cfg.cols;
+        let items: Vec<String> = self
+            .recent
+            .borrow()
+            .as_ref()
+            .map(|r| r.items().iter().take(cols).cloned().collect())
+            .unwrap_or_default();
+        let show = !items.is_empty();
+        let mut imgs: Vec<Option<usize>> = vec![None; cols];
+        for (i, t) in items.iter().enumerate() {
+            imgs[i] = sheet.and_then(|s| s.lookup(t));
+        }
+        let mut cells: Vec<SharedString> = (0..cols)
+            .map(|i| SharedString::from(items.get(i).map(|s| s.as_str()).unwrap_or("")))
+            .collect();
+        // 有位图的格子留空串，位图由 pane_blit_images 叠上去
+        for (i, img) in imgs.iter().enumerate() {
+            if img.is_some() && i < cells.len() {
+                cells[i] = SharedString::from("");
+            }
+        }
+        self.comp.set_common_row(ModelRc::new(VecModel::from(cells)));
+        self.comp.set_show_common(show);
+        *self.common.borrow_mut() = items;
+        *self.common_images.borrow_mut() = imgs;
+    }
+
+    fn cell_text(&self, cell: usize) -> Option<String> {
+        let cat = self.cur_cat();
+        let flat: &[String] = cat.as_ref().map(|c| c.items.as_slice()).unwrap_or(&[]);
+        pane_cell_text(flat, self.row.get(), self.cfg.cols, self.cfg.rows, cell)
+    }
+
+    fn common_text(&self, i: usize) -> Option<String> {
+        self.common.borrow().get(i).cloned()
+    }
+
+    /// 记一次使用：置顶、去重、落盘，并刷新常用行
+    fn push_recent(&self, text: &str, sheet: Option<&crate::tools_data::EmojiSheet>) {
+        if let Some(r) = self.recent.borrow_mut().as_mut() {
+            r.push(text);
+        }
+        self.sync_common(sheet);
+    }
+
+
+    /// 光标处的字符含义；不在格子上、或该字符没有词条时返回 None。
+    /// 显示位置是底栏（不做浮动气泡：网格里的位图是后贴到帧缓冲的，
+    /// Slint 画的浮层会被位图盖住）。
+    fn tip_at(
+        &self,
+        lx: f32,
+        ly: f32,
+        meanings: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        let cols = self.cfg.cols;
+        let pitch = TOOLS_COL_PITCH;
+
+        // 常用行（x 从 16 起，格宽 43，行高 46）
+        let cy = self.cfg.common_y;
+        if ly >= cy && ly < cy + 46.0 && lx >= 16.0 {
+            let i = ((lx - 16.0) / pitch).floor();
+            if i >= 0.0 && (i as usize) < cols && (lx - 16.0) - i * pitch <= 43.0 {
+                let text = self.common_text(i as usize)?;
+                return crate::tools_data::meaning_of(meanings, &text).cloned();
+            }
+            return None;
+        }
+
+        // 网格
+        let (gx, gy) = (self.cfg.grid_x, self.cfg.grid_y);
+        if lx < gx || ly < gy {
+            return None;
+        }
+        let (cf, rf) = ((lx - gx) / pitch, (ly - gy) / TOOLS_ROW_PITCH);
+        let (c, r) = (cf.floor(), rf.floor());
+        if c < 0.0 || r < 0.0 || c as usize >= cols || r as usize >= self.cfg.rows {
+            return None;
+        }
+        // 落在格子之间的缝隙里不算
+        if (lx - gx) - c * pitch > 43.0 || (ly - gy) - r * TOOLS_ROW_PITCH > 46.0 {
+            return None;
+        }
+        let text = self.cell_text(r as usize * cols + c as usize)?;
+        crate::tools_data::meaning_of(meanings, &text).cloned()
+    }
+    /// 按像素滚动；余量收进本行区间，底部不累积欠账。
+    /// 行号没变（触控板的小增量、或已在两端继续滚）时直接返回 —— 不重建模型、
+    /// 不重绘，这是滚动手感与 CPU 都受益的一条早退。
+    fn scroll(&self, dy: f32, sheet: Option<&crate::tools_data::EmojiSheet>) {
+        let px = (self.scroll_px.get() + dy).max(0.0);
+        let want = (px / TOOLS_ROW_PITCH).floor() as usize;
+        if want == self.row.get() {
+            let lo = self.row.get() as f32 * TOOLS_ROW_PITCH;
+            self.scroll_px
+                .set(px.clamp(lo, lo + TOOLS_ROW_PITCH - 0.01));
+            return;
+        }
+        self.row.set(want);
+        let r = self.refresh(sheet);
+        let lo = r as f32 * TOOLS_ROW_PITCH;
+        self.scroll_px
+            .set(px.clamp(lo, lo + TOOLS_ROW_PITCH - 0.01));
+    }
+
+    fn draw(
+        &self,
+        backend: &mut Box<dyn UiBackend>,
+        sheet: Option<&crate::tools_data::EmojiSheet>,
+    ) {
+        if !self.visible.get() {
+            return;
+        }
+        let scale = ui_scale();
+        let (w, h) = self.size_px();
+        if self.buf.borrow().len() != (w * h) as usize {
+            *self.buf.borrow_mut() = vec![Argb::default(); (w * h) as usize];
+        }
+        let mut tb = self.buf.borrow_mut();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.msw.draw_if_needed(|renderer: &SoftwareRenderer| {
+                let _ = renderer.render(&mut tb, w as usize);
+                if let Some(s) = sheet {
+                    // 常用行（1 行）→ 网格（rows 行）；两段共用同一套贴图算法
+                    pane_blit_images(
+                        &mut tb, w as usize, scale, s,
+                        &self.common_images.borrow(),
+                        self.cfg.cols, 1, 16.0, self.cfg.common_y,
+                    );
+                    pane_blit_images(
+                        &mut tb, w as usize, scale, s,
+                        &self.images.borrow(),
+                        self.cfg.cols, self.cfg.rows, self.cfg.grid_x, self.cfg.grid_y,
+                    );
+                }
+                if std::env::var_os("HENG_UI_DUMP").is_some() {
+                    dump_frame(&tb, w, h, "tools");
+                }
+                // 只在 dirty 时贴帧：窗口长驻，空闲不能每帧刷 600×432×4
+                backend.blit(self.cfg.win_id, &tb, w, h);
+            });
+        }));
+    }
+
+    fn show(
+        &self,
+        backend: &mut Box<dyn UiBackend>,
+        sheet: Option<&crate::tools_data::EmojiSheet>,
+    ) {
+        let (w, h) = self.size_px();
+        if !self.positioned.get() {
+            let (sw, sh) = screen_size();
+            let x = ((sw - w as i32) / 2).max(8);
+            let y = ((sh - h as i32) / 3).max(8);
+            backend.configure(self.cfg.win_id, x, y, w, h);
+            self.positioned.set(true);
+        }
+        self.refresh(sheet);
+        self.sync_common(sheet);
+        if !self.visible.get() {
+            backend.set_mapped(self.cfg.win_id, true);
+            // hide() 之后必须显式 show()，否则 Slint 不再产生重绘帧
+            let _ = self.comp.show();
+            self.visible.set(true);
+        }
+    }
+
+    fn hide(&self, backend: &mut Box<dyn UiBackend>) {
+        if self.visible.get() {
+            backend.set_mapped(self.cfg.win_id, false);
+            let _ = self.comp.hide();
+            self.visible.set(false);
+            // 关窗即释放帧缓冲（768×432×4 ≈ 1.3MB）；下次打开按需重分配
+            let mut b = self.buf.borrow_mut();
+            b.clear();
+            b.shrink_to_fit();
+        }
+    }
+}
+
 fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // Slint 平台必须先于组件创建注册
     slint::platform::set_platform(Box::new(XPlatform {
@@ -3779,6 +4899,20 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // 第 2 个组件实例 → MSW2（XPlatform 计数路由）
     let msw2 = MSW2.with(|w| w.clone());
     let sui = Rc::new(SettingsWindow::new().expect("heng-ui: 设置组件创建失败"));
+    // 第 3 个组件实例 → MSW3（长驻工具窗）
+    let msw3 = MSW3.with(|w| w.clone());
+    let msw4 = MSW4.with(|w| w.clone());
+    // 两个工具窗口各一个组件实例（第 3、4 个实例 → MSW3 / MSW4）
+    let tui = Rc::new(ToolsWindow::new().expect("heng-ui: 符号窗口组件创建失败"));
+    let eui = Rc::new(ToolsWindow::new().expect("heng-ui: 表情窗口组件创建失败"));
+    msw3.set_size(PhysicalSize {
+        width: (PANE_SYMBOLS.win_w * ui_scale()).round() as u32,
+        height: (PANE_SYMBOLS.win_h * ui_scale()).round() as u32,
+    });
+    msw4.set_size(PhysicalSize {
+        width: (PANE_EMOJI.win_w * ui_scale()).round() as u32,
+        height: (PANE_EMOJI.win_h * ui_scale()).round() as u32,
+    });
     // 启动时先应用候选字号（7 档刻度 14-20，默认 16 = 第 3 档）——
     // 布局尺寸全部由此推导，必须在算高度之前
     if let Ok(eng) = engine() {
@@ -4061,6 +5195,120 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         }
     };
 
+    // ---- 两个工具窗口（表情 / 符号）----
+    // 各自持有组件实例、帧缓冲、滚动状态与常用列表；逻辑完全共用 PaneState。
+    // 彩色 emoji 雪碧图（懒加载一次，两窗共用同一份解码结果）
+    let emoji_sheet: RefCell<Option<crate::tools_data::EmojiSheet>> = RefCell::new(None);
+    // 表情 → 中文含义（悬停提示用）；符号没有词表，查不到就不提示
+    let emoji_meanings: Rc<RefCell<std::collections::HashMap<String, String>>> =
+        Rc::new(RefCell::new(std::collections::HashMap::new()));
+    let symbol_pane = Rc::new(PaneState::new(PANE_SYMBOLS, tui.clone(), msw3.clone()));
+    let emoji_pane = Rc::new(PaneState::new(PANE_EMOJI, eui.clone(), msw4.clone()));
+    let panes = [emoji_pane.clone(), symbol_pane.clone()];
+    let tools_loaded = Rc::new(Cell::new(false));
+
+    // 首次打开时装载数据：共享目录（表情雪碧图 / 符号分类）+ 用户目录（两套常用）
+    let load_tools_data = {
+        let panes = [emoji_pane.clone(), symbol_pane.clone()];
+        let loaded = tools_loaded.clone();
+        let sheet_slot = &emoji_sheet;
+        let meanings_slot = &emoji_meanings;
+        move || {
+            if loaded.get() {
+                return;
+            }
+            let Ok(eng) = engine() else { return };
+            let dir = eng.shared_data_dir().map(|p| p.to_path_buf());
+
+            if let Some(d) = dir.as_ref() {
+                *sheet_slot.borrow_mut() = crate::tools_data::load_emoji_sheet(d);
+                // 表情窗：去掉分组，单一「全部」列表（位图下标 == 扁平下标）
+                // 直接从雪碧图元数据取列表：不再调 load_tools（那会把
+                // symbols_v.yaml 解析一遍，随后 load_symbol_cats 又解析一遍）
+                let all = crate::tools_data::emoji_all_items(d);
+                *meanings_slot.borrow_mut() = crate::tools_data::load_emoji_meanings(d);
+                panes[0].set_cats(vec![crate::tools_data::ToolCat {
+                    name: "全部".into(),
+                    items: all,
+                    base: Some(0),
+                }]);
+                // 符号窗：10 个分类（左侧栏）
+                panes[1].set_cats(crate::tools_data::load_symbol_cats(
+                    &d.join("symbols_v.yaml"),
+                ));
+            }
+            // 常用：先把旧版共用文件拆成两套，再各装各的
+            crate::tools_data::migrate_recent(eng.user_data_dir(), sheet_slot.borrow().as_ref());
+            *panes[0].recent.borrow_mut() = Some(crate::tools_data::RecentStore::new(
+                eng.user_data_dir(),
+                crate::tools_data::RecentKind::Emoji,
+            ));
+            *panes[1].recent.borrow_mut() = Some(crate::tools_data::RecentStore::new(
+                eng.user_data_dir(),
+                crate::tools_data::RecentKind::Symbols,
+            ));
+            loaded.set(true);
+        }
+    };
+
+    // 组件回调 → 内部命令（pane: 0 表情 / 1 符号）
+    {
+        let tx = tx.clone();
+        tui.on_cell_clicked({
+            let tx = tx.clone();
+            move |i| { let _ = tx.send(UiCmd::PaneCell(1, i as usize)); }
+        });
+        tui.on_common_clicked({
+            let tx = tx.clone();
+            move |i| { let _ = tx.send(UiCmd::PaneCommon(1, i as usize)); }
+        });
+        tui.on_cat_clicked({
+            let tx = tx.clone();
+            move |i| { let _ = tx.send(UiCmd::PaneCat(1, i as usize)); }
+        });
+        tui.on_close_clicked({
+            let tx = tx.clone();
+            move || { let _ = tx.send(UiCmd::PaneHide(1)); }
+        });
+    }
+    {
+        let tx = tx.clone();
+        eui.on_cell_clicked({
+            let tx = tx.clone();
+            move |i| { let _ = tx.send(UiCmd::PaneCell(0, i as usize)); }
+        });
+        eui.on_common_clicked({
+            let tx = tx.clone();
+            move |i| { let _ = tx.send(UiCmd::PaneCommon(0, i as usize)); }
+        });
+        eui.on_cat_clicked({
+            let tx = tx.clone();
+            move |i| { let _ = tx.send(UiCmd::PaneCat(0, i as usize)); }
+        });
+        eui.on_close_clicked({
+            let tx = tx.clone();
+            move || { let _ = tx.send(UiCmd::PaneHide(0)); }
+        });
+    }
+
+    // 工具窗点击上屏：与「点击候选上屏」走同一条通道
+    // （commit handler 优先，无回调时 PENDING 供外壳轮询）
+    let commit_tool_text = |text: &str| {
+        let rime = *current.borrow();
+        let handle = rime
+            .and_then(|rid| SESSIONS.handle_of(rid))
+            .or_else(|| SESSIONS.last_handle());
+        let Some(h) = handle else {
+            ui_log("tools: 无活动会话，跳过上屏");
+            return;
+        };
+        let _guard = OP_LOCK.lock().unwrap();
+        // 有未上屏的拼音串时先清掉，否则字符会被 librime 吞进组合串
+        if let (Some(rime_id), Ok(eng)) = (rime, engine()) {
+            let _ = eng.clear_composition(rime_id);
+        }
+        emit_commit(h, text);
+    };
 
     // 展开箭头 / 展开列表点击 → 内部命令（在循环里统一处理，避免借用冲突）
     ui.on_toggle_expand({
@@ -4072,7 +5320,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     ui.on_menu_clicked({
         let tx = tx.clone();
         move || {
-            let _ = tx.send(UiCmd::MenuOpen); // ☰ 菜单（占位：符号/常用语/设置）
+            let _ = tx.send(UiCmd::MenuOpen); // ☰ 菜单（表情 / 符号 / 设置）
         }
     });
     ui.on_menu_item_clicked({
@@ -4593,6 +5841,11 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     if index == 2 {
                         // 设置：弹出设置窗口（独立窗）
                         let _ = tx.send(UiCmd::SettingsShow(1));
+                    } else {
+                        // 表情 / 符号：长驻工具窗。tab 0=最近 1=表情 2=符号，
+                        // 菜单项 0/1 对应 1/2（「最近」通过 tab 栏或快捷键进入）
+                        let pane: u8 = if index == 1 { 1 } else { 0 };
+                        let _ = tx.send(UiCmd::PaneShow(pane));
                     }
                 }
                 UiCmd::MenuDismiss => {
@@ -4647,6 +5900,69 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                         let _ = sui.hide();
                         settings_visible.set(false);
                     }
+                }
+                // ---- 工具窗口（长驻、手动关闭） ----
+                UiCmd::PaneShow(p) => {
+                    load_tools_data();
+                    // 雪碧图在两窗都关时会释放；再打开时按需重载（约 10–30ms）
+                    if emoji_sheet.borrow().is_none() {
+                        if let Ok(eng) = engine() {
+                            if let Some(dir) = eng.shared_data_dir() {
+                                *emoji_sheet.borrow_mut() =
+                                    crate::tools_data::load_emoji_sheet(dir);
+                            }
+                        }
+                    }
+                    let pane = &panes[(p as usize).min(1)];
+                    let sheet = emoji_sheet.borrow();
+                    pane.show(&mut backend, sheet.as_ref());
+                }
+                UiCmd::PaneHide(p) => {
+                    let pane = &panes[(p as usize).min(1)];
+                    pane.comp.set_tip_text(SharedString::from(""));
+                    pane.hide(&mut backend);
+                    // 两个窗口都关掉后释放解码好的雪碧图（2560×1120×4 ≈ 11.5MB）
+                    if !panes[0].visible.get() && !panes[1].visible.get() {
+                        *emoji_sheet.borrow_mut() = None;
+                    }
+                }
+                UiCmd::PaneCat(p, cat) => {
+                    let pane = &panes[(p as usize).min(1)];
+                    let n = pane.cats_len().max(1);
+                    pane.cat.set(cat.min(n - 1));
+                    pane.row.set(0);
+                    pane.scroll_px.set(0.0);
+                    let sheet = emoji_sheet.borrow();
+                    pane.refresh(sheet.as_ref());
+                }
+                UiCmd::PaneScroll(p, dy) => {
+                    let pane = &panes[(p as usize).min(1)];
+                    let sheet = emoji_sheet.borrow();
+                    pane.scroll(dy, sheet.as_ref());
+                }
+                UiCmd::PaneCell(p, cell) => {
+                    let pane = &panes[(p as usize).min(1)];
+                    let Some(text) = pane.cell_text(cell) else { continue };
+                    if text.is_empty() {
+                        continue;
+                    }
+                    {
+                        let sheet = emoji_sheet.borrow();
+                        pane.push_recent(&text, sheet.as_ref());
+                    }
+                    commit_tool_text(&text);
+                }
+                UiCmd::PaneCommon(p, i) => {
+                    let pane = &panes[(p as usize).min(1)];
+                    let Some(text) = pane.common_text(i) else { continue };
+                    if text.is_empty() {
+                        continue;
+                    }
+                    {
+                        let sheet = emoji_sheet.borrow();
+                        pane.push_recent(&text, sheet.as_ref());
+                    }
+                    commit_tool_text(&text);
                 }
                 UiCmd::ToggleExpand => {
                     if !*visible.borrow() {
@@ -4924,7 +6240,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     }
                 }
                 UiCmd::MenuOpen => {
-                    // ☰ 菜单（占位）：面板长高显示 符号/常用语/设置，功能后续迭代
+                    // ☰ 菜单：面板长高显示 表情 / 符号 / 设置
                     menu_open.set(true);
                     UI_MENU_OPEN.store(true, Ordering::Relaxed);
                     ui.set_menu_open(true);
@@ -5056,6 +6372,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         // 2. 平台事件（仅窗口可见时有意义，但轮询保持廉价）
         //    物理像素坐标 → 逻辑像素（Slint 指针事件约定逻辑坐标）
         let tx_close = tx.clone();
+        let tx_tools = tx.clone();
         backend.poll_events(&mut |tag, event| {
             if tag == 1 {
                 // 设置窗口事件
@@ -5068,6 +6385,61 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 }
                 let event = scale_pointer_event(event, scale);
                 msw2.window().dispatch_event(event);
+                return;
+            }
+            if tag == 3 || tag == 4 {
+                // tag 3 = 符号窗（panes[1]），tag 4 = 表情窗（panes[0]）
+                let pane_idx = if tag == 4 { 0usize } else { 1usize };
+                // 工具窗口事件：CloseRequested 只在系统级关闭时兜底，
+                // 正常关闭走窗口内 ✕ 按钮（不因失焦 / 打字自动关）
+                if matches!(event, WindowEvent::CloseRequested) {
+                    let _ = tx_close.send(UiCmd::PaneHide(pane_idx as u8));
+                    return;
+                }
+                if !panes[pane_idx].visible.get() {
+                    return;
+                }
+                // 悬浮提示：光标落在表情格上时显示其中文含义（符号没有词表，
+                // 查不到就保持不显示）。这里直接写组件属性，不经过命令队列。
+                match &event {
+                    WindowEvent::PointerMoved { position } => {
+                        let pane = &panes[pane_idx];
+                        let hit = {
+                            let m = emoji_meanings.borrow();
+                            if m.is_empty() {
+                                None
+                            } else {
+                                pane.tip_at(position.x / scale, position.y / scale, &m)
+                            }
+                        };
+                        let comp = &pane.comp;
+                        match hit {
+                            Some(t) => comp.set_tip_text(SharedString::from(t)),
+                            None => comp.set_tip_text(SharedString::from("")),
+                        }
+                    }
+                    WindowEvent::PointerExited => {
+                        panes[pane_idx].comp.set_tip_text(SharedString::from(""));
+                    }
+                    _ => {}
+                }
+                // 滚轮：视口只有 5 行，Slint 侧不持有全量模型，滚动在 Rust 里
+                // 换算成「行偏移」重写模型（真正的虚拟化）。
+                // 一个 notch = dy ±50 → 3 行 ≈ 30 个格子；触控板的小增量退化为 1 行。
+                if let WindowEvent::PointerScrolled { delta_y, .. } = event {
+                    // dy > 0 = 滚轮向上 → 看前面的内容；像素量交给命令处理累积，
+                    // 触控板的小增量因此也能平滑推进（不会被 round 成 0 吃掉）
+                    if delta_y != 0.0 {
+                        let _ = tx_tools.send(UiCmd::PaneScroll(pane_idx as u8, -delta_y));
+                    }
+                    return;
+                }
+                let event = scale_pointer_event(event, scale);
+                if tag == 4 {
+                    msw4.window().dispatch_event(event);
+                } else {
+                    msw3.window().dispatch_event(event);
+                }
                 return;
             }
             if !*visible.borrow() {
@@ -5101,6 +6473,13 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         });
         // 3b. 设置窗口渲染（dirty 时才实际绘制 + blit）
         draw_settings(&mut backend, &sbuf, &sui, &msw2, settings_visible.get());
+        // 3b-2. 工具窗口渲染（长驻，dirty 时才绘制 + blit）
+        {
+            let sheet = emoji_sheet.borrow();
+            for pane in panes.iter() {
+                pane.draw(&mut backend, sheet.as_ref());
+            }
+        }
 
         // 3c. 气泡到期恢复：有输入上下文 → 重建横条；否则藏窗（不误杀打字中的候选）
         if let Some(deadline) = hint_deadline.get() {
@@ -5922,5 +7301,45 @@ mod tests {
         assert_eq!(fmt_elapsed(86400), "1 天前");
         // 时钟回跳（负数差值）不崩，按 0 处理
         assert_eq!(fmt_elapsed(-5), "0 秒前");
+    }
+
+    /// 工具窗视口：空数据、一屏内、跨屏、滚到底 clamp、cell 换算。
+    #[test]
+    fn tools_view_bounds_cases() {
+        use crate::tools_data::{VIEW_CELLS, VIEW_COLS, VIEW_ROWS};
+        let (cols, rows) = (VIEW_COLS, VIEW_ROWS);
+        assert_eq!(view_bounds(0, 0, cols, rows), (0, 1, 0, 0));
+        assert_eq!(view_bounds(VIEW_CELLS, 0, cols, rows), (0, rows, 0, VIEW_CELLS));
+        assert_eq!(
+            view_bounds(VIEW_CELLS, 99, cols, rows),
+            (0, rows, 0, VIEW_CELLS)
+        );
+        assert_eq!(
+            view_bounds(VIEW_CELLS + 1, 0, cols, rows),
+            (0, rows + 1, 0, VIEW_CELLS)
+        );
+        assert_eq!(
+            view_bounds(VIEW_CELLS + 1, 1, cols, rows),
+            (1, rows + 1, VIEW_COLS, VIEW_CELLS + 1)
+        );
+        let (r, _, start, end) = view_bounds(VIEW_CELLS + 5, 999, cols, rows);
+        assert_eq!(r, 1);
+        assert_eq!(start, VIEW_COLS);
+        assert_eq!(end, VIEW_CELLS + 5);
+        // 表情窗 16 列：一屏 96 项，行数按列数重算
+        assert_eq!(view_bounds(96, 0, 16, 6), (0, 6, 0, 96));
+        assert_eq!(view_bounds(100, 99, 16, 6), (1, 7, 16, 100));
+        // cell 换算与 bounds 同源
+        let flat: Vec<String> = (0..VIEW_CELLS + 3).map(|i| i.to_string()).collect();
+        assert_eq!(
+            pane_cell_text(&flat, 1, cols, rows, 0).as_deref(),
+            Some(VIEW_COLS.to_string().as_str())
+        );
+        assert_eq!(
+            pane_cell_text(&flat, 1, cols, rows, VIEW_CELLS + 3 - VIEW_COLS - 1).as_deref(),
+            Some((VIEW_CELLS + 2).to_string().as_str())
+        );
+        assert_eq!(pane_cell_text(&flat, 1, cols, rows, VIEW_CELLS + 3 - VIEW_COLS), None);
+        assert_eq!(pane_cell_text(&[], 0, cols, rows, 0), None);
     }
 }

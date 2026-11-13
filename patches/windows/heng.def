@@ -82,6 +82,12 @@ EXPORTS
     heng_simulate_key_sequence
     heng_start_session
     heng_style_flag
+    heng_emoji_hide
+    heng_emoji_show
+    heng_symbols_hide
+    heng_symbols_show
+    heng_tools_hide
+    heng_tools_show
     heng_sync_config
     heng_sync_configure
     heng_sync_now

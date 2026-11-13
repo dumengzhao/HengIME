@@ -41,5 +41,7 @@ else
     sleep 1
     echo "fcitx5 已启动（日志：/tmp/fcitx5-heng.log）"
 fi
-echo "当前输入法：$(fcitx5-remote -n 2>/dev/null || echo '（无焦点）')"
+# fcitx5-remote 无焦点时会阻塞等 dbus 回复（实测能卡几分钟），
+# 自动启动场景必须超时兜底，否则脚本常驻不退出
+echo "当前输入法：$(timeout 2 fcitx5-remote -n 2>/dev/null || echo '（无焦点）')"
 echo "切换到衡Dev： fcitx5-remote -s hengdev   或 Ctrl+Space"

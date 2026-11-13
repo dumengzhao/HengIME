@@ -51,6 +51,11 @@ pub fn ui_menu_open() {}
 pub fn ui_menu_close() {}
 pub fn ui_settings_show(_page: i32) {}
 pub fn ui_settings_hide() {}
+/// 工具窗口仅桌面端有（自绘 UI）；移动端外壳自行处理，保持空实现。
+pub fn ui_tools_show(_tab: usize) {}
+pub fn ui_tools_hide() {}
+pub fn ui_pane_show(_pane: usize) {}
+pub fn ui_pane_hide(_pane: usize) {}
 pub fn fire_service(_action: i32) -> bool {
     false
 }
