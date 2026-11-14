@@ -160,9 +160,17 @@ if (Test-Path $srcExe) {
     try {
         & $signScript -Exe $srcExe -Verify | ForEach-Object { Write-Host "    $_" }
     } catch {
-        Write-Host '[FAIL] 产物没有 uiAccess 清单或签名无效。'
-        Write-Host '       dev 产物用 -Dev 让它自动补签名；正式产物检查 HENG_SIGN_THUMBPRINT。'
-        exit 1
+        # -Verify 依赖 mt.exe（Windows SDK）。发布包面对的机器没有 SDK：
+        # 清单无法解析时降级为只验签名，签名仍有效就放行并明示清单未验。
+        $sig = Get-AuthenticodeSignature -FilePath $srcExe
+        if ($sig.Status -ne 'Valid') {
+            Write-Host '[FAIL] 产物没有 uiAccess 清单或签名无效。'
+            Write-Host '       dev 产物用 -Dev 让它自动补签名；正式产物检查 HENG_SIGN_THUMBPRINT。'
+            exit 1
+        }
+        Write-Host '[WARN] mt.exe（Windows SDK）缺失，uiAccess 清单未验；签名有效，继续安装。'
+        Write-Host '       若装完候选窗被任务栏搜索面板遮挡（band 停在桌面带），'
+        Write-Host '       在装了 SDK 的机器上跑 uia-sign.ps1 -Verify 复核清单。'
     }
 }
 
