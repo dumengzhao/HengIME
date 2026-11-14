@@ -667,6 +667,17 @@ fn collect_yaml_strings(v: &serde_yaml::Value, out: &mut Vec<String>) {
 mod tests {
     use super::*;
 
+    /// 共享数据目录。该目录由 third_party 数据部署生成、不入版本库，CI 只跑
+    /// 单元测试不部署共享数据，因此目录或符号表缺失时返回 None，
+    /// 依赖真实数据的用例据此跳过而不是断言失败。
+    fn shared_dir() -> Option<PathBuf> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("runtime/rime-shared");
+        dir.join("symbols_v.yaml").is_file().then_some(dir)
+    }
+
     #[test]
     fn emoji_group_is_stable() {
         assert_eq!(emoji_group(0x1F600), "笑脸与情感");
@@ -703,7 +714,7 @@ mod tests {
 
     #[test]
     fn real_data_loads() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("runtime/rime-shared");
+        let Some(dir) = shared_dir() else { return };
         let tabs = load_tools(&dir);
         assert_eq!(tabs.len(), 2);
         assert_eq!(tabs[0].name, "表情");
@@ -716,7 +727,7 @@ mod tests {
     /// 含义表：优先 CLDR 官方中文名，缺失的回退 emoji.txt 触发词
     #[test]
     fn emoji_meanings_load() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("runtime/rime-shared");
+        let Some(dir) = shared_dir() else { return };
         let m = load_emoji_meanings(&dir);
         assert!(m.len() > 1000, "含义条数应覆盖大部分表情，实际 {}", m.len());
         // CLDR 短名（生成时人工覆盖了少数直译）
@@ -732,7 +743,7 @@ mod tests {
     /// 分类覆盖：10 个分类都有内容，且总量与 yaml 非索引条目一致。
     #[test]
     fn symbol_cats_cover_all_groups() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("runtime/rime-shared");
+        let Some(dir) = shared_dir() else { return };
         let cats = load_symbol_cats(&dir.join("symbols_v.yaml"));
         let total: usize = cats.iter().map(|c| c.items.len()).sum();
         for c in &cats {
@@ -749,7 +760,7 @@ mod tests {
     /// 雪碧图元数据与解码结果一致，且 flat_items 下标能命中位图。
     #[test]
     fn emoji_sheet_decodes_and_matches() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("runtime/rime-shared");
+        let Some(dir) = shared_dir() else { return };
         let Some(sheet) = load_emoji_sheet(&dir) else {
             return; // 资源未生成时跳过（部署形态允许）
         };
