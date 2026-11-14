@@ -1282,6 +1282,9 @@ export component ToolsWindow inherits Window {
     callback common_clicked(int);           // 常用行第 i 格
     callback cat_clicked(int);
     callback close_clicked();
+    // 单元格字族：软件渲染每段文本只用一个字族、不做逐字回退，缺字形画成
+    // 空白格。字族按字形是否真的存在来选，由 Rust 侧回答。
+    pure callback cell_font(string) -> string;
 
     width: root.win-w;
     height: root.win-h;
@@ -1319,6 +1322,7 @@ export component ToolsWindow inherits Window {
                 background: ta-common.has-hover ? #e3e8f2 : transparent;
                 Text {
                     text: ccell; font-size: 22px; color: #1f2328;
+                    font-family: root.cell_font(ccell);
                     horizontal-alignment: center; vertical-alignment: center;
                 }
                 ta-common := TouchArea {
@@ -1379,6 +1383,7 @@ export component ToolsWindow inherits Window {
                     background: ta-cell.has-hover ? #e3e8f2 : transparent;
                     Text {
                         text: cell; font-size: 22px; color: #1f2328;
+                        font-family: root.cell_font(cell);
                         horizontal-alignment: center; vertical-alignment: center;
                     }
                     ta-cell := TouchArea {
@@ -3169,7 +3174,7 @@ use std::cell::RefCell;
                     hwndTrack: hwnd,
                     dwHoverTime: 0,
                 };
-                TrackMouseEvent(&mut tme);
+                unsafe { TrackMouseEvent(&mut tme) };
                 0
             }
             WM_LBUTTONDOWN => {
@@ -3206,9 +3211,9 @@ use std::cell::RefCell;
                     x: (lparam & 0xffff) as u16 as i16 as i32,
                     y: ((lparam >> 16) & 0xffff) as u16 as i16 as i32,
                 };
-                ScreenToClient(hwnd, &mut pt);
+                unsafe { ScreenToClient(hwnd, &mut pt) };
                 let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-                GetClientRect(hwnd, &mut rc);
+                unsafe { GetClientRect(hwnd, &mut rc) };
                 let scale = super::ui_scale();
                 let top = (44.0 * scale).round() as i32;
                 let excl_x = rc.right - (40.0 * scale).round() as i32;
@@ -3220,16 +3225,16 @@ use std::cell::RefCell;
             }
             WM_ERASEBKGND => 1,
             WM_PAINT => {
-                let mut ps: PAINTSTRUCT = std::mem::zeroed();
-                let hdc = BeginPaint(hwnd, &mut ps);
-                EndPaint(hwnd, &ps);
+                let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
+                let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+                unsafe { EndPaint(hwnd, &ps) };
                 0
             }
             WM_CLOSE => {
                 push(WindowEvent::CloseRequested);
                 0
             }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
         }
     }
 
@@ -3378,6 +3383,8 @@ use std::cell::RefCell;
                     Some(letters_wnd_proc)
                 } else if is_tools_win {
                     Some(tools_wnd_proc)
+                } else if is_emoji_win {
+                    Some(emoji_wnd_proc)
                 } else {
                     Some(wnd_proc)
                 },
@@ -3749,6 +3756,13 @@ use std::cell::RefCell;
                 }
                 // 候选窗/字母区/工具窗：分层窗口 UpdateLayeredWindow
                 let screen_dc = GetDC(std::ptr::null_mut());
+                // 位置以窗口矩形为准：工具窗顶栏可拖动（HTCAPTION），拖动后
+                // 窗口坐标由系统改写，若仍用 configure 时的旧坐标贴帧，
+                // 下一次重绘就会把窗口拉回原处。
+                let mut wr: RECT = std::mem::zeroed();
+                if GetWindowRect(s.hwnd, &mut wr) != 0 {
+                    s.pos = (wr.left, wr.top);
+                }
                 let pt_dst = POINT { x: s.pos.0, y: s.pos.1 };
                 let size = SIZE { cx: w as i32, cy: h as i32 };
                 let pt_src = POINT { x: 0, y: 0 };
@@ -4419,6 +4433,123 @@ fn view_bounds(
     (r, total_rows, start, flat_len.min(start + rows * cols))
 }
 
+/// 字形覆盖更宽的字族。默认字族（雅黑一类）只覆盖 GBK 收录的那部分符号，
+/// GBK 之外的符号没有字形。
+const CELL_FONT_WIDE: &str = "Segoe UI Symbol";
+
+/// 单元格字族。软件渲染每段文本只用单一字族、不做逐字回退，缺字形直接画成
+/// 空白格（不是豆腐块）。因此只能按「这个字在该字族里有没有字形」来选：
+/// 宽字族有字形就用它，否则返回空串交回默认字族（汉字、假名、韩文、俄文等）。
+fn cell_font(text: &str) -> SharedString {
+    let mut chars = text.chars();
+    let (Some(ch), None) = (chars.next(), chars.next()) else {
+        return SharedString::default();
+    };
+    if wide_family_has(ch) {
+        SharedString::from(CELL_FONT_WIDE)
+    } else {
+        SharedString::default()
+    }
+}
+
+#[cfg(windows)]
+fn wide_family_has(ch: char) -> bool {
+    glyph_probe::has_glyph(CELL_FONT_WIDE, ch)
+}
+
+/// 非 Windows 平台不做字族切换：字形覆盖由各端系统字体决定，
+/// 这里保持空串即沿用默认字族。
+#[cfg(not(windows))]
+fn wide_family_has(_ch: char) -> bool {
+    false
+}
+
+/// 查某个字族是否含有某字符的字形：GDI 直接读字体 cmap，与渲染后端无关。
+/// 一个内存 DC 加一个字体句柄在进程存活期内复用，不逐个字符建删。
+#[cfg(windows)]
+mod glyph_probe {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateFontW, GetGlyphIndicesW, SelectObject, CLIP_DEFAULT_PRECIS,
+        DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, FW_NORMAL, GGI_MARK_NONEXISTING_GLYPHS,
+        HDC, HGDIOBJ, OUT_DEFAULT_PRECIS,
+    };
+
+    thread_local! {
+        static DCS: RefCell<HashMap<&'static str, (HDC, HGDIOBJ)>> = RefCell::new(HashMap::new());
+        static CACHE: RefCell<HashMap<(&'static str, char), bool>> = RefCell::new(HashMap::new());
+    }
+
+    pub fn has_glyph(family: &'static str, ch: char) -> bool {
+        if let Some(hit) = CACHE.with(|c| c.borrow().get(&(family, ch)).copied()) {
+            return hit;
+        }
+        let got = query(family, ch);
+        CACHE.with(|c| c.borrow_mut().insert((family, ch), got));
+        got
+    }
+
+    fn query(family: &'static str, ch: char) -> bool {
+        DCS.with(|dcs| {
+            let mut dcs = dcs.borrow_mut();
+            let (dc, _) = *dcs.entry(family).or_insert_with(|| make_dc(family));
+            if dc.is_null() {
+                return false;
+            }
+            let mut buf = [0u16; 2];
+            let units = ch.encode_utf16(&mut buf);
+            let mut idx = [0u16; 2];
+            // SAFETY: dc 是已选入该字族字体的内存 DC；idx 容得下 2 个码元。
+            let n = unsafe {
+                GetGlyphIndicesW(
+                    dc,
+                    units.as_ptr(),
+                    units.len() as i32,
+                    idx.as_mut_ptr(),
+                    GGI_MARK_NONEXISTING_GLYPHS,
+                )
+            };
+            n != u32::MAX && idx[0] != 0xFFFF
+        })
+    }
+
+    fn make_dc(family: &'static str) -> (HDC, HGDIOBJ) {
+        let mut name: Vec<u16> = family.encode_utf16().collect();
+        name.push(0);
+        // SAFETY: 只建一个内存 DC 并选入指定字族的字体；任何一步失败即返回空句柄，
+        // 调用方据此放弃字族切换（回退默认字族）。
+        unsafe {
+            let dc = CreateCompatibleDC(std::ptr::null_mut());
+            if dc.is_null() {
+                return (std::ptr::null_mut(), std::ptr::null_mut());
+            }
+            let font = CreateFontW(
+                0,
+                0,
+                0,
+                0,
+                FW_NORMAL as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET as u32,
+                OUT_DEFAULT_PRECIS as u32,
+                CLIP_DEFAULT_PRECIS as u32,
+                DEFAULT_QUALITY as u32,
+                DEFAULT_PITCH as u32,
+                name.as_ptr(),
+            );
+            if font.is_null() {
+                return (dc, std::ptr::null_mut());
+            }
+            SelectObject(dc, font);
+            (dc, font)
+        }
+    }
+}
+
 /// 把当前视口写进组件，返回 (首行, 总行数, 起始下标, 位图索引表)。
 /// base = 本列表在雪碧图里的起始扁平下标（表情窗有；符号靠字符查表为 None）。
 fn pane_apply_view(
@@ -4849,15 +4980,15 @@ impl PaneState {
     }
 
     fn hide(&self, backend: &mut Box<dyn UiBackend>) {
-        if self.visible.get() {
-            backend.set_mapped(self.cfg.win_id, false);
-            let _ = self.comp.hide();
-            self.visible.set(false);
-            // 关窗即释放帧缓冲（768×432×4 ≈ 1.3MB）；下次打开按需重分配
-            let mut b = self.buf.borrow_mut();
-            b.clear();
-            b.shrink_to_fit();
-        }
+        // 幂等：状态位可能已经失配（例如重复的关闭命令），只要窗口还映射着
+        // 就必须真的 unmap，否则 HWND 会永久留在屏幕上且再也关不掉。
+        backend.set_mapped(self.cfg.win_id, false);
+        let _ = self.comp.hide();
+        self.visible.set(false);
+        // 关窗即释放帧缓冲（768×432×4 ≈ 1.3MB）；下次打开按需重分配
+        let mut b = self.buf.borrow_mut();
+        b.clear();
+        b.shrink_to_fit();
     }
 }
 
@@ -4905,13 +5036,21 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // 两个工具窗口各一个组件实例（第 3、4 个实例 → MSW3 / MSW4）
     let tui = Rc::new(ToolsWindow::new().expect("heng-ui: 符号窗口组件创建失败"));
     let eui = Rc::new(ToolsWindow::new().expect("heng-ui: 表情窗口组件创建失败"));
+    // 工具窗同样要登记 DPI 缩放：候选窗/设置窗都有这一步，漏掉会让 Slint 按
+    // 1.0 布局（768 逻辑宽画进 1200 物理宽的位图）→ 内容只占左侧 2/3，
+    // 指针坐标除以 scale 后与布局对不上，悬浮提示偏左上。
+    let scale = ui_scale();
+    msw3.window()
+        .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
     msw3.set_size(PhysicalSize {
-        width: (PANE_SYMBOLS.win_w * ui_scale()).round() as u32,
-        height: (PANE_SYMBOLS.win_h * ui_scale()).round() as u32,
+        width: (PANE_SYMBOLS.win_w * scale).round() as u32,
+        height: (PANE_SYMBOLS.win_h * scale).round() as u32,
     });
+    msw4.window()
+        .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
     msw4.set_size(PhysicalSize {
-        width: (PANE_EMOJI.win_w * ui_scale()).round() as u32,
-        height: (PANE_EMOJI.win_h * ui_scale()).round() as u32,
+        width: (PANE_EMOJI.win_w * scale).round() as u32,
+        height: (PANE_EMOJI.win_h * scale).round() as u32,
     });
     // 启动时先应用候选字号（7 档刻度 14-20，默认 16 = 第 3 档）——
     // 布局尺寸全部由此推导，必须在算高度之前
@@ -5270,6 +5409,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
             let tx = tx.clone();
             move || { let _ = tx.send(UiCmd::PaneHide(1)); }
         });
+        tui.on_cell_font(|s| cell_font(s.as_str()));
     }
     {
         let tx = tx.clone();
@@ -5289,6 +5429,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
             let tx = tx.clone();
             move || { let _ = tx.send(UiCmd::PaneHide(0)); }
         });
+        eui.on_cell_font(|s| cell_font(s.as_str()));
     }
 
     // 工具窗点击上屏：与「点击候选上屏」走同一条通道
