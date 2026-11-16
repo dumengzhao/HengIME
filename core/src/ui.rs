@@ -4454,35 +4454,229 @@ fn view_bounds(
     (r, total_rows, start, flat_len.min(start + rows * cols))
 }
 
-/// 字形覆盖更宽的字族。默认字族（雅黑一类）只覆盖 GBK 收录的那部分符号，
-/// GBK 之外的符号没有字形。
-const CELL_FONT_WIDE: &str = "Segoe UI Symbol";
-
 /// 单元格字族。软件渲染每段文本只用单一字族、不做逐字回退，缺字形直接画成
 /// 空白格（不是豆腐块）。因此只能按「这个字在该字族里有没有字形」来选：
-/// 宽字族有字形就用它，否则返回空串交回默认字族（汉字、假名、韩文、俄文等）。
+/// 有覆盖的字族就用它，否则返回空串交回默认字族（汉字、假名、韩文、俄文等）。
 fn cell_font(text: &str) -> SharedString {
     let mut chars = text.chars();
     let (Some(ch), None) = (chars.next(), chars.next()) else {
         return SharedString::default();
     };
-    if wide_family_has(ch) {
-        SharedString::from(CELL_FONT_WIDE)
-    } else {
-        SharedString::default()
+    match wide_family_for(ch) {
+        Some(fam) => SharedString::from(fam),
+        None => SharedString::default(),
     }
 }
 
+/// 覆盖字形的字族。Windows 用 Segoe UI Symbol（GBK 之外的符号只有它全）。
 #[cfg(windows)]
-fn wide_family_has(ch: char) -> bool {
-    glyph_probe::has_glyph(CELL_FONT_WIDE, ch)
+const CELL_FONT_WIDE: &str = "Segoe UI Symbol";
+
+#[cfg(windows)]
+fn wide_family_for(ch: char) -> Option<&'static str> {
+    glyph_probe::has_glyph(CELL_FONT_WIDE, ch).then_some(CELL_FONT_WIDE)
 }
 
-/// 非 Windows 平台不做字族切换：字形覆盖由各端系统字体决定，
-/// 这里保持空串即沿用默认字族。
-#[cfg(not(windows))]
-fn wide_family_has(_ch: char) -> bool {
-    false
+/// macOS：默认字族覆盖不到的那批符号分别在 PingFang SC 与 Apple Symbols 里。
+/// 先试 PingFang（与界面其余部分观感一致），缺字形再退 Apple Symbols
+/// —— Slint 软渲染没有逐字回退，选中哪个字族就只能用哪个。
+#[cfg(target_os = "macos")]
+fn wide_family_for(ch: char) -> Option<&'static str> {
+    glyph_probe::family_for(ch)
+}
+
+/// 其余平台不做字族切换：字形覆盖由系统字体决定，空串即沿用默认字族。
+#[cfg(not(any(windows, target_os = "macos")))]
+fn wide_family_for(_ch: char) -> Option<&'static str> {
+    None
+}
+
+/// 查字体是否含某字符的字形（CoreText 直接读字体，与渲染后端无关）。
+/// 结果按 (字族, 字符) 缓存：符号窗一屏几十格，重复查询很多。
+#[cfg(target_os = "macos")]
+mod glyph_probe {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::ffi::{CStr, CString};
+    use std::os::raw::{c_char, c_void};
+
+    type CFStringRef = *const c_void;
+    type CTFontRef = *const c_void;
+
+    #[repr(C)]
+    struct CFRange {
+        location: isize,
+        length: isize,
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(
+            alloc: *const c_void,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
+        fn CFStringCreateWithCharacters(
+            alloc: *const c_void,
+            chars: *const u16,
+            len: isize,
+        ) -> CFStringRef;
+        fn CFStringGetCString(
+            s: CFStringRef,
+            buf: *mut c_char,
+            size: isize,
+            encoding: u32,
+        ) -> bool;
+        fn CFStringGetMaximumSizeForEncoding(len: isize, encoding: u32) -> isize;
+        fn CFStringGetLength(s: CFStringRef) -> isize;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    #[link(name = "CoreText", kind = "framework")]
+    extern "C" {
+        fn CTFontCreateWithName(name: CFStringRef, size: f64, matrix: *const c_void) -> CTFontRef;
+        fn CTFontCreateForString(font: CTFontRef, string: CFStringRef, range: CFRange)
+            -> CTFontRef;
+        fn CTFontCopyFamilyName(font: CTFontRef) -> CFStringRef;
+        fn CTFontGetGlyphsForCharacters(
+            font: CTFontRef,
+            characters: *const u16,
+            glyphs: *mut u16,
+            count: usize,
+        ) -> bool;
+    }
+
+    /// kCFStringEncodingUTF8
+    const UTF8: u32 = 0x0800_0100;
+
+    /// 首选字族：界面字族优先（观感统一），其余按覆盖率补。
+    /// 都没有时再问系统（见 fallback_family）。
+    const CANDIDATES: [&str; 3] = ["PingFang SC", "Apple Symbols", "Hiragino Sans"];
+
+    thread_local! {
+        static GLYPH_CACHE: RefCell<HashMap<(&'static str, char), bool>> = RefCell::new(HashMap::new());
+        static FAMILY_CACHE: RefCell<HashMap<char, Option<&'static str>>> = RefCell::new(HashMap::new());
+    }
+
+    /// 该字符应该用哪个字族；None = 交回默认字族。
+    pub fn family_for(ch: char) -> Option<&'static str> {
+        if let Some(hit) = FAMILY_CACHE.with(|c| c.borrow().get(&ch).copied()) {
+            return hit;
+        }
+        let got = pick(ch);
+        FAMILY_CACHE.with(|c| c.borrow_mut().insert(ch, got));
+        got
+    }
+
+    fn pick(ch: char) -> Option<&'static str> {
+        for fam in CANDIDATES {
+            if has_glyph(fam, ch) {
+                return Some(fam);
+            }
+        }
+        // 候选都不覆盖（如 〱〲 只在 Arial Unicode MS、〳〴 只在 Hiragino 的
+        // 某些字重里）：直接问系统「这个字符该用哪个字体」，把它交给 Slint。
+        let fam = fallback_family(ch)?;
+        // 彩色 emoji 字体是 CBDT 位图，软渲染画不出来 —— 这类字符走雪碧图。
+        if fam == "Apple Color Emoji" || fam == ".AppleColorEmojiUI" {
+            return None;
+        }
+        // 系统级联走到头会落到 LastResort（豆腐块占位字体）：它「有字形」但
+        // 画出来是占位符，而且 CoreText 会把它换成 Times New Roman。
+        // 这种字符本机根本没有可用字形，直接交回默认字族（空白）。
+        if fam.contains("LastResort") || fam.starts_with('.') {
+            return None;
+        }
+        has_glyph(fam, ch).then_some(fam)
+    }
+
+    pub fn has_glyph(family: &'static str, ch: char) -> bool {
+        if let Some(hit) = GLYPH_CACHE.with(|c| c.borrow().get(&(family, ch)).copied()) {
+            return hit;
+        }
+        let got = query(family, ch);
+        GLYPH_CACHE.with(|c| c.borrow_mut().insert((family, ch), got));
+        got
+    }
+
+    fn query(family: &str, ch: char) -> bool {
+        let Ok(name) = CString::new(family) else {
+            return false;
+        };
+        // 用 UTF-16 喂 CoreText：代理对（BMP 外字符）要拆成两个 u16。
+        let mut units = [0u16; 2];
+        let n = ch.encode_utf16(&mut units).len();
+        let mut glyphs = [0u16; 2];
+        unsafe {
+            let cf = CFStringCreateWithCString(std::ptr::null(), name.as_ptr(), UTF8);
+            if cf.is_null() {
+                return false;
+            }
+            let font = CTFontCreateWithName(cf, 16.0, std::ptr::null());
+            CFRelease(cf as *const c_void);
+            if font.is_null() {
+                return false;
+            }
+            let ok = CTFontGetGlyphsForCharacters(font, units.as_ptr(), glyphs.as_mut_ptr(), n);
+            CFRelease(font as *const c_void);
+            ok && glyphs[..n].iter().all(|&g| g != 0)
+        }
+    }
+
+    /// 系统为这个字符挑的回退字族（CTFontCreateForString）。
+    /// 名字泄漏成 'static：上限是「不同字族数」，进程内只增不减，可以接受。
+    fn fallback_family(ch: char) -> Option<&'static str> {
+        let mut units = [0u16; 2];
+        let n = ch.encode_utf16(&mut units).len();
+        let base_name = CString::new("Helvetica").ok()?;
+        unsafe {
+            let cf = CFStringCreateWithCharacters(std::ptr::null(), units.as_ptr(), n as isize);
+            if cf.is_null() {
+                return None;
+            }
+            let base_cf =
+                CFStringCreateWithCString(std::ptr::null(), base_name.as_ptr(), UTF8);
+            let base = if base_cf.is_null() {
+                std::ptr::null()
+            } else {
+                let f = CTFontCreateWithName(base_cf, 16.0, std::ptr::null());
+                CFRelease(base_cf as *const c_void);
+                f
+            };
+            if base.is_null() {
+                CFRelease(cf as *const c_void);
+                return None;
+            }
+            let hit = CTFontCreateForString(
+                base,
+                cf,
+                CFRange {
+                    location: 0,
+                    length: n as isize,
+                },
+            );
+            CFRelease(cf as *const c_void);
+            CFRelease(base as *const c_void);
+            if hit.is_null() {
+                return None;
+            }
+            let fam_ref = CTFontCopyFamilyName(hit);
+            CFRelease(hit as *const c_void);
+            if fam_ref.is_null() {
+                return None;
+            }
+            let len = CFStringGetLength(fam_ref);
+            let cap = CFStringGetMaximumSizeForEncoding(len, UTF8) + 1;
+            let mut buf = vec![0 as c_char; cap.max(1) as usize];
+            let ok = CFStringGetCString(fam_ref, buf.as_mut_ptr(), cap, UTF8);
+            CFRelease(fam_ref as *const c_void);
+            if !ok {
+                return None;
+            }
+            let name = CStr::from_ptr(buf.as_ptr()).to_str().ok()?;
+            Some(Box::leak(name.to_string().into_boxed_str()))
+        }
+    }
 }
 
 /// 查某个字族是否含有某字符的字形：GDI 直接读字体 cmap，与渲染后端无关。
