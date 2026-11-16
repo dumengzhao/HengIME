@@ -1340,14 +1340,15 @@ export component ToolsWindow inherits Window {
             spacing: 2px;
             for ccell[cc] in root.common-row: Rectangle {
                 width: 43px; height: 46px; border-radius: 6px;
-                background: ta-common.has-hover ? #e3e8f2 : transparent;
+                // 空位（行尾补齐）不参与悬浮反馈：否则看着像有东西
+                background: ccell != "" && ta-common.has-hover ? #e3e8f2 : transparent;
                 Text {
                     text: ccell; font-size: 22px; color: #1f2328;
                     font-family: root.cell_font(ccell);
                     horizontal-alignment: center; vertical-alignment: center;
                 }
                 ta-common := TouchArea {
-                    mouse-cursor: pointer;
+                    mouse-cursor: ccell == "" ? default : pointer;
                     clicked => { root.common_clicked(cc); }
                 }
             }
@@ -1400,15 +1401,16 @@ export component ToolsWindow inherits Window {
                 for cell[c] in row: Rectangle {
                     width: 43px; height: 46px;
                     border-radius: 6px;
-                    // 常态透明：与窗口底色一体；仅悬停给出可点击反馈
-                    background: ta-cell.has-hover ? #e3e8f2 : transparent;
+                    // 常态透明：与窗口底色一体；仅悬停给出可点击反馈。
+                    // 末行末尾是补齐用的空串，不能有悬浮/手型，否则像有内容。
+                    background: cell != "" && ta-cell.has-hover ? #e3e8f2 : transparent;
                     Text {
                         text: cell; font-size: 22px; color: #1f2328;
                         font-family: root.cell_font(cell);
                         horizontal-alignment: center; vertical-alignment: center;
                     }
                     ta-cell := TouchArea {
-                        mouse-cursor: pointer;
+                        mouse-cursor: cell == "" ? default : pointer;
                         clicked => { root.cell_clicked(r * root.cols + c); }
                     }
                 }
@@ -2021,6 +2023,27 @@ pub mod mac_backend {
                             // 让外壳进入系统拖动窗口状态（与另两端语义一致）
                             self.with_cb(|cb, ctx| {
                                 cb(ctx as *mut core::ffi::c_void, 1, 4, core::ptr::null(), 0, 0, 0)
+                            });
+                            continue;
+                        }
+                        // 工具窗顶栏拖动带（顶部 44 逻辑 px，右侧留出 ✕ 按钮）：
+                        // 位移只能由外壳按**屏幕坐标**算 —— 窗口内的坐标会随窗口
+                        // 一起移动，core 这边按局部坐标算出的位移恒为 0。
+                        if (tag == 3 || tag == 4) && {
+                            let sc = ui_scale();
+                            y < (44.0 * sc).round()
+                                && x < self.widths[tag as usize] as f32 - (40.0 * sc).round()
+                        } {
+                            self.with_cb(|cb, ctx| {
+                                cb(
+                                    ctx as *mut core::ffi::c_void,
+                                    tag,
+                                    4,
+                                    core::ptr::null(),
+                                    0,
+                                    0,
+                                    0,
+                                )
                             });
                             continue;
                         }
@@ -5179,8 +5202,14 @@ impl PaneState {
         let (w, h) = self.size_px();
         if !self.positioned.get() {
             let (sw, sh) = screen_size();
-            let x = ((sw - w as i32) / 2).max(8);
-            let y = ((sh - h as i32) / 3).max(8);
+            let mut x = ((sw - w as i32) / 2).max(8);
+            let mut y = ((sh - h as i32) / 3).max(8);
+            // 两个工具窗默认都居中会几乎完全重叠：上层那个挡住下层，
+            // 下层连标题栏都点不到。第二个窗错开一格（外壳按点击置前兜底）。
+            if self.cfg.win_id == 4 {
+                x += 48;
+                y += 48;
+            }
             backend.configure(self.cfg.win_id, x, y, w, h);
             self.positioned.set(true);
         }
@@ -5581,6 +5610,7 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 // symbols_v.yaml 解析一遍，随后 load_symbol_cats 又解析一遍）
                 let all = crate::tools_data::emoji_all_items(d);
                 *meanings_slot.borrow_mut() = crate::tools_data::load_emoji_meanings(d);
+                ui_log(&format!("tools: meanings={}", meanings_slot.borrow().len()));
                 panes[0].set_cats(vec![crate::tools_data::ToolCat {
                     name: "全部".into(),
                     items: all,
@@ -6320,10 +6350,9 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     if text.is_empty() {
                         continue;
                     }
-                    {
-                        let sheet = emoji_sheet.borrow();
-                        pane.push_recent(&text, sheet.as_ref());
-                    }
+                    // 常用行里点选只上屏，不重排：原本就在常用里的东西
+                    // 再被顶到第一个会让列表随手一点就整体错位。
+                    // 只有网格（非常用区）点选才写进「最近使用」。
                     commit_tool_text(&text);
                 }
                 UiCmd::ToggleExpand => {
