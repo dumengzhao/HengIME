@@ -18,10 +18,28 @@ index 15589be..b7186c4 100644
  	mkdir -p $(DERIVED_DATA_PATH)
  	bash package/add_data_files
 diff --git a/Squirrel.xcodeproj/project.pbxproj b/Squirrel.xcodeproj/project.pbxproj
-index d805aa7..0f7eaaa 100644
+index d805aa7..06941c4 100644
 --- a/Squirrel.xcodeproj/project.pbxproj
 +++ b/Squirrel.xcodeproj/project.pbxproj
-@@ -128,6 +128,7 @@
+@@ -46,6 +46,7 @@
+ 		44E21A9016A653E700C2B08F /* rime_deployer in CopyFiles */ = {isa = PBXBuildFile; fileRef = 44E21A8E16A653E700C2B08F /* rime_deployer */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+ 		44E21A9116A653E700C2B08F /* rime_dict_manager in CopyFiles */ = {isa = PBXBuildFile; fileRef = 44E21A8F16A653E700C2B08F /* rime_dict_manager */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+ 		77AA68142588916F00A592E2 /* hk2s.json in Copy opencc Files */ = {isa = PBXBuildFile; fileRef = 77AA67E22588916300A592E2 /* hk2s.json */; };
++		HENG0005000000000000000005 /* emoji.txt in Copy opencc Files */ = {isa = PBXBuildFile; fileRef = HENG0006000000000000000006 /* emoji.txt */; };
+ 		77AA68152588916F00A592E2 /* HKVariants.ocd2 in Copy opencc Files */ = {isa = PBXBuildFile; fileRef = 77AA67DC2588916300A592E2 /* HKVariants.ocd2 */; };
+ 		77AA68162588916F00A592E2 /* HKVariantsRev.ocd2 in Copy opencc Files */ = {isa = PBXBuildFile; fileRef = 77AA67E02588916300A592E2 /* HKVariantsRev.ocd2 */; };
+ 		77AA68172588916F00A592E2 /* HKVariantsRevPhrases.ocd2 in Copy opencc Files */ = {isa = PBXBuildFile; fileRef = 77AA67E92588916300A592E2 /* HKVariantsRevPhrases.ocd2 */; };
+@@ -117,7 +118,9 @@
+ 		B3A0041D26100500009D156B /* double_pinyin_ziguang.schema.yaml in Copy Shared Support Files */ = {isa = PBXBuildFile; fileRef = B3A0041E26100500009D156B /* double_pinyin_ziguang.schema.yaml */; };
+ 		B3A0041E26100500009D156B /* double_pinyin_ziguang.schema.yaml */ = {isa = PBXFileReference; lastKnownFileType = text; name = double_pinyin_ziguang.schema.yaml; path = data/plum/double_pinyin_ziguang.schema.yaml; sourceTree = "<group>"; };
+ 		B3A0041F26100500009D156B /* cn_dicts in Copy Shared Support Files */ = {isa = PBXBuildFile; fileRef = B3A0042026100500009D156B /* cn_dicts */; };
++		HENG0004000000000000000004 /* others in Copy Shared Support Files */ = {isa = PBXBuildFile; fileRef = HENG0003000000000000000003 /* others */; };
+ 		B3A0042026100500009D156B /* cn_dicts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = cn_dicts; path = data/plum/cn_dicts; sourceTree = "<group>"; };
++		HENG0003000000000000000003 /* others */ = {isa = PBXFileReference; lastKnownFileType = folder; name = others; path = "../../../runtime/rime-shared/others"; sourceTree = "<group>"; };
+ 		B3A0042126100500009D156B /* en_dicts in Copy Shared Support Files */ = {isa = PBXBuildFile; fileRef = B3A0042226100500009D156B /* en_dicts */; };
+ 		B3A0042226100500009D156B /* en_dicts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = en_dicts; path = data/plum/en_dicts; sourceTree = "<group>"; };
+ 		B3A002F026100500009D156B /* lua */ = {isa = PBXFileReference; lastKnownFileType = folder; name = lua; path = data/plum/lua; sourceTree = "<group>"; };
+@@ -128,6 +131,7 @@
  		B35D2FE82BF00839009D156B /* BridgingFunctions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B35D2FE72BF00839009D156B /* BridgingFunctions.swift */; };
  		B3A001022F260100009D156B /* ReservedProperty.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A001012F260100009D156B /* ReservedProperty.swift */; };
  		B38E9B912BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B38E9B902BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift */; };
@@ -29,7 +47,31 @@ index d805aa7..0f7eaaa 100644
  		B38E9B952BEAFEFD0036ABEF /* SquirrelInputController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B38E9B942BEAFEFD0036ABEF /* SquirrelInputController.swift */; };
  		B39771232BECEA150093A49B /* MacOSKeyCodes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B39771222BECEA150093A49B /* MacOSKeyCodes.swift */; };
  		B39771252BED899F0093A49B /* SquirrelConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = B39771242BED899F0093A49B /* SquirrelConfig.swift */; };
-@@ -370,6 +371,7 @@
+@@ -165,6 +169,7 @@
+ 			dstSubfolderSpec = 12;
+ 			files = (
+ 				77AA68142588916F00A592E2 /* hk2s.json in Copy opencc Files */,
++				HENG0005000000000000000005 /* emoji.txt in Copy opencc Files */,
+ 				77AA68152588916F00A592E2 /* HKVariants.ocd2 in Copy opencc Files */,
+ 				77AA68162588916F00A592E2 /* HKVariantsRev.ocd2 in Copy opencc Files */,
+ 				77AA68172588916F00A592E2 /* HKVariantsRevPhrases.ocd2 in Copy opencc Files */,
+@@ -255,6 +260,7 @@
+ 				B3A0041B26100500009D156B /* double_pinyin_sogou.schema.yaml in Copy Shared Support Files */,
+ 				B3A0041D26100500009D156B /* double_pinyin_ziguang.schema.yaml in Copy Shared Support Files */,
+ 				B3A0041F26100500009D156B /* cn_dicts in Copy Shared Support Files */,
++				HENG0004000000000000000004 /* others in Copy Shared Support Files */,
+ 				B3A0042126100500009D156B /* en_dicts in Copy Shared Support Files */,
+ 			);
+ 			name = "Copy Shared Support Files";
+@@ -332,6 +338,7 @@
+ 		77AA67E02588916300A592E2 /* HKVariantsRev.ocd2 */ = {isa = PBXFileReference; lastKnownFileType = file; path = HKVariantsRev.ocd2; sourceTree = "<group>"; };
+ 		77AA67E12588916300A592E2 /* JPShinjitaiPhrases.ocd2 */ = {isa = PBXFileReference; lastKnownFileType = file; path = JPShinjitaiPhrases.ocd2; sourceTree = "<group>"; };
+ 		77AA67E22588916300A592E2 /* hk2s.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = hk2s.json; sourceTree = "<group>"; };
++		HENG0006000000000000000006 /* emoji.txt */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; name = emoji.txt; path = "../../../runtime/rime-shared/opencc/emoji.txt"; sourceTree = SOURCE_ROOT; };
+ 		77AA67E32588916300A592E2 /* TSCharacters.ocd2 */ = {isa = PBXFileReference; lastKnownFileType = file; path = TSCharacters.ocd2; sourceTree = "<group>"; };
+ 		77AA67E42588916300A592E2 /* JPVariantsRev.ocd2 */ = {isa = PBXFileReference; lastKnownFileType = file; path = JPVariantsRev.ocd2; sourceTree = "<group>"; };
+ 		77AA67E52588916300A592E2 /* JPShinjitaiCharacters.ocd2 */ = {isa = PBXFileReference; lastKnownFileType = file; path = JPShinjitaiCharacters.ocd2; sourceTree = "<group>"; };
+@@ -370,6 +377,7 @@
  		B3A001012F260100009D156B /* ReservedProperty.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ReservedProperty.swift; path = sources/ReservedProperty.swift; sourceTree = "<group>"; };
  		B38E9B8F2BE9AE1E0036ABEF /* Squirrel-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "Squirrel-Bridging-Header.h"; path = "sources/Squirrel-Bridging-Header.h"; sourceTree = "<group>"; };
  		B38E9B902BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelApplicationDelegate.swift; path = sources/SquirrelApplicationDelegate.swift; sourceTree = "<group>"; };
@@ -37,7 +79,7 @@ index d805aa7..0f7eaaa 100644
  		B38E9B942BEAFEFD0036ABEF /* SquirrelInputController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelInputController.swift; path = sources/SquirrelInputController.swift; sourceTree = "<group>"; };
  		B39771222BECEA150093A49B /* MacOSKeyCodes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MacOSKeyCodes.swift; path = sources/MacOSKeyCodes.swift; sourceTree = "<group>"; };
  		B39771242BED899F0093A49B /* SquirrelConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SquirrelConfig.swift; path = sources/SquirrelConfig.swift; sourceTree = "<group>"; };
-@@ -406,6 +408,7 @@
+@@ -406,6 +414,7 @@
  			isa = PBXGroup;
  			children = (
  				B38E9B902BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift */,
@@ -45,7 +87,23 @@ index d805aa7..0f7eaaa 100644
  				B38E9B942BEAFEFD0036ABEF /* SquirrelInputController.swift */,
  				B39771222BECEA150093A49B /* MacOSKeyCodes.swift */,
  				B397712C2BEEB39D0093A49B /* InputSource.swift */,
-@@ -684,6 +687,7 @@
+@@ -500,6 +509,7 @@
+ 			isa = PBXGroup;
+ 			children = (
+ 				77AA67E22588916300A592E2 /* hk2s.json */,
++				HENG0006000000000000000006 /* emoji.txt */,
+ 				77AA67DC2588916300A592E2 /* HKVariants.ocd2 */,
+ 				77AA67E02588916300A592E2 /* HKVariantsRev.ocd2 */,
+ 				77AA67E92588916300A592E2 /* HKVariantsRevPhrases.ocd2 */,
+@@ -548,6 +558,7 @@
+ 				442B5B871570C37200370DEA /* squirrel.yaml */,
+ 				7B5488A71D2DAC9D0056A1BE /* plum */,
+ 				4407F39D14EC071E001329FE /* opencc */,
++				HENG0003000000000000000003 /* others */,
+ 			);
+ 			name = SharedSupport;
+ 			sourceTree = "<group>";
+@@ -684,6 +695,7 @@
  				B397712D2BEEB39D0093A49B /* InputSource.swift in Sources */,
  				B397712B2BEE4C160093A49B /* SquirrelPanel.swift in Sources */,
  				B38E9B912BE9AE1E0036ABEF /* SquirrelApplicationDelegate.swift in Sources */,
@@ -67,7 +125,7 @@ index 98a2cd6..de05252 100644
  # for veteran chord-typist
  chord_duration: 0.1  # seconds
 diff --git a/resources/Localizable.xcstrings b/resources/Localizable.xcstrings
-index eb96d08..96b0321 100644
+index eb96d08..f1bc58a 100644
 --- a/resources/Localizable.xcstrings
 +++ b/resources/Localizable.xcstrings
 @@ -1,6 +1,29 @@
@@ -100,8 +158,68 @@ index eb96d08..96b0321 100644
      "A new update is available" : {
        "comment" : "Update",
        "localizations" : {
+@@ -140,6 +163,29 @@
+         }
+       }
+     },
++    "Emoji" : {
++      "comment" : "Menu item",
++      "localizations" : {
++        "en" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Emoji"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "表情"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "表情"
++          }
++        }
++      }
++    },
+     "Logs..." : {
+       "comment" : "Menu item",
+       "localizations" : {
+@@ -208,6 +254,29 @@
+         }
+       }
+     },
++    "Symbols" : {
++      "comment" : "Menu item",
++      "localizations" : {
++        "en" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Symbols"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "符号"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "符號"
++          }
++        }
++      }
++    },
+     "Sync user data" : {
+       "comment" : "Menu item",
+       "localizations" : {
 diff --git a/sources/BridgingFunctions.swift b/sources/BridgingFunctions.swift
-index 4ce2c7b..ae02e11 100644
+index 4ce2c7b..162602e 100644
 --- a/sources/BridgingFunctions.swift
 +++ b/sources/BridgingFunctions.swift
 @@ -18,13 +18,24 @@ typealias RimeSessionId = UInt64
@@ -151,7 +269,7 @@ index 4ce2c7b..ae02e11 100644
  /// 取组合串原始输入（如拼音串）。nil = 无组合。
  func hengGetInput(_ session: RimeSessionId) -> String? {
    guard session != 0 else { return nil }
-@@ -104,3 +128,32 @@ extension NSPoint {
+@@ -104,3 +128,36 @@ extension NSPoint {
      sqrt(pow(self.x, 2) + pow(self.y, 2))
    }
  }
@@ -167,12 +285,16 @@ index 4ce2c7b..ae02e11 100644
 +/// —— 实测 takeUiCommit 返回 nil，而 9ms 后 map 里才出现文本。
 +/// 回调则由 core 在文本就绪的同一刻发起，时序天然正确。
 +private let commitCallback: @convention(c) (UnsafeMutableRawPointer?, UInt64, UnsafePointer<CChar>?) -> Void = {
-+  _, _, text in
++  _, session, text in
 +  guard let text else { return }
 +  let s = String(cString: text)
++  // 带上会话句柄：工具窗（表情/符号）的上屏可能投给「最近用过的会话」，
++  // 而同一进程里每个宿主都挂着一个 controller。只有 session 相符的那个
++  // 才该把字插进自己的 client，否则一次点击会往多个应用里各插一份。
 +  DispatchQueue.main.async {
 +    NotificationCenter.default.post(
-+      name: .hengCoreCommitReady, object: nil, userInfo: ["text": s])
++      name: .hengCoreCommitReady, object: nil,
++      userInfo: ["text": s, "session": session])
 +  }
 +}
 +
@@ -186,10 +308,10 @@ index 4ce2c7b..ae02e11 100644
 +}
 diff --git a/sources/HengWindowRenderer.swift b/sources/HengWindowRenderer.swift
 new file mode 100644
-index 0000000..f3e5e51
+index 0000000..73a36d9
 --- /dev/null
 +++ b/sources/HengWindowRenderer.swift
-@@ -0,0 +1,647 @@
+@@ -0,0 +1,742 @@
 +//
 +//  HengWindowRenderer.swift
 +//  Squirrel
@@ -411,6 +533,8 @@ index 0000000..f3e5e51
 +
 +    case Op.show:
 +      let panel = ensurePanel(win)
++      noteFront(win)
++      installMouseTracking()
 +      // 上屏前把 layers[win] 强制对齐到窗口当前的 backing layer。
 +      // 不信任任何缓存：AppKit 在contentView 尺寸变化/重建视图时会换 layer，
 +      // 而 layers[win] 是建窗时缓存的旧引用 → blit 贴到孤儿 layer，
@@ -491,7 +615,7 @@ index 0000000..f3e5e51
 +      drawFrame(win: win, ptr: frame, pixelW: pixelW, pixelH: pixelH, bufLen: bufLen)
 +
 +    case Op.beginDrag:
-+      beginDragSettingsWindow()
++      beginDrag(win)
 +
 +    default:
 +      break
@@ -568,7 +692,7 @@ index 0000000..f3e5e51
 +    // ===== 候选窗/工具窗要能点选，必须显式开这两项 =====
 +    // nonactivatingPanel 默认 ignoresMouseEvents = true，点它等于点穿到下层应用，
 +    // 候选格/符号格永远收不到点击。设置窗是 .borderless 不受影响。
-+    if kind == .candidate || kind == .tools {
++    if kind == .candidate || kind == .tools || kind == .emoji {
 +      panel.ignoresMouseEvents = false
 +      // 不激活也能收点击：候选窗是 nonactivatingPanel，点击它不应抢走
 +      // 宿主应用（TextEdit 等）的键盘焦点，否则用户点一下候选词就丢了编辑焦点。
@@ -582,7 +706,18 @@ index 0000000..f3e5e51
 +    }
 +
 +
-+    let view = NSView(frame: .zero)
++    let view = HengTrackingView(frame: .zero)
++    // 悬停：core 靠 PointerMoved 算「鼠标下是哪个格子」并回填含义提示，
++    // 而 local monitor 收不到 mouseMoved（事件只发给窗口，不进监视器）。
++    // tracking area 带 .activeAlways，输入法进程非活跃也能拿到进入/移动/离开。
++    view.onMove = { [weak self] ev in
++      guard let self, self.dragWin == nil else { return }
++      self.forward(ev, win: win)
++    }
++    view.onExit = {
++      // kind=4 = PTR_EXIT：core 据此清掉 hover 与含义提示
++      heng_push_pointer_event(UInt8(win), 4, 0, 0, 0, 0)
++    }
 +    view.wantsLayer = true
 +    view.layer?.contentsGravity = .resize
 +    panel.contentView = view
@@ -732,13 +867,16 @@ index 0000000..f3e5e51
 +
 +  // MARK: - 拖动
 +
-+  /// 设置窗进入拖动：记录基准点，后续 .leftMouseDragged 里按位移改 frame。
++  /// 窗口进入拖动：记录基准点，后续 .leftMouseDragged 里按位移改 frame。
++  /// 设置窗与工具窗（表情/符号）共用：core 判定顶栏拖动带后发 OP_BEGIN_DRAG。
 +  ///
 +  /// NSWindow 没有 `performWindowMoveWithEvent` 这种公开 API（查过 SDK：
 +  /// 只有 `movableByWindowBackground`，那是给系统标题栏用的，自绘无边框窗口不适用），
 +  /// 所以按另两端的语义自己算：拖动期间持续收到事件 → 窗口位置 = 拖起时位置 + 位移。
-+  private func beginDragSettingsWindow() {
-+    guard let panel = panels[Win.settings.rawValue] else { return }
++  private func beginDrag(_ win: Int) {
++    guard let panel = panels[win] else { return }
++    dragWin = win
++    Self.log("DRAG begin win=\(win) origin=\(panel.frame.origin)")
 +    // 拖动全程只比「窗口原点」和「指针屏幕位置」两个 AppKit 左下原点量，
 +    // core 的左上原点在这里不参与，避免两套坐标混算出方向错乱的位移。
 +    let screen = NSEvent.mouseLocation
@@ -752,7 +890,9 @@ index 0000000..f3e5e51
 +  /// 这里由 `installMouseTracking()` 在设置窗首次显示时调用一次。
 +  func installMouseTracking() {
 +    guard !mouseMonitorInstalled else { return }
-+    guard panels[Win.settings.rawValue] != nil || panels[Win.candidate.rawValue] != nil else { return }
++    // 只要有任何面板就装。原来要求「候选窗或设置窗已存在」，于是
++    // 「刚启动就打开表情窗」时监视器根本不装 —— 点格子/滚轮/关闭/拖动全哑。
++    guard !panels.isEmpty else { return }
 +    mouseMonitorInstalled = true
 +
 +    let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .scrollWheel]
@@ -760,32 +900,71 @@ index 0000000..f3e5e51
 +    // 按事件落点分发到对应窗口 —— 两个 monitor 会被后装的截走，反而漏事件。
 +    monitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
 +      guard let self else { return event }
++      // 拖动中事件只发给拖起那个窗口：窗口跟着指针走，落点命中测试随时可能
++      // 命中另一个（哪怕已隐藏、frame 还留在原处的）面板，中途改道就会「拖两下就断」。
++      if let dragWin = self.dragWin {
++        self.forward(event, win: dragWin)
++        if event.type == .leftMouseUp {
++          self.dragWin = nil
++          if let p = self.panels[dragWin] {
++            Self.log("DRAG end win=\(dragWin) origin=\(p.frame.origin)")
++          }
++        }
++        return event
++      }
 +      // 按落点分发：候选窗 / 设置窗 / 工具窗各自收自己的事件。
 +      // 工具窗是 nonactivatingPanel，点击不抢宿主键盘焦点。
 +      if let win = self.windowUnderMouse(event) {
++        if event.type == .leftMouseDown {
++          self.noteFront(win)
++          self.panels[win]?.orderFrontRegardless()
++        }
 +        self.forward(event, win: win)
 +      }
 +      return event
 +    }
 +  }
 +
-+  /// 事件落在哪个窗口上（点坐标 → 窗口 frame 命中测试）。
++  /// 把窗口记到最前（只维护顺序，不动窗口层级）。
++  private func noteFront(_ win: Int) {
++    zOrder.removeAll { $0 == win }
++    zOrder.insert(win, at: 0)
++  }
++
++  /// 事件落在哪个窗口上。
++  /// 首选 event.window —— 这是 AppKit 已经判好的真实落点，比重叠窗口的
++  /// 坐标命中测试可靠；拿不到才退回按 zOrder 的 frame 命中测试。
 +  private func windowUnderMouse(_ event: NSEvent) -> Int? {
++    if let w = event.window, let hit = panels.first(where: { $0.value === w })?.key {
++      return hit
++    }
 +    let loc = NSEvent.mouseLocation
-+    for win in [
++    let all = [
 +      Win.candidate.rawValue, Win.settings.rawValue,
 +      Win.tools.rawValue, Win.emoji.rawValue
-+    ] {
-+      if let panel = panels[win], panel.frame.contains(loc) { return win }
++    ]
++    var order = zOrder
++    order.append(contentsOf: all.filter { !zOrder.contains($0) })
++    for win in order {
++      // 必须判 isVisible：隐藏的面板 frame 还停在原处，会把本属于工具窗的
++      // 点击/拖动抢过去（表现为工具窗拖两下就静止，实际在拖一个看不见的窗）。
++      if let panel = panels[win], panel.isVisible, panel.frame.contains(loc) { return win }
 +    }
 +    return nil
 +  }
 +
 +  private var monitor: Any?
 +  private var mouseMonitorInstalled = false
++  /// 窗口前后顺序：最近显示/点击的排最前。命中测试必须按它来，
++  /// 用固定顺序会让「两个窗重叠时点到的永远是底下那个」，表现成整窗口点不动。
++  private var zOrder: [Int] = []
++  /// 正在拖动的窗口号（mouseDown→mouseUp 期间锁定事件路由）
++  private var dragWin: Int?
 +
 +  private func forward(_ event: NSEvent, win: Int) {
-+    guard let view = panels[win]?.contentView else { return }
++    // 坐标必须按**事件自己的窗口**换算：路由到的下标和事件所属窗口不一致时
++    // （拖动、置前切换的瞬间都可能），用别的窗口换算会得到完全错的格子。
++    guard let panel = event.window ?? panels[win], let view = panel.contentView else { return }
 +    let loc = view.convert(event.locationInWindow, from: nil)
 +    // core 约定的是**设备像素** + **左上原点**（blit 的 px 尺寸就是这个量级）。
 +    // loc 是 contentView 的点坐标且左下原点，所以：乘 scale 转设备像素、翻 y 转原点。
@@ -794,6 +973,10 @@ index 0000000..f3e5e51
 +    let y = Float((view.bounds.height - loc.y) * scale)
 +
 +    switch event.type {
++    case .mouseMoved:
++      // tracking area 的移动事件：core 靠它算「光标下是哪个格子」
++      // （悬停高亮 + 含义提示），漏了这个分支就只剩「离开窗口」一条路。
++      heng_push_pointer_event(UInt8(win), 0, x, y, 0, 0)
 +    case .leftMouseDown:
 +      heng_push_pointer_event(UInt8(win), 1, x, y, 0, 0)
 +      // 不在这里起拖：是否在拖动带由 core 判定（另两端的拖动带语义都在 core），
@@ -819,12 +1002,46 @@ index 0000000..f3e5e51
 +      // 改由 core 在文本就绪时经 heng_set_commit_handler 回调，
 +      // 见 observeCandidateClick() 与 hengRegisterCommitHandler()。
 +    case .scrollWheel:
-+      heng_push_pointer_event(UInt8(win), 3, x, y, Float(event.scrollingDeltaX), Float(event.scrollingDeltaY))
++      // core（对齐 Windows 的 WHEEL_DELTA）约定「一档 = 50 逻辑 px」。
++      // macOS 鼠标滚轮一档只有 ±1~3 行，直接透传会被 core 当成 1px，
++      // 慢慢滚永远凑不满一行（48px）→ 看起来完全不响应。
++      var dx = Float(event.scrollingDeltaX)
++      var dy = Float(event.scrollingDeltaY)
++      if !event.hasPreciseScrollingDeltas {
++        dx *= 50
++        dy *= 50
++      }
++      heng_push_pointer_event(UInt8(win), 3, x, y, dx, dy)
 +    default:
 +      break
 +    }
 +  }
 +}
++/// 承载帧的视图。加 tracking area 只为拿到 mouseMoved / mouseExited：
++/// 输入法的面板不激活，也没有 mouseMoved 的本地监视器通路。
++final class HengTrackingView: NSView {
++  var onMove: ((NSEvent) -> Void)?
++  var onExit: (() -> Void)?
++  private var tracking: NSTrackingArea?
++
++  override func updateTrackingAreas() {
++    super.updateTrackingAreas()
++    if let tracking { removeTrackingArea(tracking) }
++    let area = NSTrackingArea(
++      rect: .zero,
++      options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
++      owner: self, userInfo: nil)
++    addTrackingArea(area)
++    tracking = area
++  }
++
++  // 首次点击直接当内容点击，不拿去激活窗口
++  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
++  override func mouseMoved(with event: NSEvent) { onMove?(event) }
++  override func mouseEntered(with event: NSEvent) { onMove?(event) }
++  override func mouseExited(with event: NSEvent) { onExit?() }
++}
++
 +/// 候选窗/字母区专用面板：拒绝成为 key / main 窗口。
 +///
 +/// CGShieldingWindowLevel 的窗口一旦拿到 key 状态，宿主应用的
@@ -929,10 +1146,10 @@ index 896d8d2..5d68fea 100644
      let sharedPath = Bundle.main.sharedSupportPath ?? ""
      let userPath = SquirrelApp.userDir.path
 diff --git a/sources/SquirrelInputController.swift b/sources/SquirrelInputController.swift
-index f09e8ab..17c5296 100644
+index f09e8ab..890016f 100644
 --- a/sources/SquirrelInputController.swift
 +++ b/sources/SquirrelInputController.swift
-@@ -15,14 +15,119 @@ final class SquirrelInputController: IMKInputController {
+@@ -15,14 +15,123 @@ final class SquirrelInputController: IMKInputController {
    private static let keyRollOver = 50
    private static var unknownAppCnt: UInt = 0
  
@@ -948,6 +1165,10 @@ index f09e8ab..17c5296 100644
 +      forName: .hengCoreCommitReady, object: nil, queue: .main
 +    ) { [weak self] note in
 +      guard let text = note.userInfo?["text"] as? String, !text.isEmpty else { return }
++      // 按会话过滤：工具窗上屏的目标会话可能不是本 controller
++      if let target = note.userInfo?["session"] as? UInt64, target != 0, target != self?.session {
++        return
++      }
 +      self?.commit(string: text)
 +    }
 +  }
@@ -1052,7 +1273,7 @@ index f09e8ab..17c5296 100644
    private var inlineCandidate = false
    private var chordKeyCodes: [UInt32] = .init(repeating: 0, count: SquirrelInputController.keyRollOver)
    private var chordModifiers: [UInt32] = .init(repeating: 0, count: SquirrelInputController.keyRollOver)
-@@ -30,6 +135,15 @@ final class SquirrelInputController: IMKInputController {
+@@ -30,6 +139,15 @@ final class SquirrelInputController: IMKInputController {
    private var chordTimer: Timer?
    private var chordDuration: TimeInterval = 0
    private var currentApp: String = ""
@@ -1068,7 +1289,7 @@ index f09e8ab..17c5296 100644
  
    // swiftlint:disable:next cyclomatic_complexity
    override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
-@@ -96,8 +210,42 @@ final class SquirrelInputController: IMKInputController {
+@@ -96,8 +214,42 @@ final class SquirrelInputController: IMKInputController {
        rimeUpdate()
  
      case .keyDown:
@@ -1112,7 +1333,7 @@ index f09e8ab..17c5296 100644
          break
        }
  
-@@ -112,7 +260,7 @@ final class SquirrelInputController: IMKInputController {
+@@ -112,7 +264,7 @@ final class SquirrelInputController: IMKInputController {
          let rimeKeycode = SquirrelKeycode.osxKeycodeToRime(keycode: keyCode, keychar: char,
                                                             shift: modifiers.contains(.shift),
                                                             caps: modifiers.contains(.capsLock))
@@ -1121,7 +1342,7 @@ index f09e8ab..17c5296 100644
            let rimeModifiers = SquirrelKeycode.osxModifiersToRime(modifiers: modifiers)
            handled = processKey(rimeKeycode, modifiers: rimeModifiers)
            rimeUpdate()
-@@ -163,7 +311,10 @@ final class SquirrelInputController: IMKInputController {
+@@ -163,7 +315,10 @@ final class SquirrelInputController: IMKInputController {
    }
  
    override func recognizedEvents(_ sender: Any!) -> Int {
@@ -1133,7 +1354,7 @@ index f09e8ab..17c5296 100644
    }
  
    // 方向键不走 handle(event)：client 把它们绑定为 NSResponder action（moveLeft: 等）
-@@ -183,11 +334,20 @@ final class SquirrelInputController: IMKInputController {
+@@ -183,11 +338,23 @@ final class SquirrelInputController: IMKInputController {
          return true
        }
      }
@@ -1146,6 +1367,9 @@ index f09e8ab..17c5296 100644
  
    override func activateServer(_ sender: Any!) {
      self.client ?= sender as? IMKTextInput
++    // 工具窗（表情/符号）上屏按焦点会话投递：core 只认「最近用过的会话」，
++    // 焦点换到别的应用后字符会落到上一处。会话句柄只有壳侧有。
++    if session != 0 { heng_ui_set_active_session(session) }
 +    // 焦点落下时就把前台 app 记好：`recognizedEvents` 不认领按键时
 +    // handle() 可能一次都不被调用，事件层接管那边只能靠这里维护的 currentApp。
 +    if let app = (sender as? IMKTextInput)?.bundleIdentifier(), currentApp != app {
@@ -1155,7 +1379,7 @@ index f09e8ab..17c5296 100644
      var keyboardLayout = NSApp.squirrelAppDelegate.config?.getString("keyboard_layout") ?? ""
      if keyboardLayout == "last" || keyboardLayout == "" {
        keyboardLayout = ""
-@@ -211,6 +371,8 @@ final class SquirrelInputController: IMKInputController {
+@@ -211,6 +378,8 @@ final class SquirrelInputController: IMKInputController {
        lastModifiers.remove(.capsLock)
      }
      preedit = ""
@@ -1164,7 +1388,7 @@ index f09e8ab..17c5296 100644
      if session != 0 {
        let state = hengGetOption(session, "ascii_mode")
        let label = hengStateLabel(session, "ascii_mode", state, abbreviated: true)
-@@ -222,6 +384,8 @@ final class SquirrelInputController: IMKInputController {
+@@ -222,6 +391,8 @@ final class SquirrelInputController: IMKInputController {
      self.client = client as? IMKTextInput
      super.init(server: server, delegate: delegate, client: client)
      createSession()
@@ -1173,11 +1397,13 @@ index f09e8ab..17c5296 100644
  
      NotificationCenter.default.addObserver(
        forName: .init("SquirrelSetASCIIModeNotification"),
-@@ -241,16 +405,178 @@ final class SquirrelInputController: IMKInputController {
+@@ -241,16 +412,180 @@ final class SquirrelInputController: IMKInputController {
    }
  
    override func deactivateServer(_ sender: Any!) {
 +    HengWindowRenderer.log("SESS deactivate sess=\(session)")
++    // 失活后 client 已不在，工具窗不能再往这个会话投递（0 = 退回最近会话兜底）
++    heng_ui_set_active_session(0)
      hidePalettes()
 -    commitComposition(sender)
 +    // 零宽占位不是用户打出来的字，绝不能走 commitComposition ——
@@ -1353,7 +1579,7 @@ index f09e8ab..17c5296 100644
    override func commitComposition(_ sender: Any!) {
      self.client ?= sender as? IMKTextInput
      if session != 0 {
-@@ -261,56 +587,43 @@ final class SquirrelInputController: IMKInputController {
+@@ -261,56 +596,62 @@ final class SquirrelInputController: IMKInputController {
      }
    }
  
@@ -1372,6 +1598,15 @@ index f09e8ab..17c5296 100644
 -    let logDir = NSMenuItem(title: NSLocalizedString("Logs...", comment: "Menu item"), action: #selector(openLogFolder), keyEquivalent: "")
 -    logDir.target = self
 -    let setting = NSMenuItem(title: NSLocalizedString("Settings...", comment: "Menu item"), action: #selector(openRimeFolder), keyEquivalent: "")
++    // 工具窗入口：表情/符号和 Windows 托盘菜单对齐。窗口长驻、不夺焦点，
++    // 点格子连续上屏；关闭走窗口自己的 ✕。
++    let emoji = NSMenuItem(title: NSLocalizedString("Emoji", comment: "Menu item"),
++                           action: #selector(openEmoji), keyEquivalent: "")
++    emoji.target = self
++    let symbols = NSMenuItem(title: NSLocalizedString("Symbols", comment: "Menu item"),
++                             action: #selector(openSymbols), keyEquivalent: "")
++    symbols.target = self
++
 +    let setting = NSMenuItem(title: NSLocalizedString("Settings...", comment: "Menu item"),
 +                             action: #selector(openSettings), keyEquivalent: "")
      setting.target = self
@@ -1391,6 +1626,8 @@ index f09e8ab..17c5296 100644
 -    menu.addItem(logDir)
      menu.addItem(setting)
 -    menu.addItem(wiki)
++    menu.addItem(emoji)
++    menu.addItem(symbols)
 +    menu.addItem(about)
      menu.addItem(update)
  
@@ -1399,16 +1636,20 @@ index f09e8ab..17c5296 100644
  
 -  @objc func deploy() {
 -    NSApp.squirrelAppDelegate.deploy()
--  }
--
--  @objc func syncUserData() {
--    NSApp.squirrelAppDelegate.syncUserData()
--  }
--
--  @objc func openLogFolder() {
--    NSApp.squirrelAppDelegate.openLogFolder()
 +  @objc func openSettings() {
 +    _ = heng_settings_show(SettingsPage.service.rawValue)
+   }
+ 
+-  @objc func syncUserData() {
+-    NSApp.squirrelAppDelegate.syncUserData()
++  @objc func openEmoji() {
++    _ = heng_emoji_show()
+   }
+ 
+-  @objc func openLogFolder() {
+-    NSApp.squirrelAppDelegate.openLogFolder()
++  @objc func openSymbols() {
++    _ = heng_symbols_show()
    }
  
 -  @objc func openRimeFolder() {
@@ -1428,7 +1669,7 @@ index f09e8ab..17c5296 100644
    private(set) var specialCommentIndices: [ReservedPropertyKey: Set<Int>] = [:]
  
    func handleReservedProperty(key rawKey: String, value rawValue: String, for sessionId: RimeSessionId) throws(ReservedPropertyError) {
-@@ -328,6 +641,9 @@ final class SquirrelInputController: IMKInputController {
+@@ -328,6 +669,9 @@ final class SquirrelInputController: IMKInputController {
    }
  
    deinit {
@@ -1438,7 +1679,7 @@ index f09e8ab..17c5296 100644
      destroySession()
    }
  }
-@@ -387,9 +703,12 @@ private extension SquirrelInputController {
+@@ -387,12 +731,17 @@ private extension SquirrelInputController {
        return "UnknownApp\(SquirrelInputController.unknownAppCnt)"
      }()
      print("createSession: \(app)")
@@ -1451,7 +1692,12 @@ index f09e8ab..17c5296 100644
  
      if session != 0 {
        updateAppOptions()
-@@ -402,11 +721,12 @@ private extension SquirrelInputController {
++      // 会话刚建好也可能是首个焦点会话：立刻登记，别等下一次 activateServer
++      heng_ui_set_active_session(session)
+     }
+   }
+ 
+@@ -402,11 +751,12 @@ private extension SquirrelInputController {
      }
      // v6 行为统一层：app_options 与选项初值由 core 在 set_session_owner 时统一应用，
      // 外壳不再自行读取/下发（与 Windows/Linux 外壳一致）。
@@ -1465,7 +1711,7 @@ index f09e8ab..17c5296 100644
        heng_end_session(session)
        session = 0
      }
-@@ -417,7 +737,20 @@ private extension SquirrelInputController {
+@@ -417,7 +767,20 @@ private extension SquirrelInputController {
      // 注：不再同步 _linear/_vertical 到 core。这两个原版 Squirrel 的 UI 提示选项
      // 会让 librime 把方向键路由到组合串光标移动，破坏 key_binder 的
      // Left→Up / Right→Down 候选切换（与 Windows 端行为统一的关键）。
@@ -1486,7 +1732,7 @@ index f09e8ab..17c5296 100644
  
      if !handled {
        let isVimBackInCommandMode = rimeKeycode == XK_Escape || ((rimeModifiers & kControlMask.rawValue != 0) && (rimeKeycode == XK_c || rimeKeycode == XK_C || rimeKeycode == XK_bracketleft))
-@@ -446,10 +779,19 @@ private extension SquirrelInputController {
+@@ -446,10 +809,19 @@ private extension SquirrelInputController {
      if let text = hengTakeCommit(session) {
        commit(string: text)
      }
@@ -1506,7 +1752,7 @@ index f09e8ab..17c5296 100644
      if clearReservedComments {
        specialCommentIndices = [:]
      }
-@@ -457,24 +799,31 @@ private extension SquirrelInputController {
+@@ -457,24 +829,31 @@ private extension SquirrelInputController {
  
      var status = HengStatus()
      status.data_size = Int32(MemoryLayout<HengStatus>.size)
@@ -1542,7 +1788,7 @@ index f09e8ab..17c5296 100644
  
        let start = stringIndex(utf8Offset: Int(ctx.sel_start), in: preedit)
        let end = stringIndex(utf8Offset: Int(ctx.sel_end), in: preedit)
-@@ -554,17 +903,23 @@ private extension SquirrelInputController {
+@@ -554,17 +933,23 @@ private extension SquirrelInputController {
        let lastPage = ctx.is_last_page != 0
  
        let selRange = NSRange(location: start.utf16Offset(in: preedit), length: preedit.utf16.distance(from: start, to: end))
@@ -1570,7 +1816,7 @@ index f09e8ab..17c5296 100644
  
      let forceMarkedText =
        session != 0 &&
-@@ -583,13 +938,61 @@ private extension SquirrelInputController {
+@@ -583,13 +968,61 @@ private extension SquirrelInputController {
      }
  
      client.insertText(string, replacementRange: .empty)
@@ -1634,7 +1880,7 @@ index f09e8ab..17c5296 100644
        return
      }
  
-@@ -597,6 +1000,18 @@ private extension SquirrelInputController {
+@@ -597,6 +1030,18 @@ private extension SquirrelInputController {
      self.caretPos = caretPos
      self.selRange = selRange
  
