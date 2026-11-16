@@ -204,6 +204,27 @@ fn show_notice(sui: &SettingsWindow, msg: &str) {
 pub static COMMIT_HANDLER: LazyLock<Mutex<Option<(CommitHandler, usize)>>> =
     LazyLock::new(|| Mutex::new(None));
 
+/// 外壳当前有焦点的会话句柄（0 = 无）。工具窗的上屏文本按它投递：
+/// 表情/符号窗可以脱离输入法单独打开，core 只有「最近用过的会话」可用，
+/// 而用户可能已经把焦点换到另一个应用，字符就会落到上一处。焦点信息
+/// 只在宿主侧，由外壳在焦点变化时登记。
+static ACTIVE_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 登记当前焦点会话（0 = 清除）。句柄失效由使用侧校验。
+pub fn set_active_session(handle: u64) {
+    ACTIVE_SESSION.store(handle, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 会话销毁时清掉登记：外壳不一定再发一次焦点变化，留着会指向死句柄。
+pub fn forget_active_session(handle: u64) {
+    let _ = ACTIVE_SESSION.compare_exchange(
+        handle,
+        0,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// 上屏一次：优先走回调（即时），无回调时退回 PENDING（外壳轮询取）。
 ///
 /// 回调在 UI 线程同步执行，外壳实现里只应做「投递」而非阻塞操作
@@ -5436,9 +5457,15 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // （commit handler 优先，无回调时 PENDING 供外壳轮询）
     let commit_tool_text = |text: &str| {
         let rime = *current.borrow();
-        let handle = rime
-            .and_then(|rid| SESSIONS.handle_of(rid))
-            .or_else(|| SESSIONS.last_handle());
+        // 投递目标决定字符落到哪个应用：外壳在焦点变化时登记当前会话，
+        // 工具窗可以脱离输入法单独打开，仅靠「最近用过的会话」会串台。
+        let active = ACTIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed);
+        let handle = if active != 0 && SESSIONS.rime_id(active).is_some() {
+            Some(active)
+        } else {
+            rime.and_then(|rid| SESSIONS.handle_of(rid))
+                .or_else(|| SESSIONS.last_handle())
+        };
         let Some(h) = handle else {
             ui_log("tools: 无活动会话，跳过上屏");
             return;

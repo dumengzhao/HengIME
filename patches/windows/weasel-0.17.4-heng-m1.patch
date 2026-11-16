@@ -5,7 +5,7 @@ Windows 外壳：小狼毫 0.17.4 改造为衡的数据源。
 apply 于 weasel 0.17.4 源码树（tag 0.17.4）。
 
 diff --git a/RimeWithWeasel/RimeWithWeasel.cpp b/RimeWithWeasel/RimeWithWeasel.cpp
-index 709cd7e..b030cb6 100644
+index 709cd7e..b2b6001 100644
 --- a/RimeWithWeasel/RimeWithWeasel.cpp
 +++ b/RimeWithWeasel/RimeWithWeasel.cpp
 @@ -5,14 +5,23 @@
@@ -1101,16 +1101,30 @@ index 709cd7e..b030cb6 100644
    _Respond(ipc_id, eat);
    _UpdateUI(ipc_id);
    return res;
-@@ -356,6 +889,8 @@ void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
+@@ -350,13 +883,22 @@ void RimeWithWeaselHandler::FocusIn(DWORD client_caps, WeaselSessionId ipc_id) {
+     return;
+   _UpdateUI(ipc_id);
+   m_active_session = ipc_id;
++  // v13：工具窗（表情/符号）的上屏文本按焦点会话投递。此客户端若还没建
++  // 会话（从未按键），登记 0，core 退回它自己记的最近会话。
++  auto it = m_session_status_map.find(ipc_id);
++  heng_ui_set_active_session(it == m_session_status_map.end()
++                                 ? 0
++                                 : it->second.session_id);
+ }
+ 
+ void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
    DLOG(INFO) << "Focus out: ipc_id = " << ipc_id;
    if (m_ui)
      m_ui->Hide();
 +  if (m_builtin_ui)
 +    heng_ui_hide();  // v6：焦点离开同步隐藏 core 内置候选窗
    m_active_session = 0;
++  heng_ui_set_active_session(0);
  }
  
-@@ -364,6 +899,11 @@ void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
+ void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
+@@ -364,6 +906,11 @@ void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
    DLOG(INFO) << "Update input position: (" << rc.left << ", " << rc.top
               << "), ipc_id = " << ipc_id
               << ", m_active_session = " << m_active_session;
@@ -1122,7 +1136,7 @@ index 709cd7e..b030cb6 100644
    if (m_ui)
      m_ui->UpdateInputPosition(rc);
    if (m_disabled)
-@@ -380,31 +920,6 @@ std::string RimeWithWeaselHandler::m_message_label;
+@@ -380,31 +927,6 @@ std::string RimeWithWeaselHandler::m_message_label;
  std::string RimeWithWeaselHandler::m_option_name;
  std::mutex RimeWithWeaselHandler::m_notifier_mutex;
  
@@ -1154,7 +1168,7 @@ index 709cd7e..b030cb6 100644
  void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
                                              LPWSTR buffer) {
    std::string app_name;
-@@ -426,50 +941,55 @@ void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
+@@ -426,50 +948,55 @@ void RimeWithWeaselHandler::_ReadClientInfo(WeaselSessionId ipc_id,
      }
    }
    SessionStatus& session_status = get_session_status(ipc_id);
@@ -1233,7 +1247,7 @@ index 709cd7e..b030cb6 100644
  }
  
  void RimeWithWeaselHandler::StartMaintenance() {
-@@ -493,12 +1013,13 @@ void RimeWithWeaselHandler::SetOption(WeaselSessionId ipc_id,
+@@ -493,12 +1020,13 @@ void RimeWithWeaselHandler::SetOption(WeaselSessionId ipc_id,
    if (!ipc_id) {
      if (m_global_ascii_mode && opt == "ascii_mode") {
        for (auto& pair : m_session_status_map)
@@ -1250,7 +1264,7 @@ index 709cd7e..b030cb6 100644
    }
    // refresh UI (and tray icon) so the option change takes effect immediately,
    // e.g. when toggling ascii_mode from the TSF language bar
-@@ -526,187 +1047,73 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
+@@ -526,187 +1054,73 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
    Status& weasel_status = m_ui->status();
    Context weasel_context;
  
@@ -1481,7 +1495,7 @@ index 709cd7e..b030cb6 100644
        show_icon = true;
      } else
        tips = u8tow(m_message_label);
-@@ -730,12 +1137,38 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
+@@ -730,12 +1144,38 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
      return m_ui->IsCountingDown();
    }
  }
@@ -1526,7 +1540,7 @@ index 709cd7e..b030cb6 100644
  }
  
  bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
-@@ -745,770 +1178,334 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
+@@ -745,770 +1185,334 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
    actions.reserve(8);
  
    SessionStatus& session_status = get_session_status(ipc_id);
@@ -2714,7 +2728,7 @@ index 8d8c2f0..1f7b664 100644
      }
    }
 diff --git a/WeaselIPC/WeaselClientImpl.cpp b/WeaselIPC/WeaselClientImpl.cpp
-index 26122ad..3869bd0 100644
+index 26122ad..b30961d 100644
 --- a/WeaselIPC/WeaselClientImpl.cpp
 +++ b/WeaselIPC/WeaselClientImpl.cpp
 @@ -142,6 +142,13 @@ void ClientImpl::TrayCommand(UINT menuId) {
@@ -2731,7 +2745,37 @@ index 26122ad..3869bd0 100644
  void ClientImpl::StartSession() {
    if (_Active() && Echo())
      return;
-@@ -276,6 +283,10 @@ void Client::TrayCommand(UINT menuId) {
+@@ -151,6 +158,18 @@ void ClientImpl::StartSession() {
+   session_id = ret;
+ }
+ 
++bool ClientImpl::EnsureSession() {
++  if (session_id)
++    return true;
++  // 未连接时什么都不做：连接由 _EnsureServerConnected 负责，
++  // 这里只补会话，否则每次轮询都会撞一次管道。
++  if (!_Connected())
++    return false;
++  _WriteClientInfo();
++  session_id = _SendMessage(WEASEL_IPC_START_SESSION, 0, 0);
++  return session_id != 0;
++}
++
+ void ClientImpl::EndSession() {
+   _SendMessage(WEASEL_IPC_END_SESSION, 0, session_id);
+   session_id = 0;
+@@ -260,6 +279,10 @@ void Client::StartSession() {
+   m_pImpl->StartSession();
+ }
+ 
++bool Client::EnsureSession() {
++  return m_pImpl->EnsureSession();
++}
++
+ void Client::EndSession() {
+   m_pImpl->EndSession();
+ }
+@@ -276,6 +299,10 @@ void Client::TrayCommand(UINT menuId) {
    m_pImpl->TrayCommand(menuId);
  }
  
@@ -2743,10 +2787,20 @@ index 26122ad..3869bd0 100644
    return m_pImpl->Echo();
  }
 diff --git a/WeaselIPC/WeaselClientImpl.h b/WeaselIPC/WeaselClientImpl.h
-index 7602792..9a2fa61 100644
+index 7602792..c803dc1 100644
 --- a/WeaselIPC/WeaselClientImpl.h
 +++ b/WeaselIPC/WeaselClientImpl.h
-@@ -27,6 +27,7 @@ class ClientImpl {
+@@ -13,6 +13,9 @@ class ClientImpl {
+   void Disconnect();
+   void ShutdownServer();
+   void StartSession();
++  // 确保会话存在：工具窗（表情/符号）可以在从未按键时点击上屏，
++  // 而 core 按会话投递上屏文本，没有会话时直接丢弃。
++  bool EnsureSession();
+   void EndSession();
+   void StartMaintenance();
+   void EndMaintenance();
+@@ -27,6 +30,7 @@ class ClientImpl {
    void FocusIn();
    void FocusOut();
    void TrayCommand(UINT menuId);
@@ -2893,7 +2947,7 @@ index e826d06..4cc6cfc 100644
   public:
    ServerImpl();
 diff --git a/WeaselServer/WeaselServer.rc b/WeaselServer/WeaselServer.rc
-index 53fcadd..1a28e53 100644
+index 53fcadd..1d0d4ed 100644
 --- a/WeaselServer/WeaselServer.rc
 +++ b/WeaselServer/WeaselServer.rc
 @@ -12,7 +12,7 @@
@@ -2919,7 +2973,7 @@ index 53fcadd..1a28e53 100644
    
   I D I _ E N                                     I C O N                                         " . . \ \ r e s o u r c e \ \ e n . i c o "  
    
-@@ -148,26 +154,16 @@
+@@ -148,26 +154,19 @@
   / /   M e n u  
   / /  
    
@@ -2945,18 +2999,21 @@ index 53fcadd..1a28e53 100644
 - E N D  
 + I D R _ M E N U _ P O P U P   M E N U 
 + B E G I N 
-+         P O P U P   " W e a s e l T r a y " 
++         P O P U P   " H e n g T r a y " 
 +         B E G I N 
 +                 M E N U I T E M   " ��n  ( & S ) " ,                                 I D _ W E A S E L T R A Y _ S E T T I N G S 
-+                 M E N U I T E M   " sQ�N  ( & B ) " , I D _ W E A S E L T R A Y _ A B O U T 
++                 M E N U I T E M   " h��`  ( & E ) " ,                                 I D _ W E A S E L T R A Y _ E M O J I 
++                 M E N U I T E M   " &{�S  ( & F ) " ,                                 I D _ W E A S E L T R A Y _ S Y M B O L S 
 +                 M E N U I T E M   S E P A R A T O R 
-+                 M E N U I T E M   " �h�g�f�e  ( & U ) " ,                 I D _ W E A S E L T R A Y _ C H E C K U P D A T E 
++                 M E N U I T E M   " sQ�N  ( & B ) " ,                                 I D _ W E A S E L T R A Y _ A B O U T 
++                 M E N U I T E M   S E P A R A T O R 
++                 M E N U I T E M   " �h�g�f�e  ( & U ) " ,                         I D _ W E A S E L T R A Y _ C H E C K U P D A T E 
 +         E N D 
 + E N D 
    
    
   / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / /  
-@@ -239,26 +235,16 @@ k@b!q"  
+@@ -239,26 +238,6 @@ k@b!q"  
   / /   M e n u  
   / /  
    
@@ -2980,20 +3037,10 @@ index 53fcadd..1a28e53 100644
 -                 M E N U I T E M   "  ��Q  ( & Q ) " ,                                           I D _ W E A S E L T R A Y _ Q U I T  
 -         E N D  
 - E N D  
-+ I D R _ M E N U _ P O P U P   M E N U 
-+ B E G I N 
-+         P O P U P   " W e a s e l T r a y " 
-+         B E G I N 
-+                 M E N U I T E M   " -��[  ( & S ) " ,                                 I D _ W E A S E L T R A Y _ S E T T I N G S 
-+                 M E N U I T E M   " ܕ�e  ( & B ) " , I D _ W E A S E L T R A Y _ A B O U T 
-+                 M E N U I T E M   S E P A R A T O R 
-+                 M E N U I T E M   " �j�g�eHr,g  ( & U ) " ,                 I D _ W E A S E L T R A Y _ C H E C K U P D A T E 
-+         E N D 
-+ E N D 
    
    
   / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / /  
-@@ -329,26 +315,16 @@ k@b!q"  
+@@ -329,26 +308,6 @@ k@b!q"  
   / /   M e n u  
   / /  
    
@@ -3017,16 +3064,6 @@ index 53fcadd..1a28e53 100644
 -                 M E N U I T E M   " E x i t   ( & Q ) " ,                                       I D _ W E A S E L T R A Y _ Q U I T  
 -         E N D  
 - E N D  
-+ I D R _ M E N U _ P O P U P   M E N U 
-+ B E G I N 
-+         P O P U P   " W e a s e l T r a y " 
-+         B E G I N 
-+                 M E N U I T E M   " S e t t i n g s   ( & S ) " ,                                 I D _ W E A S E L T R A Y _ S E T T I N G S 
-+                 M E N U I T E M   " A b o u t   ( & B ) " , I D _ W E A S E L T R A Y _ A B O U T 
-+                 M E N U I T E M   S E P A R A T O R 
-+                 M E N U I T E M   " C h e c k   f o r   u p d a t e s   ( & U ) " ,                 I D _ W E A S E L T R A Y _ C H E C K U P D A T E 
-+         E N D 
-+ E N D 
    
    
   / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / /  
@@ -3138,7 +3175,7 @@ index 8b6b571..0c962ee 100644
        <GenerateDebugInformation>false</GenerateDebugInformation>
        <SubSystem>Windows</SubSystem>
 diff --git a/WeaselServer/WeaselServerApp.cpp b/WeaselServer/WeaselServerApp.cpp
-index 6696b98..8ab1f09 100644
+index 6696b98..7f13adc 100644
 --- a/WeaselServer/WeaselServerApp.cpp
 +++ b/WeaselServer/WeaselServerApp.cpp
 @@ -1,6 +1,9 @@
@@ -3285,13 +3322,19 @@ index 6696b98..8ab1f09 100644
    tray_icon.DisableRefresh();
    m_handler->Finalize();
    m_ui.Destroy();
-@@ -51,28 +172,49 @@ void WeaselServerApp::SetupMenuHandlers() {
+@@ -51,28 +172,55 @@ void WeaselServerApp::SetupMenuHandlers() {
    std::filesystem::path dir = install_dir();
    m_server.AddMenuHandler(ID_WEASELTRAY_QUIT,
                            [this] { return m_server.Stop() == 0; });
 +  // 托盘「设置」：打开 core 内部设置窗口（页 0 = 输入方案，即设置首页）
 +  m_server.AddMenuHandler(ID_WEASELTRAY_SETTINGS,
 +                          [] { return heng_settings_show(0) != 0; });
++  // 托盘「表情」「符号」：与候选窗 ☰ 菜单同一入口，直接开 core 的工具窗。
++  // 两个窗互相独立，可同时开，也可与设置窗并存。
++  m_server.AddMenuHandler(ID_WEASELTRAY_EMOJI,
++                          [] { return heng_emoji_show() != 0; });
++  m_server.AddMenuHandler(ID_WEASELTRAY_SYMBOLS,
++                          [] { return heng_symbols_show() != 0; });
 +  // 托盘「关于」：打开设置窗口「关于」页（页 6）。
 +  // 注意：页号必须与 core SET_NAV 下标一致 —— 5 是「服务」页，6 才是「关于」。
 +  m_server.AddMenuHandler(ID_WEASELTRAY_ABOUT,
@@ -3420,14 +3463,16 @@ index 3eaff9b..2426262 100644
        CSystemTray::Create(hModule, NULL, WM_WEASEL_TRAY_NOTIFY,
                            get_weasel_ime_name().c_str(), icon, IDR_MENU_POPUP);
 diff --git a/WeaselServer/resource.h b/WeaselServer/resource.h
-index c6655b8..074c4f0 100644
+index c6655b8..7ba25db 100644
 --- a/WeaselServer/resource.h
 +++ b/WeaselServer/resource.h
-@@ -27,6 +27,7 @@
+@@ -27,6 +27,9 @@
  #define ID_WEASELTRAY_DISABLE_ASCII     40014
  #define ID_WEASELTRAY_RERUN_SERVICE     40015
  #define ID_WEASELTRAY_LOGDIR            40016
 +#define ID_WEASELTRAY_ABOUT             40017
++#define ID_WEASELTRAY_EMOJI             40018
++#define ID_WEASELTRAY_SYMBOLS           40019
  
  // Next default values for new objects
  // 
@@ -3544,7 +3589,7 @@ index c5d28b9..a5fa30b 100644
  
  /* For Windows 8 */
 diff --git a/WeaselTSF/KeyEventSink.cpp b/WeaselTSF/KeyEventSink.cpp
-index 6a18c13..7623db9 100644
+index 6a18c13..a8f5120 100644
 --- a/WeaselTSF/KeyEventSink.cpp
 +++ b/WeaselTSF/KeyEventSink.cpp
 @@ -34,8 +34,9 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
@@ -3558,8 +3603,23 @@ index 6a18c13..7623db9 100644
  
      if (ke.keycode == ibus::Caps_Lock) {
        if (prevKeyEvent.keycode == ibus::Caps_Lock && prevfEaten == TRUE &&
+@@ -63,9 +64,12 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
+ }
+ 
+ STDMETHODIMP WeaselTSF::OnSetFocus(BOOL fForeground) {
+-  if (fForeground)
++  if (fForeground) {
++    // core 的会话要到首次按键才建，而表情/符号窗可以在从未按键时打开并
++    // 点击 —— 先建会话，FocusIn 才能把上屏目标登记到本应用。
++    m_client.EnsureSession();
+     m_client.FocusIn();
+-  else {
++  } else {
+     m_client.FocusOut();
+     _AbortComposition();
+   }
 diff --git a/WeaselTSF/LanguageBar.cpp b/WeaselTSF/LanguageBar.cpp
-index 41d8f0d..5e534d8 100644
+index 41d8f0d..f160e75 100644
 --- a/WeaselTSF/LanguageBar.cpp
 +++ b/WeaselTSF/LanguageBar.cpp
 @@ -1,6 +1,5 @@
@@ -3569,27 +3629,31 @@ index 41d8f0d..5e534d8 100644
  #include <shellapi.h>
  #include "WeaselTSF.h"
  #include "LanguageBar.h"
-@@ -293,45 +292,22 @@ std::wstring WeaselTSF::_GetRootDir() {
+@@ -162,15 +161,9 @@ STDMETHODIMP CLangBarItemButton::OnClick(TfLBIClick click,
+     /* Open menu */
+     HWND hwnd = _pTextService->_GetFocusedContextWindow();
+     if (hwnd != NULL) {
+-      LANGID langid = get_language_id();
+-      HMENU menu;
+-      if (langid == TEXTSERVICE_LANGID_HANS) {
+-        menu = LoadMenuW(g_hInst, MAKEINTRESOURCE(IDR_MENU_POPUP_HANS));
+-      } else if (langid == TEXTSERVICE_LANGID_HANT) {
+-        menu = LoadMenuW(g_hInst, MAKEINTRESOURCE(IDR_MENU_POPUP_HANT));
+-      } else {
+-        menu = LoadMenuW(g_hInst, MAKEINTRESOURCE(IDR_MENU_POPUP));
+-      }
++      // 菜单资源只保留一份中文（见 WeaselTSF.rc）：界面语言不随系统语言变化，
++      // 免得繁体/英文系统上出现另一套文案，也免得漏翻某一份。
++      HMENU menu = LoadMenuW(g_hInst, MAKEINTRESOURCE(IDR_MENU_POPUP));
+       HMENU popupMenu = GetSubMenu(menu, 0);
+       UINT wID = TrackPopupMenuEx(
+           popupMenu, TPM_NONOTIFY | TPM_RETURNCMD | TPM_HORPOSANIMATION, pt.x,
+@@ -293,49 +286,22 @@ std::wstring WeaselTSF::_GetRootDir() {
  }
  
  void WeaselTSF::_HandleLangBarMenuSelect(UINT wID) {
 -  std::wstring dir{};
-+  // 菜单已精简为「设置 / 关于 / 检查更新」三项（见 WeaselTSF.rc）：
-+  //   设置 → heng_settings_show(0)（设置首页）
-+  //   关于 → heng_settings_show(5)
-+  //   检查更新 → 预留占位，弹「尚未开放」
-+  // 三项都需要 WeaselServer 侧的处理（要经 IPC 转发），
-+  // 本函数不再自己处理任何目录/外链分支。
-+  //
-+  // 历史删除的项及原因：
-+  //   RERUN_SERVICE / INSTALLDIR —— 读 HKLM\Software\Rime\Weasel\WeaselRoot，
-+  //     该键在本项目安装方式下不存在，静默失败；RERUN_SERVICE 还依赖仓库里
-+  //     并不存在的 start_service.bat（双重死）
-+  //   USERCONFIG —— 读 HKCU RimeUserDir（键为空）→ 回退 %AppData%\Rime，
-+  //     该目录在本项目下不存在，会弹 "Not found" 错误框
-+  //   LOGDIR / WIKI / FORUM —— 前者已移入设置页「关于」，后两者是 rime.im 外链
-+  //   CHECKUPDATE —— 上游实现拉小狼毫官方 appcast，会下载 weasel 安装包覆盖本目录
-   switch (wID) {
+-  switch (wID) {
 -    case ID_WEASELTRAY_RERUN_SERVICE:
 -    case ID_WEASELTRAY_INSTALLDIR:
 -      if (RegGetStringValue(HKEY_LOCAL_MACHINE, GetWeaselRegName(),
@@ -3627,14 +3691,34 @@ index 41d8f0d..5e534d8 100644
 -    case ID_WEASELTRAY_FORUM:
 -      open(L"https://rime.im/discuss/");
 -      break;
-     default:
-       m_client.TrayCommand(wID);
-       break;
+-    default:
+-      m_client.TrayCommand(wID);
+-      break;
+-  }
++  // 菜单项（见 WeaselTSF.rc）全部由 WeaselServer 侧处理，经 IPC 转发：
++  //   设置 → heng_settings_show(0)（设置首页）
++  //   表情 / 符号 → heng_emoji_show / heng_symbols_show
++  //   关于 → heng_settings_show(5)
++  //   检查更新 → 预留占位，弹「尚未开放」
++  // 本函数不再自己处理任何目录/外链分支。
++  //
++  // 历史删除的项及原因：
++  //   RERUN_SERVICE / INSTALLDIR —— 读 HKLM\Software\Rime\Weasel\WeaselRoot，
++  //     该键在本项目安装方式下不存在，静默失败；RERUN_SERVICE 还依赖仓库里
++  //     并不存在的 start_service.bat（双重死）
++  //   USERCONFIG —— 读 HKCU RimeUserDir（键为空）→ 回退 %AppData%\Rime，
++  //     该目录在本项目下不存在，会弹 "Not found" 错误框
++  //   LOGDIR / WIKI / FORUM —— 前者已移入设置页「关于」，后两者是 rime.im 外链
++  //   CHECKUPDATE —— 上游实现拉小狼毫官方 appcast，会下载 weasel 安装包覆盖本目录
++  m_client.TrayCommand(wID);
+ }
+ 
+ HWND WeaselTSF::_GetFocusedContextWindow() {
 diff --git a/WeaselTSF/WeaselTSF.cpp b/WeaselTSF/WeaselTSF.cpp
-index 53290b0..3ff2520 100644
+index 53290b0..dc7d331 100644
 --- a/WeaselTSF/WeaselTSF.cpp
 +++ b/WeaselTSF/WeaselTSF.cpp
-@@ -32,15 +32,97 @@ WeaselTSF::WeaselTSF() {
+@@ -32,15 +32,131 @@ WeaselTSF::WeaselTSF() {
  
    _fCUASWorkaroundTested = _fCUASWorkaroundEnabled = FALSE;
  
@@ -3705,9 +3789,44 @@ index 53290b0..3ff2520 100644
 +  return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 +}
 +
++com_ptr<ITfContext> WeaselTSF::_GetFocusedContext() {
++  com_ptr<ITfDocumentMgr> pDocMgr;
++  if (_pThreadMgr == NULL || _pThreadMgr->GetFocus(&pDocMgr) != S_OK ||
++      !pDocMgr)
++    return com_ptr<ITfContext>();
++  com_ptr<ITfContext> pContext;
++  if (pDocMgr->GetTop(&pContext) != S_OK)
++    return com_ptr<ITfContext>();
++  return pContext;
++}
++
++bool WeaselTSF::_IsForegroundThread() {
++  HWND hwnd = GetForegroundWindow();
++  if (hwnd == NULL)
++    return false;
++  return GetWindowThreadProcessId(hwnd, NULL) == GetCurrentThreadId();
++}
++
 +void WeaselTSF::_PollUiCommit() {
 +  // 未Activate / 已Deactivate 时无有效TSF 上下文，直接跳过（此时也不该有commit）
 +  if (_pThreadMgr == NULL || _tfClientId == TF_CLIENTID_NULL)
++    return;
++  // 会话按进程分开，上屏文本也只能投给产生它的那个会话。后台线程的轮询
++  // 没有意义，却会让 core 把工具窗的字符排到后台应用的会话上。
++  if (!_IsForegroundThread())
++    return;
++  // core 的会话要到首次按键才建。表情/符号窗可以在从未按键时打开并点击，
++  // 那时没有会话可投，core 会直接丢弃上屏文本 —— 这里补建。
++  if (!m_client.EnsureSession())
++    return;
++  // 落屏目标：正在组合时沿用组合所在的上下文；否则按当前焦点文档现取 ——
++  // _pEditSessionContext 是上次处理按键时记下的，换过输入框后会指向旧文档。
++  com_ptr<ITfContext> ctx;
++  if (_IsComposing())
++    ctx = _pEditSessionContext;
++  if (!ctx)
++    ctx = _GetFocusedContext();
++  if (!ctx)
 +    return;
 +  if (!m_client.PollUiCommit())
 +    return;  // 本轮无待上屏文本（服务端未回响应体）
@@ -3720,19 +3839,18 @@ index 53290b0..3ff2520 100644
 +    return;
 +  // 与 DoEditSession 同款落屏：先保证有 TSF composition，再插入文本
 +  if (!_IsComposing())
-+    _StartComposition(_pEditSessionContext,
-+                      _fCUASWorkaroundEnabled && !config.inline_preedit);
-+  _InsertText(_pEditSessionContext, commit);
-+  _EndComposition(_pEditSessionContext, false, !_status.composing);
++    _StartComposition(ctx, _fCUASWorkaroundEnabled && !config.inline_preedit);
++  _InsertText(ctx, commit);
++  _EndComposition(ctx, false, !_status.composing);
 +  _committed = TRUE;
 +  if (!_status.composing && _IsComposing())
-+    _EndComposition(_pEditSessionContext, true);
++    _EndComposition(ctx, true);
 +}
 +
  STDMETHODIMP WeaselTSF::QueryInterface(REFIID riid, void** ppvObject) {
    if (ppvObject == NULL)
      return E_INVALIDARG;
-@@ -97,6 +179,7 @@ STDMETHODIMP WeaselTSF::Activate(ITfThreadMgr* pThreadMgr,
+@@ -97,6 +213,7 @@ STDMETHODIMP WeaselTSF::Activate(ITfThreadMgr* pThreadMgr,
  }
  
  STDMETHODIMP WeaselTSF::Deactivate() {
@@ -3740,7 +3858,7 @@ index 53290b0..3ff2520 100644
    m_client.EndSession();
  
    _InitTextEditSink(com_ptr<ITfDocumentMgr>());
-@@ -163,6 +246,9 @@ STDMETHODIMP WeaselTSF::ActivateEx(ITfThreadMgr* pThreadMgr,
+@@ -163,6 +280,9 @@ STDMETHODIMP WeaselTSF::ActivateEx(ITfThreadMgr* pThreadMgr,
  
    _EnsureServerConnected();
  
@@ -3750,7 +3868,7 @@ index 53290b0..3ff2520 100644
    return S_OK;
  
  ExitError:
-@@ -262,8 +348,20 @@ bool WeaselTSF::_EnsureServerConnected() {
+@@ -262,8 +382,20 @@ bool WeaselTSF::_EnsureServerConnected() {
            !count_server_process()) {
          std::wstring dir = _GetRootDir();
          std::thread th([dir, this]() {
@@ -3774,10 +3892,10 @@ index 53290b0..3ff2520 100644
            std::this_thread::sleep_for(std::chrono::milliseconds(500));
            _Reconnect();
 diff --git a/WeaselTSF/WeaselTSF.h b/WeaselTSF/WeaselTSF.h
-index 1fc29cd..30f69e3 100644
+index 1fc29cd..a515b8a 100644
 --- a/WeaselTSF/WeaselTSF.h
 +++ b/WeaselTSF/WeaselTSF.h
-@@ -194,6 +194,25 @@ class WeaselTSF : public ITfTextInputProcessorEx,
+@@ -194,6 +194,27 @@ class WeaselTSF : public ITfTextInputProcessorEx,
    void _Reconnect();
    std::wstring _GetRootDir();
  
@@ -3793,6 +3911,8 @@ index 1fc29cd..30f69e3 100644
 +  BOOL _StartUiCommitPoll();
 +  void _StopUiCommitPoll();
 +  void _PollUiCommit();
++  com_ptr<ITfContext> _GetFocusedContext();
++  bool _IsForegroundThread();
 +  static LRESULT CALLBACK _UiCommitPollWndProc(HWND hWnd,
 +                UINT uMsg,
 +                WPARAM wParam,
@@ -3803,7 +3923,7 @@ index 1fc29cd..30f69e3 100644
    bool isImmersive() const {
      return (_activateFlags & TF_TMF_IMMERSIVEMODE) != 0;
    }
-@@ -236,4 +255,7 @@ class WeaselTSF : public ITfTextInputProcessorEx,
+@@ -236,4 +257,7 @@ class WeaselTSF : public ITfTextInputProcessorEx,
    BOOL _async_edit = false;
    BOOL _committed = false;
    BOOL _isToOpenClose = false;
@@ -3812,10 +3932,10 @@ index 1fc29cd..30f69e3 100644
 +  UINT _uiCommitPollTimerId;
  };
 diff --git a/WeaselTSF/WeaselTSF.rc b/WeaselTSF/WeaselTSF.rc
-index 648bad1..649c049 100644
+index 648bad1..a8458e2 100644
 --- a/WeaselTSF/WeaselTSF.rc
 +++ b/WeaselTSF/WeaselTSF.rc
-@@ -1,237 +1,201 @@
+@@ -1,237 +1,182 @@
 -��/ /   M i c r o s o f t   V i s u a l   C + +   g e n e r a t e d   r e s o u r c e   s c r i p t .  
 - / /  
 - # i n c l u d e   " r e s o u r c e . h "  
@@ -4052,34 +4172,15 @@ index 648bad1..649c049 100644
 + 
 + I D R _ M E N U _ P O P U P   M E N U 
 + B E G I N 
-+         P O P U P   " W e a s e l T r a y " 
++         P O P U P   " H e n g T r a y " 
 +         B E G I N 
 +                 M E N U I T E M   " ��n  ( & S ) " ,                                 I D _ W E A S E L T R A Y _ S E T T I N G S 
-+                 M E N U I T E M   " sQ�N  ( & B ) " , I D _ W E A S E L T R A Y _ A B O U T 
++                 M E N U I T E M   " h��`  ( & E ) " ,                                 I D _ W E A S E L T R A Y _ E M O J I 
++                 M E N U I T E M   " &{�S  ( & F ) " ,                                 I D _ W E A S E L T R A Y _ S Y M B O L S 
 +                 M E N U I T E M   S E P A R A T O R 
-+                 M E N U I T E M   " �h�g�f�e  ( & U ) " ,                 I D _ W E A S E L T R A Y _ C H E C K U P D A T E 
-+         E N D 
-+ E N D 
-+ 
-+ I D R _ M E N U _ P O P U P _ H A N T   M E N U 
-+ B E G I N 
-+         P O P U P   " W e a s e l T r a y " 
-+         B E G I N 
-+                 M E N U I T E M   " -��[  ( & S ) " ,                                 I D _ W E A S E L T R A Y _ S E T T I N G S 
-+                 M E N U I T E M   " ܕ�e  ( & B ) " , I D _ W E A S E L T R A Y _ A B O U T 
++                 M E N U I T E M   " sQ�N  ( & B ) " ,                                 I D _ W E A S E L T R A Y _ A B O U T 
 +                 M E N U I T E M   S E P A R A T O R 
-+                 M E N U I T E M   " �j�g�eHr,g  ( & U ) " ,                 I D _ W E A S E L T R A Y _ C H E C K U P D A T E 
-+         E N D 
-+ E N D 
-+ 
-+ I D R _ M E N U _ P O P U P _ H A N S   M E N U 
-+ B E G I N 
-+         P O P U P   " W e a s e l T r a y " 
-+         B E G I N 
-+                 M E N U I T E M   " S e t t i n g s   ( & S ) " ,                                 I D _ W E A S E L T R A Y _ S E T T I N G S 
-+                 M E N U I T E M   " A b o u t   ( & B ) " , I D _ W E A S E L T R A Y _ A B O U T 
-+                 M E N U I T E M   S E P A R A T O R 
-+                 M E N U I T E M   " C h e c k   f o r   u p d a t e s   ( & U ) " ,                 I D _ W E A S E L T R A Y _ C H E C K U P D A T E 
++                 M E N U I T E M   " �h�g�f�e  ( & U ) " ,                         I D _ W E A S E L T R A Y _ C H E C K U P D A T E 
 +         E N D 
 + E N D 
 + 
@@ -4912,7 +5013,7 @@ index ab20d8d..355e61b 100644
    DWORD m_pid;
  };
 diff --git a/include/WeaselIPC.h b/include/WeaselIPC.h
-index 27bfd63..57229f4 100644
+index 27bfd63..82ed689 100644
 --- a/include/WeaselIPC.h
 +++ b/include/WeaselIPC.h
 @@ -7,7 +7,13 @@
@@ -4953,7 +5054,16 @@ index 27bfd63..57229f4 100644
  };
  
  // 處理server端回應之物件
-@@ -144,6 +160,8 @@ class Client {
+@@ -116,6 +132,8 @@ class Client {
+   void ShutdownServer();
+   // 發起會話
+   void StartSession();
++  // 確保已有會話（工具窗上屏用），返回是否可用
++  bool EnsureSession();
+   // 結束會話
+   void EndSession();
+   // 進入維護模式
+@@ -144,6 +162,8 @@ class Client {
    void FocusOut();
    // 托盤菜單
    void TrayCommand(UINT menuId);
@@ -4993,10 +5103,10 @@ index 742f157..7ee8937 100755
  inline LONG RegGetStringValue(HKEY key,
 diff --git a/include/heng.h b/include/heng.h
 new file mode 100644
-index 0000000..90c5715
+index 0000000..01837ab
 --- /dev/null
 +++ b/include/heng.h
-@@ -0,0 +1,461 @@
+@@ -0,0 +1,527 @@
 +/*
 + * heng.h —— HengIME 统一能力模块 C ABI（M0）
 + *
@@ -5176,7 +5286,11 @@ index 0000000..90c5715
 + * out_commit / out_ctx 均可传 NULL 表示不需要。
 + * 返回 HENG_TRUE=按键已处理；out_commit 采用消费语义（取后清空），
 + * 非 NULL 时用 heng_free_string 释放；out_ctx 非 NULL 时用 heng_free_context 释放。
-+ */
++ *
++ * mask 位定义沿用 librime/X：1=Shift 2=CapsLock(Lock) 4=Ctrl 8=Alt 64=Super，
++ * 1<<30=keyup。CapsLock 置位且无 Ctrl/Alt/Super 时，ASCII 字母一律按大写
++ * 直接上屏（Shift 不改变大小写），不进入组字流程，避免大写模式下仍弹候选窗。 */
++
 +HENG_API int heng_process_key_ex(heng_session_t session, int keysym, int mask,
 +                                 char** out_commit, HengContext* out_ctx);
 +
@@ -5306,12 +5420,43 @@ index 0000000..90c5715
 + * 显示器插拔 / Dock 显隐 / 菜单栏高度变化时应重新上报。 */
 +HENG_API void heng_set_work_area(int top, int bottom);
 +
++/* 外壳上报 inline_preedit 开关（"字母区内嵌到宿主输入区"）。仅 macOS 有效：
++ * Windows/Linux 由 core 直读 weasel.custom.yaml（其正统配置源）。
++ * macOS 上 core 读不到该文件（weasel 端补丁），历史上 fallback 成恒关，
++ * 于是 squirrel.yaml 开着时外壳把字母插进宿主区、core 的预览窗条内也画，
++ * 同一份字母显两处。改为外壳推送后两侧同源：拨开关两边一起变。
++ * on 非 0 = 内嵌开（字母进宿主区，预览窗条内不显示）。
++ * 应在每次会话刷新时推送（配置可能已被用户改动）。 */
++HENG_API void heng_set_inline_preedit(int on);
++
 +/* 外壳在主线程收到指针事件后调用，core 排空队列转成 Slint 事件。
 + * x/y/dx/dy 均为**逻辑像素**（DPI 换算由 core 统一做）。
 + * kind 取值：0=移动 1=按下 2=抬起 3=滚轮 4=指针离开 5=窗口关闭请求。
 + * 仅 win=1 的kind=5 会被转成 CloseRequested（关闭设置窗口）。 */
 +HENG_API void heng_push_pointer_event(unsigned char win, unsigned char kind,
 +                                      float x, float y, float dx, float dy);
++
++/* 打开工具窗口（v12；tab = 0 最近使用 / 1 表情 / 2 符号；「最近」为空时
++ * 自动落到表情）。长驻、手动关闭：窗口不夺焦点，点击格子连续上屏并记入
++ * 最近使用，宿主可绑快捷键调起。 */
++HENG_API int heng_tools_show(int tab);
++
++/* 关闭工具窗口（v12）。 */
++HENG_API int heng_tools_hide(void);
++
++/* 打开表情窗口（v13）。与符号窗互相独立，可同时打开；不夺焦点、手动关闭。 */
++HENG_API int heng_emoji_show(void);
++/* 打开符号窗口（v13）。左侧分类栏（10 类）。 */
++HENG_API int heng_symbols_show(void);
++/* 关闭表情窗口（v13）。 */
++HENG_API int heng_emoji_hide(void);
++/* 关闭符号窗口（v13）。 */
++HENG_API int heng_symbols_hide(void);
++
++/* 登记当前有焦点的会话（v13）。工具窗（表情/符号）的上屏文本投给该会话：
++ * 窗口可以脱离输入法单独打开，core 只有「最近用过的会话」可用，焦点换到
++ * 别的应用后字符就会落到上一处。传 0 表示无焦点，退回上述兜底。 */
++HENG_API void heng_ui_set_active_session(heng_session_t session);
 +
 +/* 关闭设置窗口（v9）。 */
 +HENG_API int heng_settings_hide(void);
@@ -5443,6 +5588,37 @@ index 0000000..90c5715
 +HENG_API int heng_config_get_double(heng_config_t config, const char* key,
 +                                    double* out);
 +
++/* ---- 用户词库同步（v11；docs/SYNC-PLAN.md） ---- */
++
++/* 登录同步服务端并保存账号（server_url/username/password 均为 UTF-8）。
++ * 成功后启用同步并立即唤醒定时器线程。返回 HENG_TRUE=成功，
++ * 失败原因经 heng_last_error 读取。含网络 IO（秒级），勿在输入热路径调用。 */
++HENG_API int heng_sync_configure(const char* server_url, const char* username,
++                                 const char* password);
++
++/* 同步总开关（设置页拨杆）。返回 HENG_TRUE=成功。 */
++HENG_API int heng_sync_set_enabled(int enabled);
++
++/* 「立即同步」：唤醒定时器跑一轮（不卡调用方）。返回 HENG_TRUE=已唤醒，
++ * HENG_FALSE=未配置 / 已停用 / 引擎未初始化。 */
++HENG_API int heng_sync_now(void);
++
++/* 同步配置快照 JSON（不含令牌）：
++ * {"server_url","username","enabled","interval_secs","configured"}。
++ * 内存归 core，调用方用 heng_free_string 释放；*out 恒非 NULL。 */
++HENG_API int heng_sync_config(char** out);
++
++/* 同步状态快照 JSON：
++ * {"state","last_sync_at","last_error","last_downloaded","last_uploaded",
++ *  "pending_merge","next_attempt_at","consecutive_failures",
++ *  "installation_id","configured","enabled"}。
++ * 内存归 core，调用方用 heng_free_string 释放。 */
++HENG_API int heng_sync_status(char** out);
++
++/* 本机 installation_id（`<platform>-<hostname>-<6位随机>`）。
++ * 内存归 core，调用方用 heng_free_string 释放；引擎未初始化时为空串。 */
++HENG_API int heng_installation_id(char** out);
++
 +/* ---- 内存释放 ---- */
 +
 +HENG_API void heng_free_string(char* s);
@@ -5459,14 +5635,25 @@ index 0000000..90c5715
 +
 +#endif /* HENG_H */
 diff --git a/include/resource.h b/include/resource.h
-index 3a40f51..218b7c2 100644
+index 3a40f51..0fa6827 100644
 --- a/include/resource.h
 +++ b/include/resource.h
-@@ -27,6 +27,7 @@
+@@ -9,8 +9,6 @@
+ #define IDR_MENU_POPUP                  105
+ #define IDI_FULL_SHAPE                  106
+ #define IDI_HALF_SHAPE                  107
+-#define IDR_MENU_POPUP_HANT             108
+-#define IDR_MENU_POPUP_HANS             109
+ #define IDS_STR_UNDER_MAINTENANCE       302
+ #define ID_WEASELTRAY_QUIT              40001
+ #define ID_WEASELTRAY_DEPLOY            40002
+@@ -27,6 +25,9 @@
  #define ID_WEASELTRAY_DISABLE_ASCII     40014
  #define ID_WEASELTRAY_RERUN_SERVICE     40015
  #define ID_WEASELTRAY_LOGDIR            40016
 +#define ID_WEASELTRAY_ABOUT             40017
++#define ID_WEASELTRAY_EMOJI             40018
++#define ID_WEASELTRAY_SYMBOLS           40019
  
  // Next default values for new objects
  //
@@ -6287,87 +6474,6 @@ index eb773d4..0f98744 100644
      <OutDir>$(SolutionDir)msbuild\$(Configuration)\$(Platform)\</OutDir>
    </PropertyGroup>
    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
-diff --git a/unlock-tsf.bat b/unlock-tsf.bat
-new file mode 100644
-index 0000000..a16f367
---- /dev/null
-+++ b/unlock-tsf.bat
-@@ -0,0 +1,74 @@
-+@echo off
-+rem ============================================================================
-+rem unlock-tsf.bat - move the registered weaselx64.dll aside before relinking
-+rem
-+rem Why this exists:
-+rem   weaselx64.dll is the TSF in-process server, loaded into every host that
-+rem   activates the IME (explorer, notepad, any editor) and registered as an
-+rem   InprocServer32 COM class. link.exe unlinks its output before writing it,
-+rem   and DeleteFile fails on a file currently mapped as an image -> LNK1104.
-+rem
-+rem   Renaming works where deleting does not: the loaded hosts keep using the
-+rem   renamed file's mapping and link.exe finds the name free. This mirrors what
-+rem   build-core.bat does for heng_core.dll, which the running WeaselServer
-+rem   locks the same way.
-+rem
-+rem   No admin rights needed. regsvr32 /u is not required either: the COM
-+rem   registration stores a path, not a file identity, so a freshly linked dll
-+rem   written back under the same name takes effect as-is.
-+rem
-+rem   Parked files carry a random suffix. A fixed name cannot be reused while
-+rem   the previous occupant is still mapped, and it stays mapped for as long as
-+rem   the hosts that loaded it keep running. Leftovers are swept here on every
-+rem   run: del succeeds for the ones whose hosts have exited and fails for the
-+rem   rest, which is exactly the desired behaviour.
-+rem
-+rem Usage:  unlock-tsf.bat <output-dir-name>      e.g. unlock-tsf.bat output-dev
-+rem ============================================================================
-+
-+setlocal enabledelayedexpansion
-+set WEASEL_ROOT=%~dp0
-+set TARGET_DIR=%~1
-+
-+if "%TARGET_DIR%"=="" (
-+  echo ERROR: usage: unlock-tsf.bat ^<output-dir-name^>
-+  exit /b 1
-+)
-+
-+set OUT=%WEASEL_ROOT%%TARGET_DIR%
-+
-+rem Park one file aside. Renaming works where deleting does not: hosts that
-+rem already mapped it keep using the renamed file's mapping, and link.exe finds
-+rem the name free. A fixed parked name cannot be reused while the previous
-+rem occupant is still mapped, so it carries a random suffix. Leftovers are
-+rem swept on every run: del succeeds for the ones whose hosts exited and fails
-+rem for the rest, which is exactly the desired behaviour.
-+call :park "%OUT%\weaselx64.dll" "weaselx64.dll"
-+if errorlevel 1 endlocal & exit /b 1
-+
-+rem WeaselServer.exe is locked the same way, by the running service process.
-+rem build-core.bat already stops that process before deploying the core dll,
-+rem but TSF clients relaunch it as soon as an editor takes focus, so by the
-+rem time msbuild gets here it may be back. Park it for the same reason.
-+call :park "%OUT%\WeaselServer.exe" "WeaselServer.exe"
-+if errorlevel 1 endlocal & exit /b 1
-+
-+call :park "%OUT%\WeaselDeployer.exe" "WeaselDeployer.exe"
-+if errorlevel 1 endlocal & exit /b 1
-+
-+endlocal
-+exit /b 0
-+
-+:park
-+rem %1 = full path, %2 = display name
-+if not exist "%~1" exit /b 0
-+for %%F in ("%~1.parked*") do del /q "%%~fF" >nul 2>&1
-+set PARK=%~1.parked!RANDOM!
-+move "%~1" "!PARK!" >nul 2>&1
-+if errorlevel 1 (
-+  echo [unlock] cannot move %~2 aside - another process is writing it.
-+  echo         Close the apps using the IME and retry.
-+  exit /b 1
-+)
-+echo [unlock] parked %~2, path is free for relink
-+exit /b 0
-\ No newline at end of file
 diff --git a/uia-sign.ps1 b/uia-sign.ps1
 new file mode 100644
 index 0000000..5df7780
@@ -6473,3 +6579,84 @@ index 0000000..5df7780
 +        '（自签证书需先导入机器级受信根，见安装脚本）')
 +}
 +Write-Output ('[uia] 已签名，签名者=' + $sig.SignerCertificate.Subject)
+diff --git a/unlock-tsf.bat b/unlock-tsf.bat
+new file mode 100644
+index 0000000..a16f367
+--- /dev/null
++++ b/unlock-tsf.bat
+@@ -0,0 +1,74 @@
++@echo off
++rem ============================================================================
++rem unlock-tsf.bat - move the registered weaselx64.dll aside before relinking
++rem
++rem Why this exists:
++rem   weaselx64.dll is the TSF in-process server, loaded into every host that
++rem   activates the IME (explorer, notepad, any editor) and registered as an
++rem   InprocServer32 COM class. link.exe unlinks its output before writing it,
++rem   and DeleteFile fails on a file currently mapped as an image -> LNK1104.
++rem
++rem   Renaming works where deleting does not: the loaded hosts keep using the
++rem   renamed file's mapping and link.exe finds the name free. This mirrors what
++rem   build-core.bat does for heng_core.dll, which the running WeaselServer
++rem   locks the same way.
++rem
++rem   No admin rights needed. regsvr32 /u is not required either: the COM
++rem   registration stores a path, not a file identity, so a freshly linked dll
++rem   written back under the same name takes effect as-is.
++rem
++rem   Parked files carry a random suffix. A fixed name cannot be reused while
++rem   the previous occupant is still mapped, and it stays mapped for as long as
++rem   the hosts that loaded it keep running. Leftovers are swept here on every
++rem   run: del succeeds for the ones whose hosts have exited and fails for the
++rem   rest, which is exactly the desired behaviour.
++rem
++rem Usage:  unlock-tsf.bat <output-dir-name>      e.g. unlock-tsf.bat output-dev
++rem ============================================================================
++
++setlocal enabledelayedexpansion
++set WEASEL_ROOT=%~dp0
++set TARGET_DIR=%~1
++
++if "%TARGET_DIR%"=="" (
++  echo ERROR: usage: unlock-tsf.bat ^<output-dir-name^>
++  exit /b 1
++)
++
++set OUT=%WEASEL_ROOT%%TARGET_DIR%
++
++rem Park one file aside. Renaming works where deleting does not: hosts that
++rem already mapped it keep using the renamed file's mapping, and link.exe finds
++rem the name free. A fixed parked name cannot be reused while the previous
++rem occupant is still mapped, so it carries a random suffix. Leftovers are
++rem swept on every run: del succeeds for the ones whose hosts exited and fails
++rem for the rest, which is exactly the desired behaviour.
++call :park "%OUT%\weaselx64.dll" "weaselx64.dll"
++if errorlevel 1 endlocal & exit /b 1
++
++rem WeaselServer.exe is locked the same way, by the running service process.
++rem build-core.bat already stops that process before deploying the core dll,
++rem but TSF clients relaunch it as soon as an editor takes focus, so by the
++rem time msbuild gets here it may be back. Park it for the same reason.
++call :park "%OUT%\WeaselServer.exe" "WeaselServer.exe"
++if errorlevel 1 endlocal & exit /b 1
++
++call :park "%OUT%\WeaselDeployer.exe" "WeaselDeployer.exe"
++if errorlevel 1 endlocal & exit /b 1
++
++endlocal
++exit /b 0
++
++:park
++rem %1 = full path, %2 = display name
++if not exist "%~1" exit /b 0
++for %%F in ("%~1.parked*") do del /q "%%~fF" >nul 2>&1
++set PARK=%~1.parked!RANDOM!
++move "%~1" "!PARK!" >nul 2>&1
++if errorlevel 1 (
++  echo [unlock] cannot move %~2 aside - another process is writing it.
++  echo         Close the apps using the IME and retry.
++  exit /b 1
++)
++echo [unlock] parked %~2, path is free for relink
++exit /b 0
+\ No newline at end of file

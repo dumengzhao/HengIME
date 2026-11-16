@@ -287,6 +287,7 @@ impl SessionRegistry {
     pub fn remove(&self, engine: &Engine, id: u64) -> bool {
         let rime_id = SESSION_MAP.lock().unwrap().remove(&id);
         OWNER_MAP.lock().unwrap().remove(&id);
+        crate::ui::forget_active_session(id);
         match rime_id {
             Some(rid) => {
                 engine.destroy_session(rid);

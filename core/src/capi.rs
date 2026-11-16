@@ -1106,6 +1106,16 @@ pub extern "C" fn heng_symbols_hide() -> c_int {
     })
 }
 
+/// 登记当前有焦点的会话（v13）：工具窗点击的上屏文本投给它，传 0 表示无焦点。
+/// 焦点信息只在宿主侧存在，core 自己拿不到 —— 不登记时退回「最近用过的会话」，
+/// 焦点换到别的应用后字符就会落到上一处。
+#[no_mangle]
+pub extern "C" fn heng_ui_set_active_session(session: HengSession) {
+    ffi_guard!((), {
+        crate::ui::set_active_session(session);
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn heng_tools_hide() -> c_int {
     ffi_guard!(HENG_FALSE, {

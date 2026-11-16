@@ -344,6 +344,11 @@ HENG_API int heng_emoji_hide(void);
 /* 关闭符号窗口（v13）。 */
 HENG_API int heng_symbols_hide(void);
 
+/* 登记当前有焦点的会话（v13）。工具窗（表情/符号）的上屏文本投给该会话：
+ * 窗口可以脱离输入法单独打开，core 只有「最近用过的会话」可用，焦点换到
+ * 别的应用后字符就会落到上一处。传 0 表示无焦点，退回上述兜底。 */
+HENG_API void heng_ui_set_active_session(heng_session_t session);
+
 /* 关闭设置窗口（v9）。 */
 HENG_API int heng_settings_hide(void);
 

@@ -100,6 +100,7 @@ EXPORTS
     heng_ui_mode_hint
     heng_ui_mode_hint_ex
     heng_ui_nav_key
+    heng_ui_set_active_session
     heng_ui_sync
     heng_ui_sync_ex
     heng_version
