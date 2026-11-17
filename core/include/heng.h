@@ -349,6 +349,20 @@ HENG_API int heng_symbols_hide(void);
  * 别的应用后字符就会落到上一处。传 0 表示无焦点，退回上述兜底。 */
 HENG_API void heng_ui_set_active_session(heng_session_t session);
 
+/* 软键盘按键转交外壳（v15）。core 收到软键盘点击后回调这里，外壳按真实按键
+ * 处理（processKey + rimeUpdate），内联预编辑与候选窗定位才能正常。
+ * 传 NULL 注销，退回 core 内部直接注入。 */
+typedef void (*heng_key_handler_fn)(void* ctx, heng_session_t session,
+    int keysym, int mask);
+HENG_API void heng_set_key_handler(heng_key_handler_fn cb, void* ctx);
+
+/* 打开软键盘（v14；PC 端自绘，长驻、不抢焦点，可拖动）。 */
+HENG_API int heng_vkbd_show(void);
+/* 关闭软键盘（v14）。 */
+HENG_API int heng_vkbd_hide(void);
+/* 切换软键盘（v14）：菜单项用，可见则关、否则开。 */
+HENG_API int heng_vkbd_toggle(void);
+
 /* 关闭设置窗口（v9）。 */
 HENG_API int heng_settings_hide(void);
 

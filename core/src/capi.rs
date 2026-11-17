@@ -1041,6 +1041,76 @@ pub extern "C" fn heng_settings_show(page: c_int) -> c_int {
     })
 }
 
+/// 软键盘按键转交外壳（v15）。
+///
+/// core 收到软键盘点击后不自己喂 librime，而是回调外壳，让外壳走「真实按键」
+/// 那条链：内联预编辑（setMarkedText）、光标锚点、候选窗定位都挂在外壳的
+/// 按键处理 + rimeUpdate 上。绕过去就会出现「字母不内联、候选窗不跟光标」。
+pub type KeyHandler =
+    extern "C" fn(ctx: *mut core::ffi::c_void, session: u64, keysym: c_int, mask: c_int);
+
+static KEY_HANDLER: std::sync::Mutex<Option<(KeyHandler, usize)>> = std::sync::Mutex::new(None);
+
+/// UI 线程调用：把按键交给外壳。返回 false = 外壳没注册，调用方自行兜底。
+pub(crate) fn shell_handle_key(session: u64, keysym: i32, mask: i32) -> bool {
+    let cb = match KEY_HANDLER.lock() {
+        Ok(g) => *g,
+        Err(_) => None,
+    };
+    match cb {
+        Some((f, ctx)) => {
+            f(ctx as *mut core::ffi::c_void, session, keysym, mask);
+            true
+        }
+        None => false,
+    }
+}
+
+/// 注册软键盘按键回调（v15）。传 NULL 注销，退回 core 内部直接注入。
+#[no_mangle]
+pub extern "C" fn heng_set_key_handler(cb: Option<KeyHandler>, ctx: *mut core::ffi::c_void) {
+    if let Ok(mut g) = KEY_HANDLER.lock() {
+        *g = cb.map(|f| (f, ctx as usize));
+    }
+}
+
+/// 打开软键盘（v14；PC 端自绘，长驻、不抢焦点）。
+#[no_mangle]
+pub extern "C" fn heng_vkbd_show() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        crate::ui::ui_vkbd_show();
+        HENG_TRUE
+    })
+}
+
+/// 关闭软键盘（v14）。
+#[no_mangle]
+pub extern "C" fn heng_vkbd_hide() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        crate::ui::ui_vkbd_hide();
+        HENG_TRUE
+    })
+}
+
+/// 切换软键盘（v14）：菜单项用，可见则关、否则开。
+#[no_mangle]
+pub extern "C" fn heng_vkbd_toggle() -> c_int {
+    ffi_guard!(HENG_FALSE, {
+        if !crate::ui::ensure_started() {
+            return HENG_FALSE;
+        }
+        if crate::ui::ui_vkbd_visible() {
+            crate::ui::ui_vkbd_hide();
+        } else {
+            crate::ui::ui_vkbd_show();
+        }
+        HENG_TRUE
+    })
+}
+
 /// 关闭设置窗口（v9）。
 #[no_mangle]
 pub extern "C" fn heng_settings_hide() -> c_int {

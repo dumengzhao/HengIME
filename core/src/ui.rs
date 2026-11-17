@@ -140,6 +140,12 @@ enum UiCmd {
     PaneCommon(u8, usize),
     PaneCell(u8, usize),
     PaneScroll(u8, f32),
+    /// 软键盘：显示 / 隐藏 / 按键（keysym, mask）
+    VkbdShow,
+    VkbdHide,
+    VkbdKey(i32, i32),
+    /// 软键盘背景按下：请求外壳开始拖动
+    VkbdDrag,
 }
 
 static UI_CMD_TX: LazyLock<Mutex<Option<Sender<UiCmd>>>> = LazyLock::new(|| Mutex::new(None));
@@ -366,6 +372,235 @@ pub fn ui_tools_show(tab: usize) {
 pub fn ui_tools_hide() {
     send_cmd(UiCmd::PaneHide(0));
     send_cmd(UiCmd::PaneHide(1));
+}
+
+/// 打开 / 关闭软键盘（PC 端自绘）。
+pub fn ui_vkbd_show() {
+    let ok = ensure_started();
+    VKBD_OPEN_AT.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    ui_log(&format!("vkbd: show 请求 (ui_thread={ok})"));
+    send_cmd(UiCmd::VkbdShow);
+}
+
+/// 最近一次「点菜单」的时间戳，用来量菜单到窗口上屏的延迟
+static VKBD_OPEN_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn ui_vkbd_hide() {
+    send_cmd(UiCmd::VkbdHide);
+}
+
+pub fn ui_vkbd_visible() -> bool {
+    VKBD_VISIBLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 软键盘可见状态（capi 无锁查询用）
+pub static VKBD_VISIBLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 完整 104 键布局（绝对定位）。
+/// x / w 单位 = 1/4 u（1u = 44px）；y / h 单位 = 行（行距 47px）。
+/// ks 约定：可打印键直接给**生效后的** ASCII；特殊键用 X keysym；
+/// 修饰键用负数占位：-1 ⇧ / -2 ⇪ / -3 ⌃ / -4 ⌥ / -5 ⌘。
+fn vk_key(label: String, ks: i32, x: i32, y: i32, w: i32, h: i32) -> VkKey {
+    VkKey {
+        label: slint::SharedString::from(label),
+        ks,
+        x,
+        y,
+        w,
+        h,
+        fs: 14,
+        active: false,
+    }
+}
+
+/// 导航簇（Ins/Home/PgUp…）标签更长，字号缩到 9 才不挤
+fn vk_key_nav(label: String, ks: i32, x: i32, y: i32, w: i32, h: i32) -> VkKey {
+    VkKey {
+        label: slint::SharedString::from(label),
+        ks,
+        x,
+        y,
+        w,
+        h,
+        fs: 9,
+        active: false,
+    }
+}
+
+/// F 行按键只有 0.5u 宽，字号相应缩到 10
+fn vk_key_small(label: String, ks: i32, x: i32, y: i32, w: i32, h: i32) -> VkKey {
+    VkKey {
+        label: slint::SharedString::from(label),
+        ks,
+        x,
+        y,
+        w,
+        h,
+        fs: 10,
+        active: false,
+    }
+}
+
+/// 可打印键：shift/caps 折算成实际字符
+fn vk_ch(plain: char, shifted: char, up: bool, x: i32, y: i32, w: i32, h: i32) -> VkKey {
+    let c = if up { shifted } else { plain };
+    vk_key(c.to_string(), c as i32, x, y, w, h)
+}
+
+fn vk_letter(c: char, up: bool, x: i32, y: i32, w: i32) -> VkKey {
+    let (l, k) = if up {
+        (c.to_ascii_uppercase(), c.to_ascii_uppercase() as i32)
+    } else {
+        (c, c as i32)
+    };
+    vk_key(l.to_string(), k, x, y, w, 1)
+}
+
+/// 完整 104 键布局（绝对定位）。
+/// x / w 单位 = 1/4 u（1u = 44px）；y / h 单位 = 行（行距 47px）。
+/// ks 约定：可打印键给**生效后的** ASCII；特殊键用 X keysym；
+/// 修饰键用负数占位：-1 ⇧ / -2 ⇪ / -3 ⌃ / -4 ⌥ / -5 ⌘。
+fn vkbd_keys(shift: bool, caps: bool, ctrl: bool, alt: bool, cmd: bool, dark: bool, ascii: bool) -> Vec<VkKey> {
+    let up = shift != caps;
+    let mut k: Vec<VkKey> = Vec::new();
+    // 修饰键锁定态：键帽高亮，避免「按了 ⌃ 忘了关」却看不出来
+    let mark = |mut key: VkKey, on: bool| {
+        key.active = on;
+        key
+    };
+
+    // ---- 导航簇上方：截屏 / 主题 / 中英 ----
+    k.push(vk_key_nav("截屏".into(), -6, 62, 0, 4, 1));
+    k.push(vk_key_nav(if dark { "浅色" } else { "深色" }.to_string(), -7, 66, 0, 4, 1));
+    k.push(vk_key_nav(if ascii { "英" } else { "中" }.to_string(), -8, 70, 0, 4, 1));
+
+    // ---- F 行 ----
+    // 真实键盘的分组：esc 与 F1 之间留大空档，F1-F4 / F5-F8 / F9-F12 三组之间
+    // 各留 2q 空档，F12 右边缘与主键区右边缘（x=60）对齐。
+    // 每组 = 4 键 × 2q + 3 个 1q 缝 = 11q；四组 + 3 个 2q 组间缝 = 50q。
+    k.push(vk_key("esc".into(), 0xFF1B, 0, 0, 4, 1));
+    for i in 0..12 {
+        // 标准 104 键位置：组内相邻（1u 一键），组间空 0.5u
+        let x = 8 + (i as i32) * 4 + (i as i32 / 4) * 2;
+        k.push(vk_key(format!("F{}", i + 1), 0xFFBE + i, x, 0, 4, 1));
+    }
+
+    // ---- 主键区 ----
+    k.push(vk_ch(char::from(0x60), '~', up, 0, 1, 4, 1));
+    let shifted_digits = ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'];
+    for (i, d) in ('1'..='9').enumerate() {
+        k.push(vk_ch(d, shifted_digits[i], up, 4 + (i as i32) * 4, 1, 4, 1));
+    }
+    k.push(vk_ch('0', ')', up, 40, 1, 4, 1));
+    k.push(vk_ch('-', '_', up, 44, 1, 4, 1));
+    k.push(vk_ch('=', '+', up, 48, 1, 4, 1));
+    k.push(vk_key_small("backspace".to_string(), 0xFF08, 52, 1, 8, 1));
+
+    k.push(vk_key_small("tab".into(), 0xFF09, 0, 2, 6, 1));
+    for (i, c) in "qwertyuiop".chars().enumerate() {
+        k.push(vk_letter(c, up, 6 + (i as i32) * 4, 2, 4));
+    }
+    k.push(vk_ch('[', '{', up, 46, 2, 4, 1));
+    k.push(vk_ch(']', '}', up, 50, 2, 4, 1));
+    k.push(vk_ch(char::from(0x5c), '|', up, 54, 2, 6, 1));
+
+    k.push(vk_key_small("caps".into(), -2, 0, 3, 7, 1));
+    for (i, c) in "asdfghjkl".chars().enumerate() {
+        k.push(vk_letter(c, up, 7 + (i as i32) * 4, 3, 4));
+    }
+    k.push(vk_ch(';', ':', up, 43, 3, 4, 1));
+    k.push(vk_ch(char::from(0x27), '"', up, 47, 3, 4, 1));
+    k.push(vk_key_small("return".into(), 0xFF0D, 51, 3, 9, 1));
+
+    k.push(vk_key("⇧".into(), -1, 0, 4, 9, 1));
+    for (i, c) in "zxcvbnm".chars().enumerate() {
+        k.push(vk_letter(c, up, 9 + (i as i32) * 4, 4, 4));
+    }
+    k.push(vk_ch(',', '<', up, 37, 4, 4, 1));
+    k.push(vk_ch('.', '>', up, 41, 4, 4, 1));
+    k.push(vk_ch('/', '?', up, 45, 4, 4, 1));
+    k.push(vk_key("⇧".into(), -1, 49, 4, 11, 1));
+
+    k.push(mark(vk_key("⌃".into(), -3, 0, 5, 4, 1), ctrl));
+    k.push(mark(vk_key("⌥".into(), -4, 4, 5, 4, 1), alt));
+    k.push(mark(vk_key("⌘".into(), -5, 8, 5, 5, 1), cmd));
+    k.push(vk_key("空格".into(), 0x20, 13, 5, 38, 1));
+    k.push(vk_key("⌘".into(), -5, 51, 5, 5, 1));
+    k.push(vk_key("⌥".into(), -4, 56, 5, 4, 1));
+
+    // ---- 导航簇 ----
+    k.push(vk_key_nav("Ins".into(), 0xFF63, 62, 1, 4, 1));
+    k.push(vk_key_nav("Home".into(), 0xFF50, 66, 1, 4, 1));
+    k.push(vk_key_nav("PgUp".into(), 0xFF55, 70, 1, 4, 1));
+    k.push(vk_key_nav("Del".into(), 0xFFFF, 62, 2, 4, 1));
+    k.push(vk_key_nav("End".into(), 0xFF57, 66, 2, 4, 1));
+    k.push(vk_key_nav("PgDn".into(), 0xFF56, 70, 2, 4, 1));
+    k.push(vk_key("↑".into(), 0xFF52, 66, 4, 4, 1));
+    k.push(vk_key("←".into(), 0xFF51, 62, 5, 4, 1));
+    k.push(vk_key("↓".into(), 0xFF53, 66, 5, 4, 1));
+    k.push(vk_key("→".into(), 0xFF54, 70, 5, 4, 1));
+
+    // ---- 数字键盘 ----
+    k.push(vk_key_nav("Num".into(), 0xFF7F, 76, 1, 4, 1));
+    k.push(vk_key("/".into(), 0x2F, 80, 1, 4, 1));
+    k.push(vk_key("*".into(), 0x2A, 84, 1, 4, 1));
+    k.push(vk_key("-".into(), 0x2D, 88, 1, 4, 1));
+    k.push(vk_key("7".into(), 0x37, 76, 2, 4, 1));
+    k.push(vk_key("8".into(), 0x38, 80, 2, 4, 1));
+    k.push(vk_key("9".into(), 0x39, 84, 2, 4, 1));
+    k.push(vk_key("+".into(), 0x2B, 88, 2, 4, 2));
+    k.push(vk_key("4".into(), 0x34, 76, 3, 4, 1));
+    k.push(vk_key("5".into(), 0x35, 80, 3, 4, 1));
+    k.push(vk_key("6".into(), 0x36, 84, 3, 4, 1));
+    k.push(vk_key("1".into(), 0x31, 76, 4, 4, 1));
+    k.push(vk_key("2".into(), 0x32, 80, 4, 4, 1));
+    k.push(vk_key("3".into(), 0x33, 84, 4, 4, 1));
+    k.push(vk_key_small("enter".into(), 0xFF0D, 88, 4, 4, 2));
+    k.push(vk_key("0".into(), 0x30, 76, 5, 8, 1));
+    k.push(vk_key(".".into(), 0x2E, 84, 5, 4, 1));
+
+    // 中文模式下把标点键的**标签**换成中文标点（送出的键码不变，
+    // 由 rime 的 punctuator 按 ascii_punct 决定上屏什么）
+    if !ascii {
+        for key in k.iter_mut() {
+            key.label = match key.ks {
+                0x2C => "，",
+                0x2E => "。",
+                0x3B => "；",
+                0x3A => "：",
+                0x3F => "？",
+                0x21 => "！",
+                0x5B => "【",
+                0x5D => "】",
+                0x3C => "《",
+                0x3E => "》",
+                _ => continue,
+            }
+            .into();
+        }
+    }
+
+    k
+}
+
+fn vkbd_model(
+    shift: bool,
+    caps: bool,
+    ctrl: bool,
+    alt: bool,
+    cmd: bool,
+    dark: bool,
+    ascii: bool,
+) -> ModelRc<VkKey> {
+    ModelRc::new(VecModel::from(vkbd_keys(shift, caps, ctrl, alt, cmd, dark, ascii)))
 }
 
 /// 惰性启动 UI 线程（首次 ui_sync 时）。启动失败（无 X 显示等）返回 false，
@@ -1274,6 +1509,81 @@ slint::slint! {
 // 工具面板：长驻独立窗口。表情窗与符号窗共用同一组件，差异全部走属性：
 // 列数 / 行数 / 网格位置与尺寸 / 是否显示分类栏 / 是否显示「常用」行。
 // 两个窗口都没有一级 tab：每个窗口只放一种内容，顶部固定一行常用（不随滚动）。
+// ===== 软键盘（PC 端自绘）=====
+// 绝对定位布局：x/w 以 1/4 u 为单位（1u = 44px），y/h 以行为单位（行距 47px）。
+// 这样才能做出真实键盘里「+ / 回车」跨行的键。
+// 长驻窗口：不抢焦点、标题栏可拖动、右上角 × 关闭。
+export struct VkKey {
+    label: string,
+    ks: int,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    fs: int,
+    active: bool,
+}
+
+export component VkbdWindow inherits Window {
+    in property <string> caption;
+    in property <bool> dark;
+    in property <[VkKey]> keys;
+    callback key_pressed(int, int);
+    callback close_clicked();
+    callback drag_requested();
+
+    width: 1028px;
+    height: 344px;
+    background: root.dark ? #23262b : #eef0f4;
+
+    // 背景拖动层：铺满整窗、位于键之下。点键由键自己的 TouchArea 接走，
+    // 点空白（标题栏、键缝、两块之间的留白）就请求拖动。
+    TouchArea {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        mouse-cursor: default;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.drag_requested();
+            }
+        }
+    }
+
+    // 标题栏（core 按顶部 30pt 判定拖动带）
+    Text {
+        x: 10px; y: 0; width: parent.width - 50px; height: 30px;
+        text: root.caption; font-size: 12px; color: root.dark ? #aab2bd : #4b5563;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: parent.width - 36px; y: 4px; width: 26px; height: 22px; border-radius: 5px;
+        background: cta.has-hover ? (root.dark ? #363b44 : #dfe3ea) : transparent;
+        Text {
+            text: "×"; font-size: 18px; color: root.dark ? #c9ced6 : #555b66;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+        cta := TouchArea { mouse-cursor: pointer; clicked => { root.close_clicked(); } }
+    }
+
+    for k in root.keys: Rectangle {
+        x: 8px + k.x * 11px;
+        y: 34px + k.y * 47px + (k.y > 0 ? 14px : 0px);
+        width: k.w * 11px - 3px;
+        height: k.h * 47px - 3px;
+        border-radius: 6px;
+        background: k.active
+            ? (root.dark ? #2f4d8a : #c9dcff)
+            : (kt.has-hover ? (root.dark ? #454b55 : #d8dfe9) : (root.dark ? #343941 : #ffffff));
+        Text {
+            text: k.label; font-size: k.fs * 1px; color: root.dark ? #e8eaed : #1f2328;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+        kt := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.key_pressed(k.ks, 0); }
+        }
+    }
+}
+
 export component ToolsWindow inherits Window {
     in property <string> caption;
     in property <int> cols;
@@ -1508,7 +1818,8 @@ impl Platform for XPlatform {
             0 => Ok(MSW.with(|w| w.clone())),
             1 => Ok(MSW2.with(|w| w.clone())),
             2 => Ok(MSW3.with(|w| w.clone())),
-            _ => Ok(MSW4.with(|w| w.clone())),
+            3 => Ok(MSW4.with(|w| w.clone())),
+            _ => Ok(MSW5.with(|w| w.clone())),
         }
     }
     fn run_event_loop(&self) -> Result<(), slint::PlatformError> {
@@ -1531,6 +1842,9 @@ thread_local! {
     /// 表情窗口（第 4 个组件实例；与符号窗互相独立）
     static MSW4: Rc<MinimalSoftwareWindow> =
         MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    /// 软键盘（第 5 个组件实例）
+    static MSW5: Rc<MinimalSoftwareWindow> =
+        MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
 }
 
 /// 平台窗口后端：把预乘 ARGB 帧呈现到屏幕并回传指针事件。
@@ -1542,6 +1856,9 @@ trait UiBackend {
     fn set_mapped(&mut self, win: u8, mapped: bool);
     /// 呈现一帧预乘 ARGB（buf 长度 = w*h，字节序 BGRA）
     fn blit(&mut self, win: u8, buf: &[Argb], w: u32, h: u32);
+
+    /// 请外壳开始拖动某个窗口（默认不支持）
+    fn begin_drag(&mut self, _win: u8) {}
     /// 非阻塞泵平台事件，逐个交给 sink（tag=窗口，PointerMoved/Pressed/Released/Exited/Closed）
     fn poll_events(&mut self, sink: &mut dyn FnMut(u8, WindowEvent));
 }
@@ -1921,7 +2238,7 @@ pub mod mac_backend {
 
     pub struct MacWindow {
         /// 各窗口当前尺寸（拖动带 × 排除区计算用）。索引 0=候选 1=设置 2=字母区 3=工具窗
-        widths: [u32; 5],
+        widths: [u32; 6],
         /// 设置窗拖动中：(拖起时指针x, 指针y, 窗口x, 窗口y)，左上原点
         drag2: Option<(f32, f32, f32, f32)>,
         setting_x: f32,
@@ -1932,7 +2249,7 @@ pub mod mac_backend {
     impl MacWindow {
         pub fn new() -> Option<MacWindow> {
             Some(MacWindow {
-                widths: [0; 5],
+                widths: [0; 6],
                 drag2: None,
                 setting_x: 0.0,
                 setting_y: 0.0,
@@ -1948,7 +2265,7 @@ pub mod mac_backend {
 
     impl UiBackend for MacWindow {
         fn configure(&mut self, win: u8, x: i32, y: i32, w: u32, h: u32) {
-            let idx = (win as usize).min(4);
+            let idx = (win as usize).min(5);
             self.widths[idx] = w;
             if win == 1 {
                 self.setting_x = x as f32;
@@ -1988,6 +2305,22 @@ pub mod mac_backend {
             }
         }
 
+        fn begin_drag(&mut self, win: u8) {
+            // 与 mac_backend 内部的顶栏拖动带同一套语义：外壳收到 op=4 后
+            // 用屏幕坐标记基准点，后续 leftMouseDragged 直接移动窗口。
+            self.with_cb(|cb, ctx| {
+                cb(
+                    ctx as *mut core::ffi::c_void,
+                    win,
+                    4,
+                    core::ptr::null(),
+                    0,
+                    0,
+                    0,
+                )
+            });
+        }
+
         fn blit(&mut self, win: u8, buf: &[Argb], w: u32, h: u32) {
             // Argb 是 #[repr(C)] 且字段序 b,g,r,a —— 内存就是预乘 BGRA，
             // 外壳可直接 memcpy 进 CGContext，零转换。
@@ -2009,7 +2342,7 @@ pub mod mac_backend {
         fn poll_events(&mut self, sink: &mut dyn FnMut(u8, WindowEvent)) {
             let queue = std::mem::take(&mut *PTR_QUEUE.lock().unwrap());
             for (win, ev) in queue {
-                let tag = win.min(4);
+                let tag = win.min(5);
                 match ev {
                     RawEvent::Moved(x, y) => sink(tag, WindowEvent::PointerMoved {
                         position: LogicalPosition::new(x, y),
@@ -2029,9 +2362,11 @@ pub mod mac_backend {
                         // 工具窗顶栏拖动带（顶部 44 逻辑 px，右侧留出 ✕ 按钮）：
                         // 位移只能由外壳按**屏幕坐标**算 —— 窗口内的坐标会随窗口
                         // 一起移动，core 这边按局部坐标算出的位移恒为 0。
-                        if (tag == 3 || tag == 4) && {
+                        if (tag == 3 || tag == 4 || tag == 5) && {
                             let sc = ui_scale();
-                            y < (44.0 * sc).round()
+                            // 工具窗顶栏 44pt；软键盘标题栏只有 24pt + 内边距，取 30pt
+                            let band = if tag == 5 { 30.0 } else { 44.0 };
+                            y < (band * sc).round()
                                 && x < self.widths[tag as usize] as f32 - (40.0 * sc).round()
                         } {
                             self.with_cb(|cb, ctx| {
@@ -5236,6 +5571,171 @@ impl PaneState {
     }
 }
 
+/// 软键盘窗口状态（PC 自绘）。语义同工具窗：长驻、不抢焦点、手动关闭。
+struct VkbdState {
+    comp: Rc<VkbdWindow>,
+    msw: Rc<MinimalSoftwareWindow>,
+    buf: RefCell<Vec<Argb>>,
+    visible: Cell<bool>,
+    /// 修饰键：⇧ 与 ⌃⌥⌘ 是一次性的（按下一个键后自动复位），⇪ 是锁定
+    shift: Cell<bool>,
+    caps: Cell<bool>,
+    /// 显示/按键后强制贴一帧（其余空闲帧不贴，避免 125Hz 刷 1.3MB 位图）
+    needs_paint: Cell<bool>,
+    ctrl: Cell<bool>,
+    alt: Cell<bool>,
+    cmd: Cell<bool>,
+    /// 键盘自身主题（深/浅），与系统外观无关
+    dark: Cell<bool>,
+    /// 当前是否英文模式（只影响标点键的**显示**，送出的仍是 ASCII 键码，
+    /// 由 rime 的 punctuator 按 ascii_punct 决定上屏什么）
+    ascii: Cell<bool>,
+}
+
+impl VkbdState {
+    /// 平台窗口编号：0 候选 / 1 设置 / 2 字母区 / 3 符号 / 4 表情 / 5 软键盘
+    const WIN: u8 = 5;
+
+    fn new(comp: Rc<VkbdWindow>, msw: Rc<MinimalSoftwareWindow>) -> Self {
+        Self {
+            comp,
+            msw,
+            buf: RefCell::new(Vec::new()),
+            visible: Cell::new(false),
+            shift: Cell::new(false),
+            caps: Cell::new(false),
+            needs_paint: Cell::new(true),
+            ctrl: Cell::new(false),
+            alt: Cell::new(false),
+            cmd: Cell::new(false),
+            dark: Cell::new(false),
+            ascii: Cell::new(false),
+        }
+    }
+
+    fn size_px(&self) -> (u32, u32) {
+        let s = ui_scale();
+        ((1028.0 * s).round() as u32, (344.0 * s).round() as u32)
+    }
+
+    fn refresh(&self) {
+        self.comp.set_dark(self.dark.get());
+        self.comp.set_keys(vkbd_model(
+            self.shift.get(),
+            self.caps.get(),
+            self.ctrl.get(),
+            self.alt.get(),
+            self.cmd.get(),
+            self.dark.get(),
+            self.ascii.get(),
+        ));
+        self.needs_paint.set(true);
+    }
+
+    fn mod_mask(&self) -> i32 {
+        (if self.caps.get() { 1 << 1 } else { 0 })
+            | (if self.ctrl.get() { 1 << 2 } else { 0 })
+            | (if self.alt.get() { 1 << 3 } else { 0 })
+            | (if self.cmd.get() { 1 << 6 } else { 0 })
+    }
+
+    /// 处理一次按键：修饰键返回 None（只改状态），普通键返回 (keysym, mask)。
+    /// 一次性修饰键在送出按键后复位，与物理键盘「松开即失效」一致。
+    fn press(&self, ks: i32) -> Option<(i32, i32)> {
+        match ks {
+            -1 => self.shift.set(!self.shift.get()),
+            -2 => self.caps.set(!self.caps.get()),
+            -3 => self.ctrl.set(!self.ctrl.get()),
+            -4 => self.alt.set(!self.alt.get()),
+            -5 => self.cmd.set(!self.cmd.get()),
+            // 主题切换只在键盘内部生效，不送按键
+            -7 => {
+                self.dark.set(!self.dark.get());
+                self.refresh();
+                return None;
+            }
+            // 中英切换：本地标记翻转（驱动标点标签），会话侧由外壳执行
+            -8 => {
+                self.ascii.set(!self.ascii.get());
+                self.refresh();
+                return Some((ks, 0));
+            }
+            // 截屏由外壳执行
+            -6 => return Some((ks, 0)),
+            _ => {
+                let mask = self.mod_mask();
+                let out = Some((ks, mask));
+                // ⇧ 一次性；⌃⌥⌘ 保持锁定，否则多键组合（⌘⇧4、⌘⌥I）按不出来。
+                // 锁定态在键帽上有高亮，再点一次即可解除。
+                self.shift.set(false);
+                self.refresh();
+                return out;
+            }
+        }
+        self.refresh();
+        None
+    }
+
+    fn show(&self, backend: &mut Box<dyn UiBackend>) {
+        let (w, h) = self.size_px();
+        // 量纲约定：geo.x / geo.y = 点（logical），geo.w / geo.h = 设备像素。
+        let scale_f = ui_scale();
+        let (sw_pt, sh_pt) = screen_size();
+        #[cfg(target_os = "macos")]
+        let bottom_dev = mac_backend::work_area()
+            .map(|(_, b)| b)
+            .unwrap_or((sh_pt as f32 * scale_f).round() as i32);
+        #[cfg(not(target_os = "macos"))]
+        let bottom_dev = (sh_pt as f32 * scale_f).round() as i32;
+        let x_dev = (sw_pt as f32 * scale_f - w as f32) / 2.0;
+        // 离底边留 60pt：贴死屏幕底边既难点也不好看
+        let y_dev = bottom_dev as f32 - h as f32 - 60.0 * scale_f;
+        let x = (x_dev / scale_f).round().max(8.0) as i32;
+        let y = (y_dev / scale_f).round().max(8.0) as i32;
+        backend.configure(Self::WIN, x, y, w, h);
+        if !self.visible.get() {
+            backend.set_mapped(Self::WIN, true);
+            let _ = self.comp.show();
+            self.msw.window().request_redraw();
+            self.needs_paint.set(true);
+            self.visible.set(true);
+        }
+        VKBD_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn hide(&self, backend: &mut Box<dyn UiBackend>) {
+        backend.set_mapped(Self::WIN, false);
+        let _ = self.comp.hide();
+        self.visible.set(false);
+        self.buf.borrow_mut().clear();
+        VKBD_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn draw(&self, backend: &mut Box<dyn UiBackend>) {
+        if !self.visible.get() {
+            return;
+        }
+        let (w, h) = self.size_px();
+        if self.buf.borrow().len() != (w * h) as usize {
+            *self.buf.borrow_mut() = vec![Argb::default(); (w * h) as usize];
+        }
+        let mut tb = self.buf.borrow_mut();
+        let drew = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.msw.draw_if_needed(|r: &SoftwareRenderer| {
+                let _ = r.render(&mut tb, w as usize);
+            })
+        }))
+        .unwrap_or(false);
+        // 长驻窗口空闲时不能每帧贴 1028×330×4≈1.3MB：只有内容真的变了
+        // 或刚显示/按键时才 blit。之前无条件贴帧把主线程刷爆，表现为
+        // 「越开越慢」——队列里堆着一堆位图拷贝。
+        let force = self.needs_paint.replace(false);
+        if drew || force {
+            backend.blit(Self::WIN, &tb, w, h);
+        }
+    }
+}
+
 fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // Slint 平台必须先于组件创建注册
     slint::platform::set_platform(Box::new(XPlatform {
@@ -5280,6 +5780,11 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     // 两个工具窗口各一个组件实例（第 3、4 个实例 → MSW3 / MSW4）
     let tui = Rc::new(ToolsWindow::new().expect("heng-ui: 符号窗口组件创建失败"));
     let eui = Rc::new(ToolsWindow::new().expect("heng-ui: 表情窗口组件创建失败"));
+    // 第 5 个组件实例 → MSW5（软键盘）
+    let msw5 = MSW5.with(|w| w.clone());
+    let vui = Rc::new(VkbdWindow::new().expect("heng-ui: 软键盘组件创建失败"));
+    vui.set_caption(SharedString::from("软键盘"));
+    vui.set_keys(vkbd_model(false, false, false, false, false, false, false));
     // 工具窗同样要登记 DPI 缩放：候选窗/设置窗都有这一步，漏掉会让 Slint 按
     // 1.0 布局（768 逻辑宽画进 1200 物理宽的位图）→ 内容只占左侧 2/3，
     // 指针坐标除以 scale 后与布局对不上，悬浮提示偏左上。
@@ -5295,6 +5800,13 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
     msw4.set_size(PhysicalSize {
         width: (PANE_EMOJI.win_w * scale).round() as u32,
         height: (PANE_EMOJI.win_h * scale).round() as u32,
+    });
+    msw5
+        .window()
+        .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+    msw5.set_size(PhysicalSize {
+        width: (1028.0 * scale).round() as u32,
+        height: (344.0 * scale).round() as u32,
     });
     // 启动时先应用候选字号（7 档刻度 14-20，默认 16 = 第 3 档）——
     // 布局尺寸全部由此推导，必须在算高度之前
@@ -5675,6 +6187,35 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
             move || { let _ = tx.send(UiCmd::PaneHide(0)); }
         });
         eui.on_cell_font(|s| cell_font(s.as_str()));
+    }
+
+    // 软键盘：回调转内部命令
+    {
+        let tx = tx.clone();
+        vui.on_key_pressed({
+            let tx = tx.clone();
+            move |ks, mask| {
+                let _ = tx.send(UiCmd::VkbdKey(ks, mask));
+            }
+        });
+    }
+    {
+        let tx = tx.clone();
+        vui.on_drag_requested({
+            let tx = tx.clone();
+            move || {
+                let _ = tx.send(UiCmd::VkbdDrag);
+            }
+        });
+    }
+    {
+        let tx = tx.clone();
+        vui.on_close_clicked({
+            let tx = tx.clone();
+            move || {
+                let _ = tx.send(UiCmd::VkbdHide);
+            }
+        });
     }
 
     // 工具窗点击上屏：与「点击候选上屏」走同一条通道
@@ -6123,6 +6664,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
         }
     });
 
+    let vkbd = VkbdState::new(vui.clone(), msw5.clone());
+
     // 空闲时把「等下一条命令」交给 channel 阻塞（见循环末尾），
     // 这样窗口全隐藏时不必每 8ms 醒一次。
     let mut pending_cmd: Option<UiCmd> = None;
@@ -6354,6 +6897,74 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                     // 再被顶到第一个会让列表随手一点就整体错位。
                     // 只有网格（非常用区）点选才写进「最近使用」。
                     commit_tool_text(&text);
+                }
+                UiCmd::VkbdShow => {
+                    let t0 = std::time::Instant::now();
+                    let queued = now_ms().saturating_sub(
+                        VKBD_OPEN_AT.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    vkbd.show(&mut backend);
+                    ui_log(&format!(
+                        "vkbd: show 完成 queue={queued}ms inner={:?}",
+                        t0.elapsed()
+                    ));
+                }
+                UiCmd::VkbdHide => {
+                    vkbd.hide(&mut backend);
+                }
+                UiCmd::VkbdDrag => {
+                    backend.begin_drag(VkbdState::WIN);
+                }
+                UiCmd::VkbdKey(ks, _mask) => {
+                    ui_log(&format!("vkbd: press ks={ks}"));
+                    // 修饰键只改状态（⇧/⇪/⌃/⌥/⌘），普通键才送出
+                    let Some((ks, mask)) = vkbd.press(ks) else {
+                        continue;
+                    };
+                    // 注入当前焦点会话：与物理按键走同一条 librime 路径。
+                    // 优先用外壳登记的焦点会话；外壳还没建会话时（刚切到某个 app、
+                    // 只点软键盘没打字）退回「最近登记的会话」，与工具窗上屏同一套兜底。
+                    let active = ACTIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed);
+                    let handle = if active != 0 && crate::global::SESSIONS.rime_id(active).is_some() {
+                        Some(active)
+                    } else {
+                        (*current.borrow())
+                            .and_then(|rid| crate::global::SESSIONS.handle_of(rid))
+                            .or_else(|| crate::global::SESSIONS.last_handle())
+                    };
+                    let Some(handle) = handle else {
+                        ui_log(&format!("vkbd: key ks={ks} 无可用会话"));
+                        continue;
+                    };
+                    let Some(rime_id) = crate::global::SESSIONS.rime_id(handle) else {
+                        ui_log(&format!("vkbd: key ks={ks} 会话 {handle} 已失效"));
+                        continue;
+                    };
+                    // 优先交给外壳：内联预编辑与光标锚点都在外壳的按键链上，
+                    // core 自己喂 librime 会让预编辑窗失联、候选窗飘走。
+                    if crate::capi::shell_handle_key(handle, ks, mask) {
+                        ui_log(&format!("vkbd: 已转交外壳 ks={ks}"));
+                        continue;
+                    }
+                    let Ok(eng) = engine() else { continue };
+                    let committed = {
+                        let _g = crate::global::OP_LOCK.lock().unwrap();
+                        let _ = eng.process_key(rime_id, ks, mask);
+                        eng.get_commit(rime_id).ok()
+                    };
+                    ui_log(&format!("vkbd: key ks={ks} rime={rime_id} commit={committed:?}"));
+                    if let Some(t) = committed {
+                        if !t.is_empty() {
+                            commit_tool_text(&t);
+                        }
+                    }
+                    // 让候选窗跟上：用上次 Sync 记下的光标锚点重画一次
+                    let _ = tx.send(UiCmd::Sync {
+                        rime_id,
+                        x: last_x.get(),
+                        y: last_y.get(),
+                        top: last_caret_top.get(),
+                    });
                 }
                 UiCmd::ToggleExpand => {
                     if !*visible.borrow() {
@@ -6778,6 +7389,14 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 msw2.window().dispatch_event(event);
                 return;
             }
+            if tag == 5 {
+                if !vkbd.visible.get() {
+                    return;
+                }
+                let event = scale_pointer_event(event, scale);
+                msw5.window().dispatch_event(event);
+                return;
+            }
             if tag == 3 || tag == 4 {
                 // tag 3 = 符号窗（panes[1]），tag 4 = 表情窗（panes[0]）
                 let pane_idx = if tag == 4 { 0usize } else { 1usize };
@@ -6871,6 +7490,8 @@ fn ui_thread_main(rx: Receiver<UiCmd>, tx: Sender<UiCmd>) {
                 pane.draw(&mut backend, sheet.as_ref());
             }
         }
+        // 3b-3. 软键盘（长驻，可见才绘制）
+        vkbd.draw(&mut backend);
 
         // 3c. 气泡到期恢复：有输入上下文 → 重建横条；否则藏窗（不误杀打字中的候选）
         if let Some(deadline) = hint_deadline.get() {
