@@ -150,8 +150,10 @@ fi
 P="$STAGING/Contents/Info.plist"
 plutil -convert xml1 "$P"
 /usr/bin/perl -pi -e "s/im\\.rime\\.inputmethod\\.Squirrel/$DEV_ID/g" "$P"
-$PB -c "Set :InputMethodConnectionName im_heng_inputmethod_Squirrel_dev_Connection" "$P"
-$PB -c "Set :CFBundleName SquirrelDev" "$P"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName 衡Dev" "$P" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 衡Dev" "$P" 2>/dev/null || true
+$PB -c "Set :InputMethodConnectionName im_heng_inputmethod_Heng_dev_Connection" "$P"
+$PB -c "Set :CFBundleName 衡Dev" "$P"
 $PB -c "Add :HengRimeUserDirName string Rime-dev" "$P" 2>/dev/null || $PB -c "Set :HengRimeUserDirName Rime-dev" "$P"
 
 # 1.2 app 级输入法键（上游缺，见文件头「关键约束 2」）
@@ -270,8 +272,14 @@ if [[ "$(security find-identity -v -p codesigning 2>/dev/null | grep -cF "$SIGN_
   codesign --force --deep -s "$SIGN_IDENTITY" --entitlements "$ENTITLEMENTS" "$STAGING" 2>/dev/null \
     && echo "  signed: $SIGN_IDENTITY"
 else
-  codesign --force --deep -s - --entitlements "$ENTITLEMENTS" "$STAGING" 2>/dev/null
-  echo "  ⚠️ 未找到签名身份「$SIGN_IDENTITY」，回退 ad-hoc（TCC 授权每次编译都会失效）"
+  # 绝不回退 ad-hoc：ad-hoc 的 DR 锚 CDHash，每次编译都变，系统会把新版当成
+  # 另一个 app，「屏幕录制 / 输入监控 / 辅助功能」授权全部失效且要重新授权。
+  # 宁可安装失败，也不要悄悄降级。
+  echo "  ❌ 未找到代码签名身份「$SIGN_IDENTITY」"
+  echo "     可用的签名身份：" >&2
+  security find-identity -v -p codesigning >&2 2>/dev/null || true
+  echo "     修复：security find-identity -v -p codesigning 里挑一个，或用 HENG_SIGN_IDENTITY=xxx 指定" >&2
+  exit 1
 fi
 echo "staging ok"
 echo "  icns    : $(stat -f%z "$STAGING/Contents/Resources/Rime.icns") bytes"
@@ -333,4 +341,19 @@ if [ -f "$PROBE_SRC" ]; then
   fi
 fi
 
-echo "✅ SquirrelDev ready ($DEV_ID)"
+# 收尾必须把进程拉起来：脚本中途 pkill 过，输入法进程不在时菜单栏的
+# 输入源会整个消失（要手动切换输入法或重启才会回来）。
+if ! pgrep -f "SquirrelDev.app/Contents/MacOS/Squirrel" >/dev/null 2>&1; then
+  for _ in 1 2 3; do
+    open "$APP_DST" >/dev/null 2>&1 || true
+    sleep 0.6
+    pgrep -f "SquirrelDev.app/Contents/MacOS/Squirrel" >/dev/null 2>&1 && break
+  done
+  if pgrep -f "SquirrelDev.app/Contents/MacOS/Squirrel" >/dev/null 2>&1; then
+    echo "  已重新拉起输入法进程"
+  else
+    echo "  ⚠️ 输入法进程未起来，手动: open "$APP_DST""
+  fi
+fi
+
+echo "✅ HengDev ready ($DEV_ID)"
