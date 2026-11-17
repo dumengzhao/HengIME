@@ -125,7 +125,7 @@ index 98a2cd6..de05252 100644
  # for veteran chord-typist
  chord_duration: 0.1  # seconds
 diff --git a/resources/Localizable.xcstrings b/resources/Localizable.xcstrings
-index eb96d08..f1bc58a 100644
+index eb96d08..0b7723c 100644
 --- a/resources/Localizable.xcstrings
 +++ b/resources/Localizable.xcstrings
 @@ -1,6 +1,29 @@
@@ -188,10 +188,33 @@ index eb96d08..f1bc58a 100644
      "Logs..." : {
        "comment" : "Menu item",
        "localizations" : {
-@@ -208,6 +254,29 @@
+@@ -208,6 +254,52 @@
          }
        }
      },
++    "Screenshot" : {
++      "comment" : "Menu item",
++      "localizations" : {
++        "en" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Screenshot"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "截图"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "截圖"
++          }
++        }
++      }
++    },
 +    "Symbols" : {
 +      "comment" : "Menu item",
 +      "localizations" : {
@@ -218,11 +241,51 @@ index eb96d08..f1bc58a 100644
      "Sync user data" : {
        "comment" : "Menu item",
        "localizations" : {
+@@ -225,6 +317,29 @@
+         }
+       }
+     },
++    "Virtual Keyboard" : {
++      "comment" : "Menu item",
++      "localizations" : {
++        "en" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "Virtual Keyboard"
++          }
++        },
++        "zh-Hans" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "软键盘"
++          }
++        },
++        "zh-Hant" : {
++          "stringUnit" : {
++            "state" : "translated",
++            "value" : "軟鍵盤"
++          }
++        }
++      }
++    },
+     "Version [version] is now available" : {
+       "comment" : "Update",
+       "localizations" : {
 diff --git a/sources/BridgingFunctions.swift b/sources/BridgingFunctions.swift
-index 4ce2c7b..162602e 100644
+index 4ce2c7b..43681b9 100644
 --- a/sources/BridgingFunctions.swift
 +++ b/sources/BridgingFunctions.swift
-@@ -18,13 +18,24 @@ typealias RimeSessionId = UInt64
+@@ -4,6 +4,9 @@
+ //
+ //  Created by Leo Liu on 5/11/24.
+ //
++
++import ApplicationServices
++import CoreGraphics
+ //  HengIME 换血：数据源从 librime rime_api 换为 heng_core C ABI。
+ //  本文件保留与数据源无关的通用助手，并新增 heng_* 的 Swift 便捷封装。
+ //
+@@ -18,13 +21,24 @@ typealias RimeSessionId = UInt64
  /// 读取会话选项（heng_get_option）。
  func hengGetOption(_ session: RimeSessionId, _ option: String) -> Bool {
    guard session != 0 else { return false }
@@ -249,7 +312,7 @@ index 4ce2c7b..162602e 100644
  }
  
  /// 取待上屏文本（消费语义）。
-@@ -36,6 +47,19 @@ func hengTakeCommit(_ session: RimeSessionId) -> String? {
+@@ -36,6 +50,19 @@ func hengTakeCommit(_ session: RimeSessionId) -> String? {
    return String(cString: text)
  }
  
@@ -269,7 +332,7 @@ index 4ce2c7b..162602e 100644
  /// 取组合串原始输入（如拼音串）。nil = 无组合。
  func hengGetInput(_ session: RimeSessionId) -> String? {
    guard session != 0 else { return nil }
-@@ -104,3 +128,36 @@ extension NSPoint {
+@@ -104,3 +131,144 @@ extension NSPoint {
      sqrt(pow(self.x, 2) + pow(self.y, 2))
    }
  }
@@ -306,12 +369,120 @@ index 4ce2c7b..162602e 100644
 +func hengRegisterCommitHandler() {
 +  heng_set_commit_handler(commitCallback, nil)
 +}
++
++// MARK: - 软键盘按键转交
++
++/// core 收到软键盘点击后回调这里。外壳必须按「真实按键」处理
++/// （processKey + rimeUpdate），内联预编辑、光标锚点、候选窗定位都挂在那条链上。
++private let softKeyCallback: @convention(c) (UnsafeMutableRawPointer?, UInt64, Int32, Int32) -> Void = {
++  _, session, ks, mask in
++  DispatchQueue.main.async {
++    NotificationCenter.default.post(
++      name: .hengSoftKey, object: nil,
++      userInfo: ["session": session, "ks": ks, "mask": mask])
++  }
++}
++
++extension Notification.Name {
++  static let hengSoftKey = Notification.Name("HengSoftKey")
++}
++
++/// 软键盘功能键 → 合成真实按键事件。字符键仍走 processKey，不经过这里。
++enum SoftKey {
++  /// X keysym → macOS 虚拟键码
++  private static let keycodes: [Int32: CGKeyCode] = [
++    0xFF0D: 36,   // return
++    0xFF8D: 76,   // 小键盘 enter
++    0xFF08: 51,   // delete（退格）
++    0xFFFF: 117,  // forward delete
++    0xFF51: 123,  // ←
++    0xFF52: 126,  // ↑
++    0xFF53: 125,  // ↓
++    0xFF54: 124,  // →
++    0xFF09: 48,   // tab
++    0xFF1B: 53,   // esc
++    0xFF50: 115,  // home
++    0xFF57: 119,  // end
++    0xFF55: 116,  // page up
++    0xFF56: 121,  // page down
++  ]
++
++  /// 可打印 ASCII → 键码（US 布局），组合键要靠它合成带修饰的按键
++  private static let charKeycodes: [Int32: CGKeyCode] = {
++    var m: [Int32: CGKeyCode] = [:]
++    let table: [(Character, CGKeyCode)] = [
++      ("a", 0), ("s", 1), ("d", 2), ("f", 3), ("h", 4), ("g", 5), ("z", 6),
++      ("x", 7), ("c", 8), ("v", 9), ("b", 11), ("q", 12), ("w", 13), ("e", 14),
++      ("r", 15), ("y", 16), ("t", 17), ("1", 18), ("2", 19), ("3", 20), ("4", 21),
++      ("6", 22), ("5", 23), ("=", 24), ("9", 25), ("7", 26), ("-", 27), ("8", 28),
++      ("0", 29), ("]", 30), ("o", 31), ("u", 32), ("[", 33), ("i", 34), ("p", 35),
++      ("l", 37), ("j", 38), ("'", 39), ("k", 40), (";", 41), (",", 43),
++      ("/", 44), ("n", 45), ("m", 46), (".", 47), (" ", 49),
++    ]
++    for (c, code) in table {
++      if let ascii = c.asciiValue { m[Int32(ascii)] = code }
++    }
++    return m
++  }()
++
++  /// 组合键（⌃/⌥/⌘ + 字符）→ 合成带修饰的真实按键；成功返回 true
++  static func postCombo(_ ks: Int32, mask: Int32) -> Bool {
++    let mods = mask & ((1 << 2) | (1 << 3) | (1 << 6))
++    guard mods != 0, AXIsProcessTrusted() else { return false }
++    var lower = ks
++    if lower >= 65 && lower <= 90 { lower += 32 }
++    guard let code = charKeycodes[lower] ?? keycodes[ks] else { return false }
++    HengWindowRenderer.log("COMBO ks=\(ks) mask=\(mask) code=\(code)")
++    var flags: CGEventFlags = []
++    if mods & (1 << 2) != 0 { flags.insert(.maskControl) }
++    if mods & (1 << 3) != 0 { flags.insert(.maskAlternate) }
++    if mods & (1 << 6) != 0 { flags.insert(.maskCommand) }
++    let src = CGEventSource(stateID: .combinedSessionState)
++    guard let down = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: true),
++          let up = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: false)
++    else { return false }
++    down.flags = flags
++    up.flags = flags
++    down.post(tap: .cgAnnotatedSessionEventTap)
++    up.post(tap: .cgAnnotatedSessionEventTap)
++    return true
++  }
++
++  /// 固定组合键（如 ⇧⌘4）
++  static func postShortcut(keycode: CGKeyCode, flags: CGEventFlags) {
++    let src = CGEventSource(stateID: .combinedSessionState)
++    guard let down = CGEvent(keyboardEventSource: src, virtualKey: keycode, keyDown: true),
++          let up = CGEvent(keyboardEventSource: src, virtualKey: keycode, keyDown: false)
++    else { return }
++    down.flags = flags
++    up.flags = flags
++    down.post(tap: .cgAnnotatedSessionEventTap)
++    up.post(tap: .cgAnnotatedSessionEventTap)
++  }
++
++  /// 返回 true = 已投递（调用方不要再处理这个键）
++  static func post(_ ks: Int32) -> Bool {
++    guard let code = keycodes[ks], AXIsProcessTrusted() else { return false }
++    let src = CGEventSource(stateID: .combinedSessionState)
++    guard let down = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: true),
++          let up = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: false)
++    else { return false }
++    down.post(tap: .cgAnnotatedSessionEventTap)
++    up.post(tap: .cgAnnotatedSessionEventTap)
++    return true
++  }
++}
++
++/// 注册软键盘按键回调（进程级，只需一次）。幂等。
++func hengRegisterKeyHandler() {
++  heng_set_key_handler(softKeyCallback, nil)
++}
 diff --git a/sources/HengWindowRenderer.swift b/sources/HengWindowRenderer.swift
 new file mode 100644
-index 0000000..73a36d9
+index 0000000..97eb459
 --- /dev/null
 +++ b/sources/HengWindowRenderer.swift
-@@ -0,0 +1,742 @@
+@@ -0,0 +1,1018 @@
 +//
 +//  HengWindowRenderer.swift
 +//  Squirrel
@@ -348,6 +519,7 @@ index 0000000..73a36d9
 +    case letters = 2    // 顶部字母区
 +    case tools = 3      // 符号窗口（长驻、nonactivating）
 +    case emoji = 4      // 表情窗口（长驻、nonactivating，与符号窗独立）
++    case vkbd = 5       // 软键盘（长驻、nonactivating）
 +  }
 +
 +  /// 操作类型，与 core 的 op 参数一一对应
@@ -476,6 +648,10 @@ index 0000000..73a36d9
 +      geo = (Int(p[0]), Int(p[1]), Int(p[2]), Int(p[3]))
 +    }
 +    let lw = Int(logicalW), lh = Int(logicalH)
++    let tEntry = CFAbsoluteTimeGetCurrent()
++    if win == Win.vkbd.rawValue && op != Op.blit {
++      Self.log("VKBD handle op=\(op) t=\(tEntry)")
++    }
 +
 +    DispatchQueue.main.async {
 +      defer { copy?.deallocate() }
@@ -532,6 +708,7 @@ index 0000000..73a36d9
 +      installMouseTracking()
 +
 +    case Op.show:
++      let tShow = CFAbsoluteTimeGetCurrent()
 +      let panel = ensurePanel(win)
 +      noteFront(win)
 +      installMouseTracking()
@@ -602,7 +779,14 @@ index 0000000..73a36d9
 +        }
 +      }
 +
++      if win == Win.vkbd.rawValue {
++        Self.log("VKBD show-cost \(Int((CFAbsoluteTimeGetCurrent() - tShow) * 1000))ms visible=\(panel.isVisible) onSpace=\(panel.isOnActiveSpace)")
++      }
++
 +    case Op.hide:
++      if win == Win.vkbd.rawValue {
++        Self.log("VKBD hide t=\(CFAbsoluteTimeGetCurrent())")
++      }
 +      panels[win]?.orderOut(nil)
 +
 +    case Op.blit:
@@ -692,7 +876,7 @@ index 0000000..73a36d9
 +    // ===== 候选窗/工具窗要能点选，必须显式开这两项 =====
 +    // nonactivatingPanel 默认 ignoresMouseEvents = true，点它等于点穿到下层应用，
 +    // 候选格/符号格永远收不到点击。设置窗是 .borderless 不受影响。
-+    if kind == .candidate || kind == .tools || kind == .emoji {
++    if kind == .candidate || kind == .tools || kind == .emoji || kind == .vkbd {
 +      panel.ignoresMouseEvents = false
 +      // 不激活也能收点击：候选窗是 nonactivatingPanel，点击它不应抢走
 +      // 宿主应用（TextEdit 等）的键盘焦点，否则用户点一下候选词就丢了编辑焦点。
@@ -941,7 +1125,7 @@ index 0000000..73a36d9
 +    let loc = NSEvent.mouseLocation
 +    let all = [
 +      Win.candidate.rawValue, Win.settings.rawValue,
-+      Win.tools.rawValue, Win.emoji.rawValue
++      Win.tools.rawValue, Win.emoji.rawValue, Win.vkbd.rawValue
 +    ]
 +    var order = zOrder
 +    order.append(contentsOf: all.filter { !zOrder.contains($0) })
@@ -1054,6 +1238,269 @@ index 0000000..73a36d9
 +  override var canBecomeKey: Bool { false }
 +  override var canBecomeMain: Bool { false }
 +}
++
++// MARK: - 区域截图（自绘覆盖窗）
++
++/// 覆盖窗专用：无边框窗口默认不能成为 key，拿不到键盘事件（Esc 就失效了）。
++final class OverlayWindow: NSWindow {
++  override var canBecomeKey: Bool { true }
++  override var canBecomeMain: Bool { true }
++}
++
++/// 全屏覆盖窗：拖拽选区、四角四边缩放、Esc/右键/✕ 取消、回车确认。
++/// 安全约束：必须永远能退出——Esc、右键、右上角 ✕、3 分钟看门狗。
++final class ScreenshotOverlay: NSObject {
++  static let shared = ScreenshotOverlay()
++
++  private var windows: [NSWindow] = []
++  private var active = false
++  private var watchdog: Timer?
++
++  var isActive: Bool { active }
++
++  func begin() {
++    guard !active else { return }
++    active = true
++    for screen in NSScreen.screens {
++      let win = OverlayWindow(
++        contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
++      win.level = .init(Int(CGShieldingWindowLevel()))
++      win.backgroundColor = .clear
++      win.isOpaque = false
++      win.hasShadow = false
++      win.ignoresMouseEvents = false
++      win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
++      win.isReleasedWhenClosed = false
++      let view = SelectionView(frame: NSRect(origin: .zero, size: screen.frame.size))
++      view.onCancel = { [weak self] in self?.cancel() }
++      view.onConfirm = { [weak self] rect, owner in self?.capture(rect, from: owner) }
++      win.contentView = view
++      win.makeKeyAndOrderFront(nil)
++      windows.append(win)
++    }
++    NSApp.activate(ignoringOtherApps: true)
++    windows.first?.makeKey()
++    windows.first?.makeFirstResponder(windows.first?.contentView)
++    watchdog = Timer.scheduledTimer(withTimeInterval: 180, repeats: false) { [weak self] _ in
++      self?.cancel()
++    }
++  }
++
++  private func close() {
++    watchdog?.invalidate()
++    watchdog = nil
++    for w in windows {
++      w.orderOut(nil)
++      w.contentView = nil
++    }
++    windows.removeAll()
++    active = false
++  }
++
++  func cancel() {
++    guard active else { return }
++    close()
++  }
++
++  private func capture(_ rect: NSRect, from view: NSView) {
++    guard active, let screen = view.window?.screen else { cancel(); return }
++    let frame = screen.frame
++    let globalBL = NSPoint(x: frame.origin.x + rect.origin.x, y: frame.origin.y + rect.origin.y)
++    let mainH = CGDisplayBounds(CGMainDisplayID()).height
++    let x = Int(globalBL.x.rounded())
++    let y = Int((mainH - globalBL.y - rect.height).rounded())
++    let w = max(1, Int(rect.width.rounded()))
++    let h = max(1, Int(rect.height.rounded()))
++    close()  // 先撤遮罩，避免把遮罩拍进去
++    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
++      let tmp = NSTemporaryDirectory() + "heng-shot.png"
++      try? FileManager.default.removeItem(atPath: tmp)
++      let task = Process()
++      task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
++      task.arguments = ["-x", "-R", "\(x),\(y),\(w),\(h)", tmp]
++      do { try task.run() } catch { NSSound.beep(); return }
++      task.waitUntilExit()
++      guard let data = try? Data(contentsOf: URL(fileURLWithPath: tmp)) else {
++        NSSound.beep()
++        return
++      }
++      if let img = NSImage(data: data) {
++        let pb = NSPasteboard.general
++        pb.clearContents()
++        pb.writeObjects([img])
++      }
++      let df = DateFormatter()
++      df.dateFormat = "yyyyMMdd-HHmmss"
++      let dst = FileManager.default.homeDirectoryForCurrentUser
++        .appendingPathComponent("Desktop/衡截图-\(df.string(from: Date())).png")
++      try? FileManager.default.moveItem(at: URL(fileURLWithPath: tmp), to: dst)
++    }
++  }
++}
++
++/// 选区视图：遮罩 + 选区 + 8 个缩放把手 + 尺寸标签 + 提示条 + ✕
++final class SelectionView: NSView {
++  var onCancel: (() -> Void)?
++  var onConfirm: ((NSRect, NSView) -> Void)?
++
++  private var sel: NSRect = .zero
++  private var dragging = false
++  private var dragStart: NSPoint = .zero
++  private var resizeHandle: Int = -1
++  private var moveStart: NSPoint = .zero
++  private var moveOrigin: NSRect = .zero
++
++  override var acceptsFirstResponder: Bool { true }
++  override func becomeFirstResponder() -> Bool { true }
++
++  private var closeBox: NSRect {
++    NSRect(x: bounds.maxX - 56, y: bounds.maxY - 56, width: 40, height: 40)
++  }
++
++  private func handles() -> [NSRect] {
++    guard sel.width > 2, sel.height > 2 else { return [] }
++    let s: CGFloat = 8
++    let r = sel
++    let pts = [
++      NSPoint(x: r.minX, y: r.maxY), NSPoint(x: r.midX, y: r.maxY), NSPoint(x: r.maxX, y: r.maxY),
++      NSPoint(x: r.minX, y: r.midY), NSPoint(x: r.maxX, y: r.midY),
++      NSPoint(x: r.minX, y: r.minY), NSPoint(x: r.midX, y: r.minY), NSPoint(x: r.maxX, y: r.minY),
++    ]
++    return pts.map { NSRect(x: $0.x - s / 2, y: $0.y - s / 2, width: s, height: s) }
++  }
++
++  override func mouseDown(with event: NSEvent) {
++    let p = convert(event.locationInWindow, from: nil)
++    if closeBox.contains(p) { onCancel?(); return }
++    for (i, hnd) in handles().enumerated() where hnd.insetBy(dx: -4, dy: -4).contains(p) {
++      resizeHandle = i
++      moveStart = p
++      moveOrigin = sel
++      return
++    }
++    if sel.contains(p) {
++      resizeHandle = 8
++      moveStart = p
++      moveOrigin = sel
++      return
++    }
++    resizeHandle = -1
++    dragging = true
++    dragStart = p
++    sel = NSRect(origin: p, size: .zero)
++    needsDisplay = true
++  }
++
++  override func mouseDragged(with event: NSEvent) {
++    let p = convert(event.locationInWindow, from: nil)
++    if resizeHandle == -1, dragging {
++      sel = NSRect(
++        x: min(dragStart.x, p.x), y: min(dragStart.y, p.y),
++        width: abs(p.x - dragStart.x), height: abs(p.y - dragStart.y))
++    } else if resizeHandle == 8 {
++      sel = moveOrigin.offsetBy(dx: p.x - moveStart.x, dy: p.y - moveStart.y)
++    } else if resizeHandle >= 0 {
++      var r = moveOrigin
++      let dx = p.x - moveStart.x
++      let dy = p.y - moveStart.y
++      switch resizeHandle {
++      case 0: r.origin.x += dx; r.size.width -= dx; r.size.height += dy
++      case 1: r.size.height += dy
++      case 2: r.size.width += dx; r.size.height += dy
++      case 3: r.origin.x += dx; r.size.width -= dx
++      case 4: r.size.width += dx
++      case 5: r.origin.x += dx; r.size.width -= dx; r.origin.y += dy; r.size.height -= dy
++      case 6: r.origin.y += dy; r.size.height -= dy
++      case 7: r.size.width += dx; r.origin.y += dy; r.size.height -= dy
++      default: break
++      }
++      if r.size.width > 1, r.size.height > 1 { sel = r }
++    }
++    needsDisplay = true
++  }
++
++  override func mouseUp(with event: NSEvent) {
++    dragging = false
++    resizeHandle = -1
++    if sel.width < 4 || sel.height < 4 { sel = .zero }
++    needsDisplay = true
++  }
++
++  override func rightMouseDown(with event: NSEvent) { onCancel?() }
++
++  override func keyDown(with event: NSEvent) {
++    switch event.keyCode {
++    case 53: onCancel?()
++    case 36, 76: if sel.width > 4, sel.height > 4 { onConfirm?(sel, self) }
++    default: super.keyDown(with: event)
++    }
++  }
++
++  override func cancelOperation(_ sender: Any?) { onCancel?() }
++
++  override func draw(_ dirtyRect: NSRect) {
++    let mask = NSColor.black.withAlphaComponent(0.45)
++    mask.setFill()
++    bounds.fill()
++    if sel.width > 1, sel.height > 1 {
++      // 选区四块挖空（不用混合模式，避免依赖图层合成）
++      NSColor.clear.setFill()
++      NSRect(x: 0, y: 0, width: bounds.width, height: sel.minY).fill()
++      NSRect(x: 0, y: sel.maxY, width: bounds.width, height: bounds.maxY - sel.maxY).fill()
++      NSRect(x: 0, y: sel.minY, width: sel.minX, height: sel.height).fill()
++      NSRect(x: sel.maxX, y: sel.minY, width: bounds.maxX - sel.maxX, height: sel.height).fill()
++
++      NSColor.white.setStroke()
++      let border = NSBezierPath(rect: sel)
++      border.lineWidth = 1
++      border.stroke()
++      NSColor.white.setFill()
++      for hnd in handles() { hnd.fill() }
++
++      let label = "\(Int(sel.width)) × \(Int(sel.height))"
++      let attrs: [NSAttributedString.Key: Any] = [
++        .font: NSFont.systemFont(ofSize: 12, weight: .medium),
++        .foregroundColor: NSColor.white,
++      ]
++      let size = (label as NSString).size(withAttributes: attrs)
++      var lx = sel.midX - size.width / 2
++      var ly = sel.maxY + 6
++      if ly + size.height > bounds.maxY { ly = sel.minY - size.height - 6 }
++      lx = min(max(lx, bounds.minX + 4), bounds.maxX - size.width - 4)
++      if ly < bounds.minY { ly = bounds.minY + 4 }
++      let box = NSRect(x: lx - 6, y: ly - 2, width: size.width + 12, height: size.height + 4)
++      NSColor.black.withAlphaComponent(0.6).setFill()
++      NSBezierPath(roundedRect: box, xRadius: 3, yRadius: 3).fill()
++      (label as NSString).draw(at: NSPoint(x: lx, y: ly), withAttributes: attrs)
++    }
++
++    let hint = "拖动选区 · 回车确认 · Esc / 右键取消"
++    let attrs: [NSAttributedString.Key: Any] = [
++      .font: NSFont.systemFont(ofSize: 13),
++      .foregroundColor: NSColor.white,
++    ]
++    let hs = (hint as NSString).size(withAttributes: attrs)
++    let hx = bounds.midX - hs.width / 2
++    let hy = bounds.maxY - 44
++    NSColor.black.withAlphaComponent(0.55).setFill()
++    NSBezierPath(
++      roundedRect: NSRect(x: hx - 10, y: hy - 6, width: hs.width + 20, height: hs.height + 12),
++      xRadius: 6, yRadius: 6
++    ).fill()
++    (hint as NSString).draw(at: NSPoint(x: hx, y: hy), withAttributes: attrs)
++
++    NSColor.black.withAlphaComponent(0.55).setFill()
++    NSBezierPath(ovalIn: closeBox).fill()
++    let xa: [NSAttributedString.Key: Any] = [
++      .font: NSFont.systemFont(ofSize: 18, weight: .semibold),
++      .foregroundColor: NSColor.white,
++    ]
++    let xs = ("✕" as NSString).size(withAttributes: xa)
++    ("✕" as NSString).draw(
++      at: NSPoint(x: closeBox.midX - xs.width / 2, y: closeBox.midY - xs.height / 2),
++      withAttributes: xa)
++  }
++}
 diff --git a/sources/SquirrelApplicationDelegate.swift b/sources/SquirrelApplicationDelegate.swift
 index 896d8d2..5d68fea 100644
 --- a/sources/SquirrelApplicationDelegate.swift
@@ -1146,10 +1593,10 @@ index 896d8d2..5d68fea 100644
      let sharedPath = Bundle.main.sharedSupportPath ?? ""
      let userPath = SquirrelApp.userDir.path
 diff --git a/sources/SquirrelInputController.swift b/sources/SquirrelInputController.swift
-index f09e8ab..890016f 100644
+index f09e8ab..c86f161 100644
 --- a/sources/SquirrelInputController.swift
 +++ b/sources/SquirrelInputController.swift
-@@ -15,14 +15,123 @@ final class SquirrelInputController: IMKInputController {
+@@ -15,14 +15,227 @@ final class SquirrelInputController: IMKInputController {
    private static let keyRollOver = 50
    private static var unknownAppCnt: UInt = 0
  
@@ -1160,6 +1607,110 @@ index f09e8ab..890016f 100644
 +  // 点击从主线程发给 core UI 线程后，core 要跨两轮循环才产出 commit，
 +  // 比主线程的下一轮晚约 9ms，所以在 mouseUp 里取必定取空（实测 nil）。
 +  // core 在文本就绪的同一刻回调，时序天然正确。
++  /// 软键盘点击：core 转交过来，按真实按键处理（内联预编辑 / 光标锚点同一条链）
++  private func observeSoftKeyboard() {
++    softKeyObserver = NotificationCenter.default.addObserver(
++      forName: .hengSoftKey, object: nil, queue: .main
++    ) { [weak self] note in
++      guard let self,
++            let s = note.userInfo?["session"] as? UInt64,
++            let ks = note.userInfo?["ks"] as? Int32,
++            let mask = note.userInfo?["mask"] as? Int32 else { return }
++      // 会话号对不上（换输入框后旧 session 已销毁、或激活顺序错位）时，
++      // 投给最近激活的控制器，避免软键盘整片失效。
++      guard s == self.session || self === Self.lastActive else { return }
++      // 键盘自带功能键：截屏 / 中英（-6 / -8，由 core 下发）
++      if ks == -6 {
++        // 自绘覆盖窗：拖拽选区 / 缩放把手 / 回车确认 / Esc·右键·✕ 取消
++        ScreenshotOverlay.shared.begin()
++        return
++      }
++      if ks == -8 {
++        hengSetOption(self.session, "ascii_mode", !hengGetOption(self.session, "ascii_mode"))
++        self.rimeUpdate()
++        return
++      }
++      // 带 ⌃/⌥/⌘ 的按键：合成带修饰的真实按键（⌘C、⌃A 等组合才到得了宿主）
++      if SoftKey.postCombo(ks, mask: mask) { return }
++      // ⇪ 打开时与物理 CapsLock 同语义：不组字、直接把大写字母送到宿主，
++      // 否则 rime 会把它当普通字母起一次组字，候选窗就冒出来了。
++      if mask & (1 << 1) != 0, let scalar = UnicodeScalar(UInt32(ks)),
++         (65...90).contains(ks) || (97...122).contains(ks) {
++        client?.insertText(
++          String(Character(scalar)).uppercased(),
++          replacementRange: NSRange(location: NSNotFound, length: 0))
++        return
++      }
++      // 功能键（回车/退格/删除/方向/翻页…）合成一次真实按键事件：完整走
++      // 「键盘事件 → IME → 宿主」链路，组字、上屏、光标移动与物理键盘一致。
++      if SoftKey.post(ks) { return }
++      let handled = self.processKey(UInt32(bitPattern: ks), modifiers: UInt32(bitPattern: mask))
++      self.rimeUpdate()
++      // 软键盘没法像物理键那样「返回 false 交回宿主」，rime 不吃的键要自己转成
++      // 标准编辑命令，否则 Del / 方向键 / Tab 这类到了这里就静默消失。
++      if !handled && self.preedit.isEmpty {
++        self.dispatchUnhandledKey(ks)
++      }
++    }
++  }
++
++  /// rime 没消费的功能键 → 走 IMK 标准编辑命令交给宿主
++  private func dispatchUnhandledKey(_ ks: Int32) {
++    if !softKeyTrustLogged {
++      softKeyTrustLogged = true
++      HengWindowRenderer.log("SOFTKEY trusted=\(AXIsProcessTrusted())")
++    }
++    guard let client else { return }
++    let sel: Selector?
++    switch ks {
++    case 0xFFFF: sel = Selector(("deleteForward:"))
++    case 0xFF08: sel = Selector(("deleteBackward:"))
++    case 0xFF51: sel = Selector(("moveLeft:"))
++    case 0xFF52: sel = Selector(("moveUp:"))
++    case 0xFF53: sel = Selector(("moveDown:"))
++    case 0xFF54: sel = Selector(("moveRight:"))
++    case 0xFF09: sel = Selector(("insertTab:"))
++    case 0xFF0D: sel = Selector(("insertNewline:"))
++    case 0xFF1B: sel = Selector(("cancelOperation:"))
++    case 0xFF50: sel = Selector(("moveToBeginningOfLine:"))
++    case 0xFF57: sel = Selector(("moveToEndOfLine:"))
++    case 0xFF55: sel = Selector(("pageUp:"))
++    case 0xFF56: sel = Selector(("pageDown:"))
++    // Ins 在 macOS 上没有对应编辑命令；原来映射成 insertText: 并传 nil，
++    // 会把输入上下文搞坏（之后退格、插入全失效），这里直接不处理。
++    default: sel = nil
++    }
++    if sel == nil {
++      // 可打印 ASCII（数字行、符号、字母）：rime 没消费就直接插入字符
++      let printable = ks >= 0x20 && ks <= 0x7E
++      HengWindowRenderer.log("SOFTKEY dispatch ks=\(ks) printable=\(printable) client=\(client != nil)")
++      if printable, let scalar = UnicodeScalar(UInt32(ks)) {
++        client.insertText(
++          String(Character(scalar)),
++          replacementRange: NSRange(location: NSNotFound, length: 0))
++        HengWindowRenderer.log("SOFTKEY inserted '\(Character(scalar))'")
++      }
++      return
++    }
++    guard let sel else { return }
++    // AppKit 文本视图：走 NSTextInputClient 的标准命令通路（不需要辅助功能权限）
++    if let tic = client as? NSTextInputClient {
++      tic.doCommand(by: sel)
++      if ks == 0xFF0D {
++        client.insertText("\u{000A}", replacementRange: NSRange(location: NSNotFound, length: 0))
++      }
++      return
++    }
++    let obj = client as AnyObject
++    if obj.responds(to: sel) {
++      obj.perform(sel, with: nil)
++    }
++    // 回车/制表符再补一手纯文本插入：部分宿主只认这个
++    let none = NSRange(location: NSNotFound, length: 0)
++    if ks == 0xFF0D { client.insertText("\u{000A}", replacementRange: none) }
++    if ks == 0xFF09 { client.insertText("\u{0009}", replacementRange: none) }
++  }
++
 +  private func observeCandidateClick() {
 +    candidateClickObserver = NotificationCenter.default.addObserver(
 +      forName: .hengCoreCommitReady, object: nil, queue: .main
@@ -1273,7 +1824,7 @@ index f09e8ab..890016f 100644
    private var inlineCandidate = false
    private var chordKeyCodes: [UInt32] = .init(repeating: 0, count: SquirrelInputController.keyRollOver)
    private var chordModifiers: [UInt32] = .init(repeating: 0, count: SquirrelInputController.keyRollOver)
-@@ -30,6 +139,15 @@ final class SquirrelInputController: IMKInputController {
+@@ -30,6 +243,17 @@ final class SquirrelInputController: IMKInputController {
    private var chordTimer: Timer?
    private var chordDuration: TimeInterval = 0
    private var currentApp: String = ""
@@ -1286,10 +1837,12 @@ index f09e8ab..890016f 100644
 +  /// 点选候选后由 HengWindowRenderer 派发：core UI 线程已处理完点击，
 +  /// 此时取走上屏文本。点击路径没有按键事件伴随，不靠 rimeUpdate 触发。
 +  private var candidateClickObserver: NSObjectProtocol?
++  private var softKeyObserver: NSObjectProtocol?
++  private var softKeyTrustLogged = false
  
    // swiftlint:disable:next cyclomatic_complexity
    override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
-@@ -96,8 +214,42 @@ final class SquirrelInputController: IMKInputController {
+@@ -96,8 +320,42 @@ final class SquirrelInputController: IMKInputController {
        rimeUpdate()
  
      case .keyDown:
@@ -1333,7 +1886,7 @@ index f09e8ab..890016f 100644
          break
        }
  
-@@ -112,7 +264,7 @@ final class SquirrelInputController: IMKInputController {
+@@ -112,7 +370,7 @@ final class SquirrelInputController: IMKInputController {
          let rimeKeycode = SquirrelKeycode.osxKeycodeToRime(keycode: keyCode, keychar: char,
                                                             shift: modifiers.contains(.shift),
                                                             caps: modifiers.contains(.capsLock))
@@ -1342,7 +1895,7 @@ index f09e8ab..890016f 100644
            let rimeModifiers = SquirrelKeycode.osxModifiersToRime(modifiers: modifiers)
            handled = processKey(rimeKeycode, modifiers: rimeModifiers)
            rimeUpdate()
-@@ -163,7 +315,10 @@ final class SquirrelInputController: IMKInputController {
+@@ -163,7 +421,10 @@ final class SquirrelInputController: IMKInputController {
    }
  
    override func recognizedEvents(_ sender: Any!) -> Int {
@@ -1354,7 +1907,7 @@ index f09e8ab..890016f 100644
    }
  
    // 方向键不走 handle(event)：client 把它们绑定为 NSResponder action（moveLeft: 等）
-@@ -183,11 +338,23 @@ final class SquirrelInputController: IMKInputController {
+@@ -183,11 +444,27 @@ final class SquirrelInputController: IMKInputController {
          return true
        }
      }
@@ -1366,9 +1919,13 @@ index f09e8ab..890016f 100644
    }
  
    override func activateServer(_ sender: Any!) {
++    Self.lastActive = self
      self.client ?= sender as? IMKTextInput
 +    // 工具窗（表情/符号）上屏按焦点会话投递：core 只认「最近用过的会话」，
 +    // 焦点换到别的应用后字符会落到上一处。会话句柄只有壳侧有。
++    // 会话是惰性创建的（第一次按键才建）。软键盘的上屏依赖「当前焦点会话」，
++    // 只点软键盘不打字时这里还是 0 → 键全部落空。激活时就建好。
++    if session == 0 { createSession() }
 +    if session != 0 { heng_ui_set_active_session(session) }
 +    // 焦点落下时就把前台 app 记好：`recognizedEvents` 不认领按键时
 +    // handle() 可能一次都不被调用，事件层接管那边只能靠这里维护的 currentApp。
@@ -1379,7 +1936,7 @@ index f09e8ab..890016f 100644
      var keyboardLayout = NSApp.squirrelAppDelegate.config?.getString("keyboard_layout") ?? ""
      if keyboardLayout == "last" || keyboardLayout == "" {
        keyboardLayout = ""
-@@ -211,6 +378,8 @@ final class SquirrelInputController: IMKInputController {
+@@ -211,6 +488,8 @@ final class SquirrelInputController: IMKInputController {
        lastModifiers.remove(.capsLock)
      }
      preedit = ""
@@ -1388,16 +1945,18 @@ index f09e8ab..890016f 100644
      if session != 0 {
        let state = hengGetOption(session, "ascii_mode")
        let label = hengStateLabel(session, "ascii_mode", state, abbreviated: true)
-@@ -222,6 +391,8 @@ final class SquirrelInputController: IMKInputController {
+@@ -222,6 +501,10 @@ final class SquirrelInputController: IMKInputController {
      self.client = client as? IMKTextInput
      super.init(server: server, delegate: delegate, client: client)
      createSession()
 +    observeCandidateClick()
 +    hengRegisterCommitHandler()
++    hengRegisterKeyHandler()
++    observeSoftKeyboard()
  
      NotificationCenter.default.addObserver(
        forName: .init("SquirrelSetASCIIModeNotification"),
-@@ -241,16 +412,180 @@ final class SquirrelInputController: IMKInputController {
+@@ -241,16 +524,180 @@ final class SquirrelInputController: IMKInputController {
    }
  
    override func deactivateServer(_ sender: Any!) {
@@ -1579,7 +2138,7 @@ index f09e8ab..890016f 100644
    override func commitComposition(_ sender: Any!) {
      self.client ?= sender as? IMKTextInput
      if session != 0 {
-@@ -261,56 +596,62 @@ final class SquirrelInputController: IMKInputController {
+@@ -261,54 +708,76 @@ final class SquirrelInputController: IMKInputController {
      }
    }
  
@@ -1606,6 +2165,12 @@ index f09e8ab..890016f 100644
 +    let symbols = NSMenuItem(title: NSLocalizedString("Symbols", comment: "Menu item"),
 +                             action: #selector(openSymbols), keyEquivalent: "")
 +    symbols.target = self
++    let vkbdItem = NSMenuItem(title: NSLocalizedString("Virtual Keyboard", comment: "Menu item"),
++                              action: #selector(toggleVkbd), keyEquivalent: "")
++    vkbdItem.target = self
++    let shotItem = NSMenuItem(title: NSLocalizedString("Screenshot", comment: "Menu item"),
++                              action: #selector(takeScreenshot), keyEquivalent: "")
++    shotItem.target = self
 +
 +    let setting = NSMenuItem(title: NSLocalizedString("Settings...", comment: "Menu item"),
 +                             action: #selector(openSettings), keyEquivalent: "")
@@ -1628,6 +2193,8 @@ index f09e8ab..890016f 100644
 -    menu.addItem(wiki)
 +    menu.addItem(emoji)
 +    menu.addItem(symbols)
++    menu.addItem(vkbdItem)
++    menu.addItem(shotItem)
 +    menu.addItem(about)
      menu.addItem(update)
  
@@ -1654,32 +2221,41 @@ index f09e8ab..890016f 100644
  
 -  @objc func openRimeFolder() {
 -    NSApp.squirrelAppDelegate.openRimeFolder()
++  @objc func toggleVkbd() {
++    _ = heng_vkbd_toggle()
+   }
+ 
+-  @objc func checkForUpdates() {
+-    NSApp.squirrelAppDelegate.checkForUpdates()
++  @objc func takeScreenshot() {
++    ScreenshotOverlay.shared.begin()
++  }
++
 +  @objc func openAbout() {
 +    _ = heng_settings_show(SettingsPage.about.rawValue)
    }
  
-   @objc func checkForUpdates() {
-     NSApp.squirrelAppDelegate.checkForUpdates()
-   }
- 
 -  @objc func openWiki() {
 -    NSApp.squirrelAppDelegate.openWiki()
--  }
--
-   private(set) var specialCommentIndices: [ReservedPropertyKey: Set<Int>] = [:]
++  @objc func checkForUpdates() {
++    NSApp.squirrelAppDelegate.checkForUpdates()
+   }
  
-   func handleReservedProperty(key rawKey: String, value rawValue: String, for sessionId: RimeSessionId) throws(ReservedPropertyError) {
-@@ -328,6 +669,9 @@ final class SquirrelInputController: IMKInputController {
+   private(set) var specialCommentIndices: [ReservedPropertyKey: Set<Int>] = [:]
+@@ -328,6 +797,12 @@ final class SquirrelInputController: IMKInputController {
    }
  
    deinit {
 +    if let obs = candidateClickObserver {
 +      NotificationCenter.default.removeObserver(obs)
 +    }
++    if let obs = softKeyObserver {
++      NotificationCenter.default.removeObserver(obs)
++    }
      destroySession()
    }
  }
-@@ -387,12 +731,17 @@ private extension SquirrelInputController {
+@@ -387,12 +862,17 @@ private extension SquirrelInputController {
        return "UnknownApp\(SquirrelInputController.unknownAppCnt)"
      }()
      print("createSession: \(app)")
@@ -1697,7 +2273,7 @@ index f09e8ab..890016f 100644
      }
    }
  
-@@ -402,11 +751,12 @@ private extension SquirrelInputController {
+@@ -402,11 +882,12 @@ private extension SquirrelInputController {
      }
      // v6 行为统一层：app_options 与选项初值由 core 在 set_session_owner 时统一应用，
      // 外壳不再自行读取/下发（与 Windows/Linux 外壳一致）。
@@ -1711,7 +2287,7 @@ index f09e8ab..890016f 100644
        heng_end_session(session)
        session = 0
      }
-@@ -417,7 +767,20 @@ private extension SquirrelInputController {
+@@ -417,7 +898,20 @@ private extension SquirrelInputController {
      // 注：不再同步 _linear/_vertical 到 core。这两个原版 Squirrel 的 UI 提示选项
      // 会让 librime 把方向键路由到组合串光标移动，破坏 key_binder 的
      // Left→Up / Right→Down 候选切换（与 Windows 端行为统一的关键）。
@@ -1732,7 +2308,7 @@ index f09e8ab..890016f 100644
  
      if !handled {
        let isVimBackInCommandMode = rimeKeycode == XK_Escape || ((rimeModifiers & kControlMask.rawValue != 0) && (rimeKeycode == XK_c || rimeKeycode == XK_C || rimeKeycode == XK_bracketleft))
-@@ -446,10 +809,19 @@ private extension SquirrelInputController {
+@@ -446,10 +940,19 @@ private extension SquirrelInputController {
      if let text = hengTakeCommit(session) {
        commit(string: text)
      }
@@ -1752,7 +2328,7 @@ index f09e8ab..890016f 100644
      if clearReservedComments {
        specialCommentIndices = [:]
      }
-@@ -457,24 +829,31 @@ private extension SquirrelInputController {
+@@ -457,24 +960,31 @@ private extension SquirrelInputController {
  
      var status = HengStatus()
      status.data_size = Int32(MemoryLayout<HengStatus>.size)
@@ -1788,7 +2364,7 @@ index f09e8ab..890016f 100644
  
        let start = stringIndex(utf8Offset: Int(ctx.sel_start), in: preedit)
        let end = stringIndex(utf8Offset: Int(ctx.sel_end), in: preedit)
-@@ -554,17 +933,23 @@ private extension SquirrelInputController {
+@@ -554,17 +1064,23 @@ private extension SquirrelInputController {
        let lastPage = ctx.is_last_page != 0
  
        let selRange = NSRange(location: start.utf16Offset(in: preedit), length: preedit.utf16.distance(from: start, to: end))
@@ -1816,7 +2392,7 @@ index f09e8ab..890016f 100644
  
      let forceMarkedText =
        session != 0 &&
-@@ -583,13 +968,61 @@ private extension SquirrelInputController {
+@@ -583,13 +1099,61 @@ private extension SquirrelInputController {
      }
  
      client.insertText(string, replacementRange: .empty)
@@ -1880,7 +2456,7 @@ index f09e8ab..890016f 100644
        return
      }
  
-@@ -597,6 +1030,18 @@ private extension SquirrelInputController {
+@@ -597,6 +1161,18 @@ private extension SquirrelInputController {
      self.caretPos = caretPos
      self.selRange = selRange
  
