@@ -499,6 +499,29 @@ pub extern "C" fn heng_commit_text(session: HengSession, out: *mut *mut c_char) 
     })
 }
 
+/// 合成候选（原样上屏 / 手误纠正）不走 librime 选词：
+/// 纠错项直接上屏它的文本，原样项提交当前输入串。
+fn handle_synthetic_candidate(
+    engine: &crate::engine::Engine,
+    rime_id: crate::engine::RimeSessionId,
+    index: usize,
+) -> Option<c_int> {
+    let snap = engine.get_context(rime_id).ok()?;
+    let c = snap.candidates.get(index)?;
+    if !(c.fallback || c.commit_text.is_some()) {
+        return None;
+    }
+    if let Some(t) = c.commit_text.clone() {
+        let _ = engine.clear_composition(rime_id);
+        if let Some(h) = SESSIONS.handle_of(rime_id) {
+            crate::ui::emit_commit(h, &t);
+        }
+        return Some(HENG_TRUE);
+    }
+    let _ = engine.commit_composition(rime_id);
+    Some(HENG_TRUE)
+}
+
 /// 选中当前页第 index 个候选（0 基）。
 #[no_mangle]
 pub extern "C" fn heng_select_candidate_on_current_page(session: HengSession, index: c_int) -> c_int {
@@ -518,7 +541,10 @@ pub extern "C" fn heng_select_candidate_on_current_page(session: HengSession, in
             return HENG_FALSE;
         };
         let _guard = crate::global::OP_LOCK.lock().unwrap();
-        match engine.select_candidate_on_current_page(rime_id, index as usize) {
+        if let Some(r) = handle_synthetic_candidate(engine, rime_id, index as usize) {
+            return r;
+        }
+        match engine.select_candidate_any(rime_id, index as usize, false) {
             Ok(done) => done as c_int,
             Err(e) => {
                 set_err(e);
@@ -1405,7 +1431,10 @@ pub extern "C" fn heng_ui_click_candidate(session: HengSession, index: c_int) ->
             return HENG_FALSE;
         };
         let _guard = crate::global::OP_LOCK.lock().unwrap();
-        match engine.select_candidate_global(rime_id, index as usize) {
+        if let Some(r) = handle_synthetic_candidate(engine, rime_id, index as usize) {
+            return r;
+        }
+        match engine.select_candidate_any(rime_id, index as usize, true) {
             Ok(true) => HENG_TRUE,
             Ok(false) => HENG_FALSE,
             Err(e) => {
@@ -2234,14 +2263,20 @@ fn ui_nav_key(
                         // 内联同步选词（横条锚定菜单第一页，高亮序号
                         // 即全局序号）：commit 由本次调用方直接取走，
                         // 不能走异步 BarSelect（会错过本轮响应）
-                        let _ = engine.select_candidate_global(rime_id, hl.max(0) as usize);
+                        let idx = hl.max(0) as usize;
+                        if handle_synthetic_candidate(engine, rime_id, idx).is_none() {
+                            let _ = engine.select_candidate_any(rime_id, idx, true);
+                        }
                         ui_nav = true;
                     }
                     c if (0x30..=0x39).contains(&c) => {
                         // 数字键按横条序号选词：'1'-'9' → 0-8，'0' → 9
                         let n = if c == 0x30 { 9 } else { (c - 0x31) as i32 };
                         if n <= bar_last {
-                            let _ = engine.select_candidate_global(rime_id, n.max(0) as usize);
+                            let idx = n.max(0) as usize;
+                            if handle_synthetic_candidate(engine, rime_id, idx).is_none() {
+                                let _ = engine.select_candidate_any(rime_id, idx, true);
+                            }
                             ui_nav = true;
                         }
                         // 超出横条词数：不拦，交给 librime（页内选词）

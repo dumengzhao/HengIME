@@ -235,7 +235,7 @@ pub fn forget_active_session(handle: u64) {
 ///
 /// 回调在 UI 线程同步执行，外壳实现里只应做「投递」而非阻塞操作
 /// （Windows 上真正上屏要经 TSF 回到宿主进程，weasel 侧实现为post 消息）。
-fn emit_commit(handle: u64, text: &str) {
+pub(crate) fn emit_commit(handle: u64, text: &str) {
     let handler = COMMIT_HANDLER.lock().unwrap();
     if let Some((cb, ctx)) = *handler {
         drop(handler); // 解锁后再调：回调里可能反向调 core（重入）
@@ -4238,6 +4238,17 @@ fn set_bar_cells(
             snapshot.page_no * snapshot.page_size.max(1),
         ),
     };
+    // 引擎完全给不出候选（比如 "ix"）：用快照里的合成候选补齐
+    // （「原样上屏」+ 手误纠正出来的字），否则横条是个空窗。
+    if texts.is_empty() {
+        texts = snapshot
+            .candidates
+            .iter()
+            .filter(|c| !c.text.is_empty())
+            .take(10)
+            .map(|c| c.text.clone())
+            .collect();
+    }
     bar_base.set(base);
     let weasel_inline = crate::settings::Settings::new(engine)
         .get_path(crate::settings::PATCH_WEASEL, "style/inline_preedit")

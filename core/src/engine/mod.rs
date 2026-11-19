@@ -54,6 +54,12 @@ pub struct EngineConfig {
 pub struct Candidate {
     pub text: String,
     pub comment: Option<String>,
+    /// 引擎给不出候选时补的「原样上屏」项，选中即提交当前输入串
+    #[serde(default, skip_serializing)]
+    pub fallback: bool,
+    /// 纠错候选：选中后直接把这段文本上屏（不经过 librime 选词）
+    #[serde(default, skip_serializing)]
+    pub commit_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -114,6 +120,9 @@ pub struct Engine {
     user_data_dir: std::path::PathBuf,
     /// 共享数据目录（雾凇拼音配置、词表）。工具面板的数据源从这里静态直读。
     shared_data_dir: Option<std::path::PathBuf>,
+    /// 手误纠正结果缓存（输入串 → 合成候选）。同一串只探测一次，
+    /// 否则每次 get_context 都会开一堆临时会话。
+    typo_cache: std::sync::Mutex<Option<(String, Vec<Candidate>)>>,
 }
 
 unsafe impl Send for Engine {}
@@ -167,6 +176,34 @@ impl Engine {
         traits.app_name = app_name.as_ptr();
         traits.min_log_level = config.min_log_level;
 
+        // rime-ice 的 corrector（错音纠正）、emoji、日期等能力全部依赖 librime-lua 插件。
+        // 插件是独立 dylib，必须在 setup 之前 dlopen 进来（它靠构造器注册组件），
+        // 否则所有 lua_* 组件静默缺失 —— 表现为打错拼音完全没有候选。
+        #[cfg(target_os = "macos")]
+        unsafe fn load_rime_plugins() {
+            use std::ffi::CString;
+            use std::os::raw::{c_char, c_int, c_void};
+            extern "C" {
+                fn dlopen(path: *const c_char, flag: c_int) -> *mut c_void;
+            }
+            const RTLD_NOW: c_int = 2;
+            const RTLD_GLOBAL: c_int = 8;
+            let Ok(exe) = std::env::current_exe() else { return };
+            let Some(contents) = exe.parent().and_then(|p| p.parent()) else { return };
+            let dir = contents.join("Frameworks/rime-plugins");
+            for name in ["librime-lua.dylib"] {
+                let path = dir.join(name);
+                let Some(p) = path.to_str() else { continue };
+                if let Ok(c) = CString::new(p) {
+                    let _ = dlopen(c.as_ptr(), RTLD_NOW | RTLD_GLOBAL);
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            load_rime_plugins();
+        }
+
         unsafe {
             setup(&mut traits);
             set_notification_handler(Some(on_notify), std::ptr::null_mut());
@@ -193,6 +230,7 @@ impl Engine {
             api: api as *const rime_ffi::RimeApi,
             user_data_dir: config.user_data_dir,
             shared_data_dir: config.shared_data_dir,
+            typo_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -243,6 +281,21 @@ impl Engine {
             // 正是"需要别人词库"的时刻。钩子内部自带间隔闸与未配置短路，
             // 轻拉取在后台线程执行且不碰 librime，对本调用零阻塞。
             crate::sync::notify_session_started();
+        })
+    }
+
+    /// 探测专用会话：不触发 [`crate::sync::notify_session_started`]。
+    /// （手误纠正一次要开好几个临时会话，走普通入口会反复触发同步钩子）
+    fn create_session_quiet(&self) -> Option<Session<'_>> {
+        let create = self.api().create_session.as_ref()?;
+        let id = unsafe { create() };
+        if id == 0 {
+            return None;
+        }
+        Some(Session {
+            engine: self,
+            id,
+            closed: false,
         })
     }
 
@@ -323,6 +376,15 @@ impl Engine {
     }
 
     pub fn get_context(&self, id: RimeSessionId) -> Result<ContextSnapshot, EngineError> {
+        let mut snap = self.context_raw(id)?;
+        // 只剩「原样上屏」说明整串拼音都翻译不出来（如 ix）：试着按手误纠正
+        if snap.candidates.len() == 1 && snap.candidates[0].fallback {
+            self.fill_typo_candidates(&mut snap, id);
+        }
+        Ok(snap)
+    }
+
+    fn context_raw(&self, id: RimeSessionId) -> Result<ContextSnapshot, EngineError> {
         let api = self.api();
         let get_context = api
             .get_context
@@ -341,6 +403,67 @@ impl Engine {
             free_context(&mut ctx);
             Ok(snapshot)
         }
+    }
+
+    /// 手误纠正：对完全翻译不出来的输入做一次编辑距离变换，用临时会话探测结果。
+    fn fill_typo_candidates(&self, snap: &mut ContextSnapshot, id: RimeSessionId) {
+        let input = snap.preedit.trim().to_string();
+        if input.is_empty() || input.len() > 24 { return; }
+        if !input.chars().all(|c| c.is_ascii_alphabetic() || c == ' ') { return; }
+        let Ok(status) = self.get_status(id) else { return };
+        let schema_id = status.schema_id;
+        let cache_key = format!("{schema_id}\u{1}{input}");
+        // 同一串只算一次：get_context 会被调用得很频繁
+        if let Ok(guard) = self.typo_cache.lock() {
+            if let Some((key, cached)) = guard.as_ref() {
+                if *key == cache_key {
+                    snap.candidates.extend(cached.iter().cloned());
+                    return;
+                }
+            }
+        }
+        let mut seen: std::collections::HashSet<String> =
+            snap.candidates.iter().map(|c| c.text.clone()).collect();
+        let mut generated: Vec<Candidate> = Vec::new();
+        for variant in typo_variants(&input) {
+            for cand in self.probe_variant(&schema_id, &variant, 3) {
+                if !seen.insert(cand.text.clone()) { continue; }
+                let text = cand.text.clone();
+                generated.push(Candidate {
+                    text,
+                    comment: Some(variant.clone()),
+                    fallback: false,
+                    commit_text: Some(cand.text),
+                });
+                if generated.len() >= 4 { break; }
+            }
+            if generated.len() >= 4 { break; }
+        }
+        snap.candidates.extend(generated.iter().cloned());
+        if let Ok(mut guard) = self.typo_cache.lock() {
+            *guard = Some((cache_key, generated));
+        }
+    }
+
+    /// 在临时会话里跑一遍候选拼音串（同一个方案），避免污染当前会话
+    fn probe_variant(&self, schema_id: &str, keys: &str, limit: usize) -> Vec<Candidate> {
+        let Some(sess) = self.create_session_quiet() else { return Vec::new() };
+        let sid = sess.rime_id();
+        if let Some(sel) = self.api().select_schema.as_ref() {
+            let Ok(c) = CString::new(schema_id) else { return Vec::new() };
+            if unsafe { sel(sid, c.as_ptr()) } == rime_ffi::FALSE {
+                return Vec::new();
+            }
+        }
+        for ch in keys.chars() {
+            let _ = self.process_key(sid, ch as i32, 0);
+        }
+        let Ok(snap) = self.context_raw(sid) else { return Vec::new() };
+        snap.candidates
+            .into_iter()
+            .filter(|c| !c.text.is_empty())
+            .take(limit)
+            .collect()
     }
 
     /// 取回并消费已产生的上屏文本。空字符串表示本次调用无上屏内容。
@@ -547,6 +670,25 @@ impl Engine {
     }
 
     /// 按全局序号选候选（跨页）：翻到目标页后在页内选中。
+    /// 选候选；当候选列表里只有「原样上屏」兜底项时，直接提交当前输入串。
+    pub fn select_candidate_any(
+        &self,
+        id: RimeSessionId,
+        index: usize,
+        global: bool,
+    ) -> Result<bool, EngineError> {
+        if let Ok(snap) = self.get_context(id) {
+            if snap.candidates.len() == 1 && snap.candidates[0].fallback {
+                return self.commit_composition(id);
+            }
+        }
+        if global {
+            self.select_candidate_global(id, index)
+        } else {
+            self.select_candidate_on_current_page(id, index)
+        }
+    }
+
     pub fn select_candidate_global(
         &self,
         id: RimeSessionId,
@@ -884,6 +1026,8 @@ impl Engine {
                 candidates.push(Candidate {
                     text: cstr_to_string((*c).text).unwrap_or_default(),
                     comment: cstr_to_string((*c).comment),
+                    fallback: false,
+                    commit_text: None,
                 });
             }
         }
@@ -902,8 +1046,20 @@ impl Engine {
             }
         }
 
+        let preedit = cstr_to_string(composition.preedit).unwrap_or_default();
+        // 输入串完全没法翻译（比如 "ix"）时，至少给一个「原样上屏」，
+        // 否则候选窗会整个消失，用户以为输入法没反应。
+        if candidates.is_empty() && !preedit.is_empty() {
+            candidates.push(Candidate {
+                text: preedit.clone(),
+                comment: Some("原样上屏".to_string()),
+                fallback: true,
+                commit_text: None,
+            });
+        }
+
         ContextSnapshot {
-            preedit: cstr_to_string(composition.preedit).unwrap_or_default(),
+            preedit,
             cursor_pos: composition.cursor_pos,
             sel_start: composition.sel_start,
             sel_end: composition.sel_end,
@@ -981,4 +1137,71 @@ impl Drop for Session<'_> {
             self.closed = true;
         }
     }
+}
+
+// ---- 手误纠正用的编辑距离变换 ----
+
+/// QWERTY 相邻键（用于按键打偏的替换）
+fn key_neighbors(c: char) -> &'static [char] {
+    match c {
+        'q' => &['w', 'a'],
+        'w' => &['q', 'e', 's'],
+        'e' => &['w', 'r', 'd'],
+        'r' => &['e', 't', 'f'],
+        't' => &['r', 'y', 'g'],
+        'y' => &['t', 'u', 'h'],
+        'u' => &['y', 'i', 'j'],
+        'i' => &['u', 'o', 'k'],
+        'o' => &['i', 'p', 'l'],
+        'p' => &['o'],
+        'a' => &['q', 'w', 's', 'z'],
+        's' => &['a', 'w', 'e', 'd', 'x', 'z'],
+        'd' => &['s', 'e', 'r', 'f', 'c', 'x'],
+        'f' => &['d', 'r', 't', 'g', 'v', 'c'],
+        'g' => &['f', 't', 'y', 'h', 'b', 'v'],
+        'h' => &['g', 'y', 'u', 'j', 'n', 'b'],
+        'j' => &['h', 'u', 'i', 'k', 'm', 'n'],
+        'k' => &['j', 'i', 'o', 'l', 'm'],
+        'l' => &['k', 'o', 'p'],
+        'z' => &['a', 's', 'x'],
+        'x' => &['z', 's', 'd', 'c'],
+        'c' => &['x', 'd', 'f', 'v'],
+        'v' => &['c', 'f', 'g', 'b'],
+        'b' => &['v', 'g', 'h', 'n'],
+        'n' => &['b', 'h', 'j', 'm'],
+        'm' => &['n', 'j', 'k'],
+        _ => &[],
+    }
+}
+
+/// 生成手误候选串：相邻换位 / 漏键 / 打偏。按"最可能是手误"的顺序排。
+fn typo_variants(input: &str) -> Vec<String> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |v: Vec<char>, out: &mut Vec<String>| {
+        let s: String = v.into_iter().collect();
+        if !out.contains(&s) { out.push(s); }
+    };
+    // 1. 相邻换位（ix → xi）
+    for i in 0..chars.len().saturating_sub(1) {
+        let mut v = chars.clone();
+        v.swap(i, i + 1);
+        push(v, &mut out);
+    }
+    // 2. 漏键：删掉一个字母
+    for i in 0..chars.len() {
+        let mut v = chars.clone();
+        v.remove(i);
+        push(v, &mut out);
+    }
+    // 3. 打偏：替换成相邻键
+    for (i, ch) in chars.iter().enumerate() {
+        for n in key_neighbors(*ch) {
+            let mut v = chars.clone();
+            v[i] = *n;
+            push(v, &mut out);
+        }
+    }
+    out.truncate(10);
+    out
 }

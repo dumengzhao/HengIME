@@ -147,6 +147,17 @@ if [ -n "$NEWEST_SRC" ]; then
   exit 1
 fi
 /usr/bin/ditto "$APP_SRC" "$STAGING"
+
+# Rime 方案补丁：仓库里的 patches/rime/rime-ice.schema.yaml 才是真相源，
+# 但 Xcode 从 third_party/src/squirrel/data/plum/ 拷（且该目录被 gitignore）。
+# 这里在签名前把补丁版同步进 staging，避免"改了补丁但装上去的是上游旧版"。
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -f "$REPO_ROOT/runtime/rime-shared/rime_ice.schema.yaml" ]; then
+  /usr/bin/ditto \
+    "$REPO_ROOT/runtime/rime-shared/rime_ice.schema.yaml" \
+    "$STAGING/Contents/SharedSupport/rime_ice.schema.yaml" && echo "  rime_ice.schema.yaml 已同步（来自 patches）"
+fi
+
 P="$STAGING/Contents/Info.plist"
 plutil -convert xml1 "$P"
 /usr/bin/perl -pi -e "s/im\\.rime\\.inputmethod\\.Squirrel/$DEV_ID/g" "$P"
