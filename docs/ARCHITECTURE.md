@@ -136,6 +136,74 @@ UIKit、ArkUI），外壳经 `heng_get_context` 取候选快照后填入；`heng
 这三项的配置文件是 `config-center/shared/heng.yaml`，由 `config-center/deploy.sh`
 分发，Engine 启动时自动部署进 staging。**外壳不实现任何一项。**
 
+### 3.3 软键盘的按键投递
+
+软键盘窗口由 core 自绘（`VkbdWindow`，与候选窗同一套软件渲染 + 分层贴帧），
+窗口样式带 `NOACTIVATE`：点击不改变前台窗口，用户正在输入的应用保持前台。
+按键有两条投递通路：
+
+| 平台 | 通路 | 实现 |
+|---|---|---|
+| Windows | 系统输入队列 | `win_backend::send_key` 以 `SendInput` 注入虚拟键事件（按下/释放成对，修饰键按需按下与释放），事件落到前台应用，宿主输入法按普通按键处理 |
+| macOS | 外壳按键回调 | `heng_set_key_handler` 注册的回调，按键喂进外壳自己的 `ProcessKeyEvent` 链 |
+
+两条通路都让按键经过宿主侧的输入法，于是预编辑显示在输入框内、上屏插在光标处、
+候选窗锚点取自宿主的真实光标。core 在本进程喂 librime 得到的是 core 内部的组合，
+宿主收不到任何输入法状态：候选窗停在另一个应用留下的旧光标位置，上屏文本也没有
+可插入的位置。
+
+注入的是虚拟键而非字符：`KEYEVENTF_UNICODE` 到宿主时是 `VK_PACKET`，输入法不参与，
+中文打不出来。布局反查用 `VkKeyScanW`，扫描码用 `MapVirtualKeyW`；字母键的 Shift
+位按 `GetKeyState(VK_CAPITAL)` 取反，否则系统 CapsLock 开着时 `VK_A` 无 Shift 会出 `A`。
+
+中英切换改的是会话的 `ascii_mode` 选项（`heng_set_option`，按传播策略广播），
+不是一次按键：软键盘与宿主之间没有回执，送一次 Shift 单击要等宿主处理完、外壳
+再 sync 回来才知道新状态，这中间键帽与标点显示都还是旧的。改完当场按 rime 的
+`punctuator/full_shape` 首项刷新标点键帽：中文模式下 `[` 显示「、`]` 显示 」、
+`\` 显示 、，英文模式下恢复 ASCII 标签。送出的键码不变，上屏字符仍由 rime 的
+punctuator 决定。没有可用会话时只改显示，下一次 sync 以 rime 的状态为准覆盖回来。
+
+切换的取值是会话当前的 `ascii_mode`（`heng_get_option`），不是本地标记取反：
+`ascii_mode` 会持久化到 `heng_options.yaml`，而 UI 线程新起时本地标记是默认值，
+两者可能相反，照本地翻会出现「点「中」反而变英文」。
+
+窗口拖动带：非键区域一律交给系统做窗口移动（`WM_NCHITTEST` 返回 `HTCAPTION`），
+键区与右上角 ✕ 返回 `HTCLIENT` 交给 Slint。键矩形按布局常量算出
+（`x = 8 + k.x*11`、`y = 34 + k.y*47 + (k.y>0 ? 14 : 0)`、`w = k.w*11 - 3`、
+`h = k.h*47 - 3`，逻辑像素），刷新键帽时一并发布给窗口过程；键矩形尚未发布时整窗
+返回 `HTCLIENT`，避免把键当成拖动带导致键盘点不动。
+
+修饰键行按平台分两套排列：Windows 是 `Ctrl Win Alt … Alt Win`，Win 在 Ctrl 与 Alt
+之间；macOS 是 `Ctrl Option Command … Command Option`。锁存（键帽高亮、下一个键拼接
+修饰位）在 Windows 上只给 Ctrl 与 Alt，Win 走普通键通路（`0xFFEB` → `VK_LWIN`
+按下/释放）：一次点击就是一次 Win 敲击，弹出开始菜单，不会把后续字符拼成 Win
+组合键。macOS 的 Command 仍需锁存，`⌘⇧4` 这类组合靠它按出来。
+
+目标进程完整性级别高于服务进程时（例如管理员终端），`SendInput` 被 UIPI 丢弃，
+`heng-ui.log` 记录实际发出条数。
+
+### 3.4 区域截图（Windows 外壳）
+
+菜单「截图」的区域截图不经过 core：Windows 侧在 `WeaselServerApp.cpp` 的 `shot`
+命名空间，macOS 侧是 squirrel 补丁里的 `ScreenshotOverlay`，两端各持有一份覆盖窗。
+core 只提供同进程的候选窗与工具窗，不参与截屏。
+
+覆盖窗先用 `GetDC(NULL)` + `BitBlt` 冻结整块虚拟屏幕（`CAPTUREBLT` 让分层窗口也进
+图），再以 `WS_EX_TOOLWINDOW | WS_EX_TOPMOST` 的 `WS_POPUP` 铺满。压暗层在建窗时
+一次生成：1×1 黑色位图经 `AlphaBlend` 的常量 alpha 拉伸铺满整屏。拖动时每帧把压暗
+版铺进合成缓冲、选区按原亮度盖回、画 2px 边框与尺寸标签，最后一次 `BitBlt` 贴到
+窗口 DC；合成缓冲或压暗层建不出来时分别退回直接画窗口 DC 与用原图铺底。
+
+松开鼠标即完成：选区以 24 位 `CF_DIB` 进剪贴板（32 位 DIB 的全零 alpha 会被多数
+接收方当透明图），并由 GDI+ 编码 PNG 存到 `桌面\衡截图-<年月日-时分秒>.png`；
+右键或 Esc 取消，选区小于 4px 按误触丢弃。
+
+菜单命令经命名管道在 IPC 的 IO 线程上派发，那条线程处理完一次命令就结束，线程
+退出连带着销毁它创建的窗口（`WM_DESTROY` 也不再投递）。`shot::request()` 因此
+把命令以 `RegisterWindowMessage` 投递到主线程的消息窗 `heng_shot_host`，由主线程
+建窗并泵消息。抓屏失败时（远程桌面无显示面、会话锁屏等）不显示覆盖窗，命令直接
+返回，`%TEMP%\heng-shot.log` 记录每一步的返回值。
+
 ---
 
 ## 4. 候选窗视觉

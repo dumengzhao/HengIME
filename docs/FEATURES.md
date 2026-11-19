@@ -69,8 +69,9 @@
 | 5 | 服务（服务生命周期 / 数据与部署 / 目录与诊断） | 🟡 进程级动作待真机验证 |
 | 6 | 同步（状态卡 / 启用开关 / 立即同步 / 退出登录） | ✅ 账号录入走 CLI |
 | 7 | 关于（版本 / ABI / 目录信息） | ✅ |
-| — | 托盘与语言栏菜单（设置 / 表情 / 符号 / 关于 / 检查更新）：两处各有一份资源（`WeaselServer.exe` 与 `weaselx64.dll`），内容相同；均只保留简体中文一份，不随系统语言变化 | ✅ |
-| — | macOS 菜单（设置 / 表情 / 符号 / 关于 / 检查更新）：本地化在 squirrel 补丁的 Localizable.xcstrings（中英简繁）；表情/符号窗与 Windows 共用 core 的同一套实现 | ✅ |
+| — | 托盘与语言栏菜单（设置 / 表情 / 符号 / 软键盘 / 截图 / 关于 / 检查更新）：两处各有一份资源（`WeaselServer.exe` 与 `weaselx64.dll`），内容相同；均只保留简体中文一份，不随系统语言变化 | ✅ |
+| — | 区域截图（菜单「截图」）：冻结整屏后拖选，松开即把选区放进剪贴板并另存 `桌面\衡截图-<年月日-时分秒>.png`；右键或 Esc 取消。实现在 Windows 外壳（`WeaselServerApp.cpp`），与 macOS 外壳的 `ScreenshotOverlay` 对应 | 🟡 代码完成，画面未验（会话无显示面时抓屏失败会直接放弃） |
+| — | macOS 菜单（设置 / 表情 / 符号 / 软键盘 / 截图 / 关于 / 检查更新）：本地化在 squirrel 补丁的 Localizable.xcstrings（中英简繁）；表情/符号窗与 Windows 共用 core 的同一套实现，截图由外壳自绘 | ✅ |
 
 ## 4. 账号与服务端（✅ core + 服务端；移动端接入同源 C ABI）
 
@@ -92,9 +93,9 @@
 
 | 端 | 宿主 | 候选窗 | 键盘 UI | 状态 | 剩余工作 |
 |---|---|---|---|---|---|
-| Windows | TSF（Weasel 改造） | core 自绘（Win32 分层窗口） | 不需要（物理键盘） | 🟡 可用 | 补丁固化；正式版从未编译过 |
-| Linux | Fcitx5 addon | core 自绘（X11/XWayland） | 不需要（物理键盘） | 🟡 可用 | 光标跟随 / DirtyRegion 局部刷新 / addon 集成收尾 |
-| macOS | IMK（Squirrel 改造） | core 自绘（NSPanel 贴帧） | 不需要（物理键盘） | 🟡 可用 | — |
+| Windows | TSF（Weasel 改造） | core 自绘（Win32 分层窗口） | core 自绘软键盘（托盘与语言栏菜单「软键盘」） | 🟡 可用 | 补丁固化；正式版从未编译过 |
+| Linux | Fcitx5 addon | core 自绘（X11/XWayland） | 未接入（X11 后端无软键盘窗口槽） | 🟡 可用 | 光标跟随 / DirtyRegion 局部刷新 / addon 集成收尾；软键盘窗口槽 |
+| macOS | IMK（Squirrel 改造） | core 自绘（NSPanel 贴帧） | core 自绘软键盘（菜单「软键盘」） | 🟡 可用 | — |
 | Android | IMS | Android 原生 View | Android 原生 View / Compose | ⬜ | librime + heng-core aarch64 交叉编译；JNI 桥接层；IMS 骨架 + 单线程调度器；26 键布局 + 候选栏 |
 | iOS | Custom Keyboard Extension | UIKit 原生 | UIKit / SwiftUI 原生 | ⬜ | librime + heng-core aarch64 交叉编译；Apple Developer 账号（$99/年）；Extension 直接链 C 静态库，无需 JNI |
 | 鸿蒙 | IME Kit | ArkUI 原生 | ArkUI 原生 | ⬜ | librime + heng-core aarch64 交叉编译；NAPI 桥接层；Panel + ArkUI 键盘布局 |

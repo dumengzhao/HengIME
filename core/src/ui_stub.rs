@@ -17,8 +17,8 @@ use crate::engine::RimeSessionId;
 pub type CommitHandler = extern "C" fn(ctx: *mut core::ffi::c_void, session: u64, text: *const u8);
 pub type ServiceHandler = extern "C" fn(ctx: *mut core::ffi::c_void, action: i32);
 
-pub static PENDING_UI_COMMITS: LazyLock<Mutex<std::collections::HashMap<u64, String>>> =
-    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+pub static PENDING_UI_COMMITS: LazyLock<Mutex<Vec<(u64, String)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 pub static SERVICE_HANDLER: LazyLock<Mutex<Option<(ServiceHandler, usize)>>> =
     LazyLock::new(|| Mutex::new(None));
 pub static COMMIT_HANDLER: LazyLock<Mutex<Option<(CommitHandler, usize)>>> =

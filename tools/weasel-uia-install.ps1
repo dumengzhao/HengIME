@@ -14,6 +14,9 @@
 #   .\tools\weasel-uia-install.ps1 -Dev            # 装 output-dev\，自动补清单与签名，
 #                                                  # 并把 dev 词库搬进目标目录
 #   .\tools\weasel-uia-install.ps1 -CoreOnly       # 只换 heng_core.dll 并重启服务
+#   .\tools\weasel-uia-install.ps1 -CoreOnly -RimeDll third_party\src\librime-src\dist\lib\rime.dll
+#                                                  # 同时换引擎 rime.dll，并清掉已编译词库
+#                                                  # 让下次部署重新编译词典
 #   .\tools\weasel-uia-install.ps1 -CertPath .\heng-uia.cer   # 首次导证书
 #   .\tools\weasel-uia-install.ps1 -Uninstall
 param(
@@ -21,6 +24,7 @@ param(
     [string]$Target = 'C:\Program Files\HengIME',
     [string]$CertPath,
     [string]$Thumbprint,
+    [string]$RimeDll,
     [switch]$SkipCert,
     [switch]$NoAutostart,
     [switch]$CoreOnly,
@@ -86,9 +90,11 @@ function Clear-LockedTarget([string]$path) {
 }
 
 function Sweep-Parked([string]$dir) {
-    Get-ChildItem $dir -Filter '*.old*' -ErrorAction SilentlyContinue | ForEach-Object {
-        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-    }
+    # 残留有两种后缀：本脚本的 .old<时分秒>，以及 unlock-tsf.bat 的 .parked<随机数>。
+    # 后者每次改名都会先删自己的同名残留，删不掉（仍被映射）时就会一份份堆下来。
+    Get-ChildItem $dir -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '\.(old|parked)\d*$' } |
+        ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
 }
 
 if ($Uninstall) {
@@ -112,6 +118,36 @@ if ($CoreOnly) {
     Clear-LockedTarget $targetCore
     Copy-Item $srcCore $targetCore -Force
     Write-Host "[OK] 已更新 $targetCore"
+
+    # 换引擎：build 目录下的 *.bin 是词典编译产物，换 dll 后必须清掉重编。
+    # 被映射的 dll 不能覆盖但能改名，改名后由服务重新加载。
+    if ($RimeDll) {
+        if (-not (Test-Path $RimeDll)) { Write-Host "[FAIL] 找不到 $RimeDll"; exit 1 }
+        $srcHash = (Get-FileHash $RimeDll -Algorithm MD5).Hash
+        $dstPath = Join-Path $Target 'rime.dll'
+        $dstHash = if (Test-Path $dstPath) { (Get-FileHash $dstPath -Algorithm MD5).Hash } else { '' }
+        if ($srcHash -eq $dstHash) {
+            Write-Host '[i] rime.dll 已是同一份，跳过替换与词库重编'
+        } else {
+            $parkedRime = Join-Path $Target ('rime.dll.bak-' + (Get-Date -Format 'MMddHHmm'))
+            if (Test-Path $dstPath) {
+                try { [System.IO.File]::Move($dstPath, $parkedRime) }
+                catch { Write-Host "[FAIL] 旧 rime.dll 改名失败：$($_.Exception.Message)"; exit 1 }
+            }
+            Copy-Item $RimeDll $dstPath -Force
+            Write-Host "[OK] 已更新 $dstPath"
+            foreach ($ud in @((Join-Path $env:APPDATA 'Rime'), (Join-Path $env:APPDATA 'Rime-Dev'))) {
+                $build = Join-Path $ud 'build'
+                if (-not (Test-Path $build)) { continue }
+                Get-ChildItem $build -Filter '*.bin' -ErrorAction SilentlyContinue |
+                    ForEach-Object {
+                        try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { }
+                    }
+                Write-Host "[OK] 已清 $build 的编译产物，下次部署重编（含 *.correction.bin）"
+            }
+        }
+    }
+
     Start-Process explorer.exe -ArgumentList "`"$targetExe`""
     Start-Sleep -Seconds 2
     $p = Get-Process -Name WeaselServer -ErrorAction SilentlyContinue |

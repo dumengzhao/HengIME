@@ -48,6 +48,8 @@ EXPORTS
     heng_create
     heng_describe
     heng_destroy
+    heng_emoji_hide
+    heng_emoji_show
     heng_end_session
     heng_free_context
     heng_free_status
@@ -70,6 +72,8 @@ EXPORTS
     heng_select_candidate_on_current_page
     heng_set_caret_pos
     heng_set_commit_handler
+    heng_set_inline_preedit
+    heng_set_key_handler
     heng_set_option
     heng_set_propagation_policy
     heng_set_screen_info
@@ -82,12 +86,8 @@ EXPORTS
     heng_simulate_key_sequence
     heng_start_session
     heng_style_flag
-    heng_emoji_hide
-    heng_emoji_show
     heng_symbols_hide
     heng_symbols_show
-    heng_tools_hide
-    heng_tools_show
     heng_sync_config
     heng_sync_configure
     heng_sync_now
@@ -95,6 +95,8 @@ EXPORTS
     heng_sync_status
     heng_sync_user_data
     heng_take_ui_commit
+    heng_tools_hide
+    heng_tools_show
     heng_ui_click_candidate
     heng_ui_hide
     heng_ui_mode_hint
@@ -104,5 +106,8 @@ EXPORTS
     heng_ui_sync
     heng_ui_sync_ex
     heng_version
+    heng_vkbd_hide
+    heng_vkbd_show
+    heng_vkbd_toggle
     slint_new_path_elements
     slint_new_path_events

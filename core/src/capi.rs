@@ -1078,6 +1078,8 @@ pub type KeyHandler =
 static KEY_HANDLER: std::sync::Mutex<Option<(KeyHandler, usize)>> = std::sync::Mutex::new(None);
 
 /// UI 线程调用：把按键交给外壳。返回 false = 外壳没注册，调用方自行兜底。
+/// Windows 侧软键盘按键走系统输入队列（见 ui.rs 的 send_key），不经这条回调。
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) fn shell_handle_key(session: u64, keysym: i32, mask: i32) -> bool {
     let cb = match KEY_HANDLER.lock() {
         Ok(g) => *g,
@@ -1512,7 +1514,15 @@ pub extern "C" fn heng_take_ui_commit(session: HengSession, out: *mut *mut c_cha
         }
         unsafe { *out = ptr::null_mut() };
         let mut pend = crate::ui::PENDING_UI_COMMITS.lock().unwrap();
-        if let Some(text) = pend.remove(&session) {
+        // 先按会话找；找不到就退到队首（最老的一条）。软键盘点击时 core 只能
+        // 猜投递目标，猜错会让文本躺在别的会话名下，退队首才能保证取用方
+        // （前台外壳）把它插进当前焦点文档，而不是留下一条永远取不走的记录。
+        let idx = pend
+            .iter()
+            .position(|(h, _)| *h == session)
+            .or(if pend.is_empty() { None } else { Some(0) });
+        if let Some(i) = idx {
+            let (_, text) = pend.remove(i);
             drop(pend);
             if let Ok(c) = CString::new(text) {
                 unsafe { *out = c.into_raw() };
