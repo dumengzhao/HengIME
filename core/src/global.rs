@@ -26,8 +26,15 @@ pub const POLICY_GLOBAL: i32 = 2; // 广播到全部会话
 pub static PROPAGATION_POLICY: AtomicI32 = AtomicI32::new(POLICY_PER_SESSION);
 
 /// 选项应用名单：跨重启记忆 + app_options 初始应用都只走这些选项
-pub const APPLICABLE_OPTIONS: &[&str] =
-    &["ascii_mode", "full_shape", "simplification", "ascii_punct"];
+pub const APPLICABLE_OPTIONS: &[&str] = &[
+    "ascii_mode",
+    "full_shape",
+    "simplification",
+    // rime-ice 的简繁开关叫 traditionalization（开 = 繁体），
+    // 与 squirrel 传统的 simplification 不是同一个键，两个都留着以便兼容不同方案
+    "traditionalization",
+    "ascii_punct",
+];
 
 /// 持久化选项存储：新会话创建时应用初值；文件 <user_data_dir>/heng_options.yaml。
 /// 手写平面 YAML（仅 bool 键值），不引新依赖。
