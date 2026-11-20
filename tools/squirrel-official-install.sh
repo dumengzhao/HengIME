@@ -12,7 +12,7 @@ APP_SRC="${APP_SRC:-/Users/dmz/Library/Developer/Xcode/DerivedData/Squirrel-gbsd
 APP_DST="/Library/Input Methods/Squirrel.app"
 STAGING="/tmp/Squirrel-brand-stage.app"
 ENTITLEMENTS="${HENG_ENTITLEMENTS:-/tmp/squirrel.entitlements}"
-[ -f "$ENTITLEMENTS" ] || ENTITLEMENTS="$(dirname "$0")/../third_party/src/squirrel/resources/Squirrel.entitlements"
+[ -f "$ENTITLEMENTS" ] || ENTITLEMENTS="$(dirname "$0")/../platforms/macos/resources/Squirrel.entitlements"
 PB=/usr/libexec/PlistBuddy
 
 LSR=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister

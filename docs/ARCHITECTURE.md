@@ -306,13 +306,13 @@ docs/                文档
 |---|---|---|---|---|
 | Windows | TSF | `third_party/src/weasel`（改动在 `patches/windows/`） | core 自绘（Win32 分层窗口） | 可用 |
 | Linux | Fcitx5 | `shells/linux/fcitx5`（310 行） | core 自绘（X11） | 可用 |
-| macOS | IMK | `third_party/src/squirrel`（改动在 `patches/macos/`） | core 自绘（NSPanel 贴帧） | 可用 |
+| macOS | IMK | `platforms/macos`（源码入库） | core 自绘（NSPanel 贴帧） | 可用 |
 | Android | IMS | 未建 | 原生 View | 未开始 |
 | iOS | Custom Keyboard Extension | 未建 | 原生 UIKit | 未开始 |
 | 鸿蒙 | IME Kit | 未建 | 原生 ArkUI | 未开始 |
 
-Windows 与 macOS 的外壳是**上游 C++ 改造**，源码在 gitignored 目录里，
-改动靠 `patches/windows/*.patch` 与 `patches/macos/*.patch` 固化。**改完必须重生成补丁**，否则改动不入库。
+Windows 外壳是**上游 C++ 改造**，源码在 gitignored 目录里，改动靠 `patches/windows/*.patch` 固化。
+macOS 外壳（Squirrel 改造）已入库在 `platforms/macos/`，直接改、直接提交，不再走补丁。
 Linux 外壳为自研 fcitx5 addon；Android / iOS / 鸿蒙三端外壳尚未建目录，
 计划均自研（Android 参考 Trime 的 IMS 骨架但数据源换成内嵌 heng_core，
 iOS 走 Custom Keyboard Extension 直链 C 静态库，鸿蒙走 NAPI）。

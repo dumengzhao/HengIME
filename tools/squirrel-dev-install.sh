@@ -53,7 +53,9 @@
 set -e
 # 必须指向本仓 -derivedDataPath build 的产物。曾指向 Xcode DerivedData，
 # 那里是陈旧构建 → 「编译成功但装上去的包没变化」，白排查半天。
-SQUIRREL_DIR="$(cd "$(dirname "$0")/../third_party/src/squirrel" && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# macOS 外壳源码已入库（platforms/macos），不再是 third_party 下的上游树
+SQUIRREL_DIR="$REPO_ROOT/platforms/macos"
 APP_SRC="${APP_SRC:-$SQUIRREL_DIR/build/Build/Products/Debug/Squirrel.app}"
 APP_DST="$HOME/Library/Input Methods/SquirrelDev.app"
 STAGING="/tmp/SquirrelDev-stage.app"
@@ -108,12 +110,12 @@ lsregister_count() {   # $1 = bundle ID
 }
 
 # 1. staging：原地 ditto 覆盖（不挪旧包、不留备份，见文件头「关键约束 5」）
-[ -d "$APP_SRC" ] || { echo "❌找不到构建产物：$APP_SRC"; echo "   先编译：cd third_party/src/squirrel && make debug"; exit 1; }
+[ -d "$APP_SRC" ] || { echo "❌找不到构建产物：$APP_SRC"; echo "   先编译：cd platforms/macos && make debug"; exit 1; }
 
 # core 的 dylib 会被拷进 app 的 Frameworks/。若 core 改过而这里没同步，
 # 链接期会报「symbol(s) not found for architecture arm64」——
 # 看起来像 Swift 写错，其实是拿到旧的 dylib。改 core 后必须先同步。
-CORE_SRC="$(cd "$SQUIRREL_DIR/../../.." && pwd)/target/release/libheng_core.dylib"
+CORE_SRC="$REPO_ROOT/target/release/libheng_core.dylib"
 CORE_DST="$SQUIRREL_DIR/lib/libheng_core.dylib"
 if [ ! -f "$CORE_SRC" ]; then
   echo "❌找不到 core：$CORE_SRC"; echo "   先编译：cargo build --release -p heng-core"; exit 1
@@ -122,7 +124,7 @@ fi
 # 走 HEADER_SEARCH_PATHS 指向 librime/include —— 那是 core/include/heng.h 的**副本**。
 # 只同步 dylib 不同步头文件时，新加的 heng_* 函数在 Swift 侧报
 # 「cannot find 'xxx' in scope」，而 dylib 里其实已经有实现了，最难查。
-HDR_SRC="$(cd "$SQUIRREL_DIR/../../.." && pwd)/core/include/heng.h"
+HDR_SRC="$REPO_ROOT/core/include/heng.h"
 HDR_DST="$SQUIRREL_DIR/librime/include/heng.h"
 CORE_TOUCHED=0
 if [ -f "$HDR_SRC" ] && [ "$HDR_SRC" -nt "$HDR_DST" ]; then
@@ -149,9 +151,8 @@ fi
 /usr/bin/ditto "$APP_SRC" "$STAGING"
 
 # Rime 方案补丁：仓库里的 patches/rime/rime-ice.schema.yaml 才是真相源，
-# 但 Xcode 从 third_party/src/squirrel/data/plum/ 拷（且该目录被 gitignore）。
+# 但 Xcode 从 platforms/macos/data/plum/ 拷（且该目录被 gitignore）。
 # 这里在签名前把补丁版同步进 staging，避免"改了补丁但装上去的是上游旧版"。
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -f "$REPO_ROOT/runtime/rime-shared/rime_ice.schema.yaml" ]; then
   /usr/bin/ditto \
     "$REPO_ROOT/runtime/rime-shared/rime_ice.schema.yaml" \
@@ -277,7 +278,7 @@ fi
 # ad-hoc 的 designated requirement 锚的是 CDHash，每次编译都变，
 # 系统会把新版当成另一个 app，「输入监控 / 辅助功能」授权随之失效，
 # CGEventTap 直接拿不到权限。固定证书的 DR 只锚证书指纹，稳定。
-ENTITLEMENTS="${HENG_ENTITLEMENTS:-$(dirname "$0")/../third_party/src/squirrel/resources/Squirrel.entitlements}"
+ENTITLEMENTS="${HENG_ENTITLEMENTS:-$REPO_ROOT/platforms/macos/resources/Squirrel.entitlements}"
 SIGN_IDENTITY="${HENG_SIGN_IDENTITY:-ClipSync Dev}"
 if [[ "$(security find-identity -v -p codesigning 2>/dev/null | grep -cF "$SIGN_IDENTITY")" -gt 0 ]]; then
   codesign --force --deep -s "$SIGN_IDENTITY" --entitlements "$ENTITLEMENTS" "$STAGING" 2>/dev/null \

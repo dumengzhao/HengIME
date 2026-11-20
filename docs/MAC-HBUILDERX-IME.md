@@ -45,7 +45,7 @@ HBuilderX 的 C++ 编辑器在上述三项上都有已知缺失记录（对应�
 
 ## 5. HengIME / squirrel 代码坐标
 
-squirrel 源码：`third_party/src/squirrel/sources/`
+squirrel 源码：`platforms/macos/sources/`
 
 - `SquirrelInputController.swift:32-124` `handle(_:client:)`：IMK 按键入口；L97-99 放行 Command 快捷键
 - `SquirrelInputController.swift:48-51`：bundleId 变化时触发 per-app 配置
@@ -56,7 +56,7 @@ squirrel 源码：`third_party/src/squirrel/sources/`
 - `SquirrelInputController.swift:586-606` `show(preedit:)`：L605 为 setMarkedText 调用点
 - `SquirrelInputController.swift:609-619` `showPanel()`：L612 经 `attributes(forCharacterIndex:0, lineHeightRectangle:)` 取光标矩形定位候选窗
 
-heng 补丁：`patches/macos/squirrel-heng.patch`
+heng 侧实现：`platforms/macos/sources/HengWindowRenderer.swift`（源码已入库）
 
 - 新增 `HengWindowRenderer.swift`（patch L155 起，595 行）：候选窗/字母区为 `.nonactivatingPanel` + `CGShieldingWindowLevel`（L482-494），不抢焦点；core 只出帧、窗口操作回主线程执行；诊断日志落盘 `~/Library/Logs/HengIME/window.log`（L245-263）
 - InputController 改动：`observeCandidateClick()`（听 core `hengCoreCommitReady` 通知完成点击提交）、caretAnchor 屏幕坐标锚点、`heng_ui_hide` 防残影

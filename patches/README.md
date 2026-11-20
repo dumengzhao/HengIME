@@ -8,15 +8,16 @@
 | `macos/` | `squirrel-heng.patch` |
 | `rime/` | `rime-default.yaml` / `rime-weasel.yaml` / `rime-ice.schema.yaml`（雾凇基础上叠加的本项目改动，跨平台共用） |
 
-两端补丁形态不同：weasel 已在主仓库跑通重新生成与验证脚本，squirrel 目前是一次性
-产出，重生成需在 mac 上手工执行（见文末）。
+Windows 的 weasel 补丁已在主仓库跑通重新生成与验证脚本。
+macOS 的 Squirrel 改造**已不再走补丁**——源码直接入库在 `platforms/macos/`。
 
 ## 为什么需要补丁
 
-`third_party/src/weasel/` 与 `third_party/src/squirrel/` 都是 gitignored 的上游源码树。
-改动只存在于本地工作树，不入库就等于不存在——换机器重拉会全部丢失。
+`third_party/src/weasel/` 是 gitignored 的上游源码树。改动只存在于本地工作树，
+不入库就等于不存在——换机器重拉会全部丢失。
 
 Linux 外壳不走这条路径：`shells/linux/fcitx5/` 是自研代码，直接入库。
+macOS 外壳同理：`platforms/macos/` 已入库，直接改、直接提交。
 
 ## weasel 基线
 
@@ -150,25 +151,11 @@ squirrel 的 `.gitignore` 已排除以下路径，它们是构建产物或运行
 | `librime/include/heng.h` | `core/include/heng.h` |
 | `Frameworks/`、`build/`、`data/opencc/`、`data/plum/`、`package/`、`download/` | 构建与打包中间物 |
 
-### 重新生成（mac）
+### macOS：不再生成补丁
 
-改动只在 mac 那台机器上，Windows 侧的 `third_party/src/squirrel` 是干净的上游树。
-在 mac 上执行：
+Squirrel 改造的源码、Xcode 工程、资源与 OpenCC 数据都在 `platforms/macos/`，
+随主仓一起提交。改 macOS 外壳就是改主仓文件，`git add` / `git commit` 即可，
+不存在"忘记重生成补丁"的问题。
 
-```bash
-cd <衡仓库>/third_party/src/squirrel
-
-# 新增文件先标intent-to-add，否则不进 diff
-git add -N <新增文件>
-
-# --text 必需（.strings/.plist/.xcassets 会被判二进制）；不能加 --binary
-git diff HEAD --text > /tmp/squirrel-heng.patch
-
-# 自检
-grep -c '^diff --git' /tmp/squirrel-heng.patch   # 文件数
-grep -n '\^@' /tmp/squirrel-heng.patch           # 必须无输出
-```
-
-验证方式与 weasel 相同：在 `6ad0e45b` 的干净基线树上 `git apply`，再比对文件内容
-md5。mac 工作树不在 Windows 侧，无法用 `verify_patch_result.py` 直接比对，
-需在 mac 上按文件逐个 `md5 -q` 对照。
+`librime/`、`lib/`、`Frameworks/`、`data/plum/`、`build/` 这些构建产物仍不进库，
+由 `tools/squirrel-dev-install.sh` 与 `make data` 在本地生成。

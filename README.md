@@ -38,7 +38,7 @@ librime + 词库（雾凇拼音）           现成 ×0
 |---|---|---|---|---|
 | Windows | TSF | Weasel 改造（服务进程 `WeaselServer.exe`） | core 自绘（Win32 分层窗口） | **可用** |
 | Linux | Fcitx5 | fcitx5 addon + heng_blue 主题 | core 自绘（X11/XWayland） | **可用** |
-| macOS | IMK | Squirrel 改造（`third_party/src/squirrel`） | core 自绘（NSPanel 贴帧） | **可用** |
+| macOS | IMK | Squirrel 改造（`platforms/macos`） | core 自绘（NSPanel 贴帧） | **可用** |
 | Android | IMS | 自研，Trime 参考 | 宿主原生 View | 未开始 |
 | iOS | Custom Keyboard Extension | 自研（UIKit） | 宿主原生 UIKit | 未开始 |
 | 鸿蒙 | IME Kit | 自研（librime 无鸿蒙前端） | 宿主原生 ArkUI | 未开始 |
@@ -79,15 +79,16 @@ HengIME/
 ├── shells/                  自研外壳
 │   └── linux/fcitx5/          fcitx5 addon
 │
+├── platforms/
+│   └── macos/               macOS：Squirrel 改造（源码入库，含 Xcode 工程）
+│
 ├── third_party/src/         上游改造型外壳的源码（gitignored）
 │   ├── weasel/                 Windows：Weasel 改造，改动固化在 patches/windows/
-│   ├── squirrel/               macOS：Squirrel 改造
 │   ├── fcitx5-rime/ trime/     参考实现
 │
 ├── config-center/           配置真源（shared/heng.yaml）与分发脚本
 ├── patches/                 按平台分组的外壳补丁与配置
 │   ├── windows/             weasel 补丁 + heng.def + 编译配置（props/env.bat/jam）
-│   ├── macos/               squirrel 补丁
 │   └── rime/                雾凇基础上叠加的 rime yaml
 ├── tools/
 │   ├── heng-cli/              调试 CLI
